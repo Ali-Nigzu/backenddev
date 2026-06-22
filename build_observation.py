@@ -17,5 +17,7 @@ def build_observation(detection: dict, embedding: dict) -> dict:
         "detection_id": detection["detection_id"],
         "timestamp": float(detection["timestamp"]),
         "center": center,
+        "bbox": detection["bbox"],
+        "confidence": float(detection["confidence"]),
         "embedding": embedding["embedding"]
     }
