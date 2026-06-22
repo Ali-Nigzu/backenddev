@@ -34,6 +34,8 @@ def main():
     embedder = embed()
     tracker = TrackV2(TrackV2Config())
 
+    runtime_to_display_id = {}
+    next_display_id = 1
     previous_assignment_by_detection = {}
     previous_frame_assignments = []
     stable_assignment_count = 0
@@ -70,6 +72,16 @@ def main():
 
         tracks, assignment_map = tracker.update(observations_by_ts)
 
+        for runtime_track_id in assignment_map.values():
+            if runtime_track_id not in runtime_to_display_id:
+                runtime_to_display_id[runtime_track_id] = next_display_id
+                next_display_id += 1
+
+        display_assignment_map = {
+            detection_id: runtime_to_display_id[runtime_track_id]
+            for detection_id, runtime_track_id in assignment_map.items()
+        }
+
         current_frame_assignments = []
         for obs in observations_by_ts[timestamp]:
             runtime_track_id = assignment_map.get(obs["detection_id"])
@@ -80,6 +92,7 @@ def main():
                 "detection_id": obs["detection_id"],
                 "center": obs["center"],
                 "runtime_track_id": runtime_track_id,
+                "display_id": runtime_to_display_id[runtime_track_id],
             })
 
         for detection_id, runtime_track_id in assignment_map.items():
@@ -93,7 +106,8 @@ def main():
                     print(
                         "POTENTIAL ID SWITCH DETECTED "
                         f"frame={frame_idx} detection_id={detection_id} "
-                        f"from={previous_track_id} to={runtime_track_id}"
+                        f"from=Track {runtime_to_display_id[previous_track_id]} "
+                        f"to=Track {runtime_to_display_id[runtime_track_id]}"
                     )
             previous_assignment_by_detection[detection_id] = runtime_track_id
 
@@ -125,8 +139,8 @@ def main():
                     "POTENTIAL ID SWITCH DETECTED "
                     f"frame={frame_idx} previous_detection_id={nearest_previous['detection_id']} "
                     f"current_detection_id={current['detection_id']} "
-                    f"from={nearest_previous['runtime_track_id']} "
-                    f"to={current['runtime_track_id']}"
+                    f"from=Track {nearest_previous['display_id']} "
+                    f"to=Track {current['display_id']}"
                 )
 
         active_count = sum(1 for track in tracks if track.state == "ACTIVE")
@@ -140,12 +154,16 @@ def main():
         )
 
         if PRINT_ASSIGNMENT_MAP:
-            print(f"assignment_map={assignment_map}")
+            print(f"assignment_map={display_assignment_map}")
 
         for det in detections:
             x1, y1, x2, y2 = det["bbox"]
             runtime_track_id = assignment_map.get(det["detection_id"], "?")
-            label = f"T{runtime_track_id[:8]}" if runtime_track_id != "?" else "T?"
+            label = (
+                f"Track {runtime_to_display_id[runtime_track_id]}"
+                if runtime_track_id != "?"
+                else "Track ?"
+            )
 
             cv2.rectangle(
                 frame,
