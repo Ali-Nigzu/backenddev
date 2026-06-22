@@ -21,3 +21,7 @@ class RuntimeTrackV2:
     center_history: List[List[float]] = field(default_factory=list)
 
     last_embedding: Optional[Any] = None
+    closed_timestamp: Optional[float] = None
+    created_frame_index: int = 0
+    last_matched_frame_index: int = 0
+    last_unmatched_frame_index: Optional[int] = None

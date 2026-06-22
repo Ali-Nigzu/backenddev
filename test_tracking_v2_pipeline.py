@@ -12,6 +12,79 @@ OUTPUT_PATH = "trackv2_output.mp4"
 PRINT_ASSIGNMENT_MAP = False
 
 
+def scenario_observation(detection_id, timestamp, center):
+    return {
+        "detection_id": detection_id,
+        "timestamp": timestamp,
+        "center": center,
+        "bbox": [center[0] - 10, center[1] - 20, center[0] + 10, center[1] + 20],
+        "confidence": 0.9,
+        "embedding": [1.0, 0.0],
+    }
+
+
+def run_trackv2_scenario_tests():
+    scenario_config = TrackV2Config(
+        tentative_hits_to_activate=1,
+        unmatched_detection_buffer_frames=1,
+        max_misses_active=2,
+        max_misses_tentative=1,
+        min_track_lifetime_sec=0.0,
+    )
+
+    doorway_tracker = TrackV2(scenario_config)
+    doorway_ids = []
+    for frame_idx in range(5):
+        _, assignments = doorway_tracker.update({
+            frame_idx * 0.1: [
+                scenario_observation(
+                    f"doorway-{frame_idx}",
+                    frame_idx * 0.1,
+                    [100 + frame_idx * 6, 100 + ((-1) ** frame_idx) * 3],
+                )
+            ]
+        })
+        doorway_ids.extend(assignments.values())
+    assert len(set(doorway_ids)) == 1, "Doorway continuity scenario fragmented one person"
+
+    reentry_tracker = TrackV2(scenario_config)
+    _, first_assignment = reentry_tracker.update({
+        0.0: [scenario_observation("exit-0", 0.0, [50, 50])]
+    })
+    first_track_id = next(iter(first_assignment.values()))
+    reentry_tracker.update({0.1: []})
+    reentry_tracker.update({0.2: []})
+    reentry_tracker.update({3.5: []})
+    _, second_assignment = reentry_tracker.update({
+        3.6: [scenario_observation("exit-1", 3.6, [50, 50])]
+    })
+    second_track_id = next(iter(second_assignment.values()))
+    assert first_track_id != second_track_id, "Exit + re-entry scenario reused a closed track"
+
+    single_tracker = TrackV2(scenario_config)
+    single_ids = []
+    for frame_idx in range(6):
+        _, assignments = single_tracker.update({
+            frame_idx * 0.1: [
+                scenario_observation(f"single-{frame_idx}", frame_idx * 0.1, [200 + frame_idx, 100])
+            ]
+        })
+        single_ids.extend(assignments.values())
+    assert len(set(single_ids)) == 1, "Single detection stability scenario created multiple tracks"
+
+    jitter_tracker = TrackV2(scenario_config)
+    jitter_ids = []
+    jitter_centers = [[300, 200], [302, 199], [299, 201], [303, 200], [301, 198]]
+    for frame_idx, center in enumerate(jitter_centers):
+        _, assignments = jitter_tracker.update({
+            frame_idx * 0.1: [scenario_observation(f"jitter-{frame_idx}", frame_idx * 0.1, center)]
+        })
+        jitter_ids.extend(assignments.values())
+    assert len(set(jitter_ids)) == 1, "Jitter resistance scenario fragmented one track"
+
+    print("TRACKV2 SCENARIO TESTS PASSED")
+
+
 def main():
     cap = cv2.VideoCapture(VIDEO_PATH)
     if not cap.isOpened():
@@ -41,11 +114,20 @@ def main():
     stable_assignment_count = 0
     comparable_assignment_count = 0
     identity_switch_count = 0
+    track_fragmentation_count = 0
+    track_rebirth_violations = 0
     frame_idx = 0
 
     print("\n========================")
     print("RUNNING TRACKV2 PIPELINE")
     print("========================\n")
+    print("TRACKV2 METHOD LOG:")
+    print("- enforced strict motion-first continuity")
+    print("- disabled bbox influence on identity decisions")
+    print("- added 3-frame unmatched buffering before birth")
+    print("- added 3-second cooldown for closed tracks")
+    print("- added forced continuity priority over track creation")
+    run_trackv2_scenario_tests()
 
     while True:
         ret, frame = cap.read()
@@ -71,6 +153,19 @@ def main():
             observations_by_ts[timestamp].append(obs)
 
         tracks, assignment_map = tracker.update(observations_by_ts)
+        closed_tracks = {
+            track.runtime_track_id: track
+            for track in tracks
+            if track.state == "CLOSED" and track.closed_timestamp is not None
+        }
+
+        for runtime_track_id in assignment_map.values():
+            closed_track = closed_tracks.get(runtime_track_id)
+            if closed_track is None:
+                continue
+
+            if timestamp - closed_track.closed_timestamp < tracker.config.closed_track_cooldown_sec:
+                track_rebirth_violations += 1
 
         for runtime_track_id in assignment_map.values():
             if runtime_track_id not in runtime_to_display_id:
@@ -103,6 +198,7 @@ def main():
                     stable_assignment_count += 1
                 else:
                     identity_switch_count += 1
+                    track_fragmentation_count += 1
                     print(
                         "POTENTIAL ID SWITCH DETECTED "
                         f"frame={frame_idx} detection_id={detection_id} "
@@ -135,6 +231,7 @@ def main():
                 stable_assignment_count += 1
             else:
                 identity_switch_count += 1
+                track_fragmentation_count += 1
                 print(
                     "POTENTIAL ID SWITCH DETECTED "
                     f"frame={frame_idx} previous_detection_id={nearest_previous['detection_id']} "
@@ -150,7 +247,10 @@ def main():
         print(
             f"frame={frame_idx} active={active_count} tentative={tentative_count} "
             f"closed={closed_count} new_tracks={tracker.last_new_tracks_created} "
-            f"assignments={len(assignment_map)}"
+            f"assignments={len(assignment_map)} "
+            f"tracks_continued={tracker.last_debug_report['tracks_continued']} "
+            f"tracks_rejected_by_motion_gate={tracker.last_debug_report['tracks_rejected_by_motion_gate']} "
+            f"forced_continuations={tracker.last_debug_report['forced_continuations']}"
         )
 
         if PRINT_ASSIGNMENT_MAP:
@@ -201,6 +301,9 @@ def main():
     print(f"TOTAL TRACKS: {len(tracker.tracks)}")
     print(f"POTENTIAL ID SWITCHES: {identity_switch_count}")
     print(f"TRACK STABILITY SCORE: {stability_score:.2f}%")
+    print(f"TRACK CONTINUITY SCORE: {stability_score:.2f}%")
+    print(f"TRACK FRAGMENTATION COUNT: {track_fragmentation_count}")
+    print(f"TRACK REBIRTH VIOLATIONS: {track_rebirth_violations}")
 
 
 if __name__ == "__main__":

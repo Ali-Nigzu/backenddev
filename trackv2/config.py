@@ -12,3 +12,8 @@ class TrackV2Config:
     embedding_tie_threshold: float = 0.05
     motion_ambiguity_delta: float = 8.0
     velocity_smoothing: float = 0.6
+    closed_track_cooldown_sec: float = 3.0
+    unmatched_detection_buffer_frames: int = 3
+    min_track_lifetime_sec: float = 0.7
+    max_association_gap_frames: int = 2
+    strict_motion_gate_multiplier: float = 1.2
