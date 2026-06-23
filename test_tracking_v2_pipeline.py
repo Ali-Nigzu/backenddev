@@ -143,6 +143,7 @@ def main():
 
         detections = detect(frame_packet)
         observations_by_ts = defaultdict(list)
+        observations_by_ts.setdefault(timestamp, [])
 
         for det in detections:
             emb_result = embedder.embed({
