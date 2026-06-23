@@ -13,6 +13,7 @@ class TrackV2:
         self.tracks: List[RuntimeTrackV2] = []
         self.pending_births: List[Dict] = []
         self.frame_index = 0
+        self.last_update_timestamp: float | None = None
         self.last_new_tracks_created = 0
         self.last_debug_report = self._empty_debug_report()
 
@@ -82,13 +83,26 @@ class TrackV2:
             if self.frame_index - pending["last_seen_frame"] <= self.config.unmatched_detection_buffer_frames
         ]
 
-    def update(self, observations_by_ts: Dict[float, List[Dict]]) -> Tuple[List[RuntimeTrackV2], Dict[str, str]]:
+    def update(
+        self,
+        observations_by_ts: Dict[float, List[Dict]],
+        current_timestamp: float | None = None,
+    ) -> Tuple[List[RuntimeTrackV2], Dict[str, str]]:
         assignment_map: Dict[str, str] = {}
         self.last_new_tracks_created = 0
         self.last_debug_report = self._empty_debug_report()
 
-        for timestamp in sorted(observations_by_ts.keys()):
-            observations = observations_by_ts[timestamp]
+        timestamps = sorted(observations_by_ts.keys())
+        if not timestamps:
+            if current_timestamp is not None:
+                timestamps = [float(current_timestamp)]
+            elif self.last_update_timestamp is not None:
+                timestamps = [self.last_update_timestamp + 1.0]
+            else:
+                timestamps = [0.0]
+
+        for timestamp in timestamps:
+            observations = observations_by_ts.get(timestamp, [])
             eligible_tracks = matchable_tracks(self.tracks)
 
             matches, unmatched_track_indices, unmatched_observation_indices, gated_observation_indices = assign_matches(
@@ -163,6 +177,7 @@ class TrackV2:
                 assignment_map[observation["detection_id"]] = track.runtime_track_id
 
             self._prune_pending_births()
+            self.last_update_timestamp = float(timestamp)
             self.frame_index += 1
 
         return list(self.tracks), assignment_map
