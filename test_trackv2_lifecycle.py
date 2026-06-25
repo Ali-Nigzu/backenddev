@@ -92,3 +92,50 @@ def test_continuous_visibility_keeps_runtime_id_stable():
     assert len(set(observed_runtime_ids)) == 1
     assert tracker.tracks[0].state == "ACTIVE"
     assert tracker.tracks[0].miss_count == 0
+
+
+def test_default_config_suppresses_birth_for_brief_plausible_instability():
+    tracker = TrackV2()
+    assignments = {}
+    for frame_idx in range(4):
+        timestamp = frame_idx * 0.1
+        _, assignments = tracker.update({
+            timestamp: [observation(f"initial-{frame_idx}", timestamp, center=(100 + frame_idx, 100))]
+        })
+    initial_track_id = next(iter(assignments.values()))
+
+    # A short-lived detector jump that remains plausible under the continuity
+    # suppression gate should not immediately birth a new track.
+    _, unstable_assignment = tracker.update({0.4: [observation("unstable", 0.4, center=(165, 100))]})
+    assert unstable_assignment == {}
+    assert len(tracker.tracks) == 1
+
+    _, recovered_assignment = tracker.update({0.5: [observation("recovered", 0.5, center=(115, 100))]})
+    assert recovered_assignment["recovered"] == initial_track_id
+    assert len(tracker.tracks) == 1
+
+
+def test_default_config_still_creates_new_track_after_genuine_reentry():
+    tracker = TrackV2()
+    assignments = {}
+    for frame_idx in range(4):
+        timestamp = frame_idx * 0.1
+        _, assignments = tracker.update({
+            timestamp: [observation(f"initial-{frame_idx}", timestamp, center=(100 + frame_idx, 100))]
+        })
+    initial_track_id = next(iter(assignments.values()))
+
+    for frame_idx in range(8):
+        tracker.update({}, current_timestamp=0.4 + frame_idx * 0.1)
+
+    assert tracker.tracks[0].state == "CLOSED"
+
+    assignments = {}
+    for frame_idx in range(4):
+        _, assignments = tracker.update({5.0 + frame_idx * 0.1: [
+            observation(f"return-{frame_idx}", 5.0 + frame_idx * 0.1, center=(100 + frame_idx, 100))
+        ]})
+
+    assert assignments
+    assert next(iter(assignments.values())) != initial_track_id
+    assert len(tracker.tracks) == 2
