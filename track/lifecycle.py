@@ -1,8 +1,8 @@
 import uuid
 from typing import Dict, Iterable, List, Set
 
-from trackv2.config import TrackV2Config
-from trackv2.models import RuntimeTrackV2
+from track.config import TrackV2Config
+from track.models import RuntimeTrackV2
 
 TENTATIVE = "TENTATIVE"
 ACTIVE = "ACTIVE"

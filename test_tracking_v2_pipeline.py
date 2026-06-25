@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from collections import defaultdict
 
-from trackv2 import TrackV2, TrackV2Config
+from track import TrackV2, TrackV2Config
 
 
 VIDEO_PATH = "videoplayback.mp4"

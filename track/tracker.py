@@ -1,10 +1,10 @@
 from typing import Dict, List, Tuple
 
-from trackv2.config import TrackV2Config
-from trackv2.lifecycle import create_track, close_stale_tracks, matchable_tracks, promote_if_ready
-from trackv2.matching import assign_matches
-from trackv2.models import RuntimeTrackV2
-from trackv2.motion import compute_velocity, distance, predict_center
+from track.config import TrackV2Config
+from track.lifecycle import create_track, close_stale_tracks, matchable_tracks, promote_if_ready
+from track.matching import assign_matches
+from track.models import RuntimeTrackV2
+from track.motion import compute_velocity, distance, predict_center
 
 
 class TrackV2:

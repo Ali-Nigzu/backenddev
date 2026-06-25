@@ -2,9 +2,9 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
-from trackv2.config import TrackV2Config
-from trackv2.models import RuntimeTrackV2
-from trackv2.motion import distance, predict_center
+from track.config import TrackV2Config
+from track.models import RuntimeTrackV2
+from track.motion import distance, predict_center
 
 
 @dataclass(frozen=True)
