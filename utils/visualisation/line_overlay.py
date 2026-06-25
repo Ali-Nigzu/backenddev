@@ -13,6 +13,14 @@ POINT_B_COLOR_BGR = (255, 0, 0)
 LINE_THICKNESS = 2
 POINT_RADIUS = 6
 
+INPUT_PATH = "/workspaces/backenddev/videoplayback.mp4"
+OUTPUT_PATH = "/workspaces/backenddev/line_debug.png"
+
+CARD9_SYNTHETIC_LINE_CONFIG = {
+    "point_a": [0.0, -10.0],
+    "point_b": [0.0, 10.0],
+}
+
 
 def _point_xy(point: Sequence[float], name: str) -> tuple[float, float]:
     if len(point) != 2:
@@ -155,3 +163,12 @@ def render_line_overlay(
             raise IOError(f"Failed to write line overlay image: {output_path}")
 
     return frame
+
+
+if __name__ == "__main__":
+    frame = render_line_overlay(
+        INPUT_PATH,
+        CARD9_SYNTHETIC_LINE_CONFIG,
+        OUTPUT_PATH,
+    )
+    print(f"saved -> {OUTPUT_PATH}")
