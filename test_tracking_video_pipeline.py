@@ -1,19 +1,19 @@
-import cv2
-import numpy as np
+from pathlib import Path
 from collections import defaultdict
+
+import cv2
 
 from detection.detection_engine import detect
 from embed.embed_engine import embed
 from build_observation import build_observation
 
-from track.tracking_engine import track
-from track.contracts import TrackerConfig
+from track import TrackV2, TrackV2Config
 
 
 # -------------------------
 # INIT VIDEO
 # -------------------------
-video_path = "/workspaces/backenddev/videoplayback.mp4"
+video_path = "videoplayback.mp4"
 
 cap = cv2.VideoCapture(video_path)
 
@@ -27,7 +27,9 @@ if fps <= 0 or fps > 120:
 frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-out_path = "/workspaces/backenddev/annotated_output.mp4"
+out_path = "output/tracking_output.mp4"
+
+Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
 writer = cv2.VideoWriter(
     out_path,
@@ -42,13 +44,7 @@ writer = cv2.VideoWriter(
 # -------------------------
 embedder = embed()
 
-config = TrackerConfig(
-    embedding_weight=0.10,
-    spatial_weight=0.90,
-    match_threshold=0.30,
-    max_distance=100,
-    spatial_alpha=4.0
-)
+tracker = TrackV2(TrackV2Config())
 
 active_tracks = []
 short_track_ids = {}
@@ -105,11 +101,8 @@ while True:
     # -------------------------
     # TRACKING
     # -------------------------
-    all_tracks, active_tracks = track(
-        observations_by_ts=observations_by_ts,
-        active_tracks=active_tracks,
-        config=config
-    )
+    all_tracks, assignment_map = tracker.update(observations_by_ts)
+    active_tracks = [t for t in all_tracks if t.state != "CLOSED"]
 
     # -------------------------
     # BUILD FRAME-LOCAL MAP (FIXED)

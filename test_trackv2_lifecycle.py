@@ -1,4 +1,4 @@
-from trackv2 import TrackV2, TrackV2Config
+from track import TrackV2, TrackV2Config
 
 
 def observation(detection_id, timestamp, center=(100.0, 100.0)):
