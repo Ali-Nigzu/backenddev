@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from collections import defaultdict
 
+from events import detect_events
 from track import TrackV2, TrackV2Config
 
 
@@ -16,6 +17,10 @@ CONTACT_TILE_SIZE = 96
 CONTACT_HEADER_HEIGHT = 120
 CONTACT_PADDING = 8
 PRINT_ASSIGNMENT_MAP = False
+CARD9_SYNTHETIC_LINE_CONFIG = {
+    "point_a": [0.0, -10.0],
+    "point_b": [0.0, 10.0],
+}
 
 
 def scenario_observation(detection_id, timestamp, center):
@@ -179,6 +184,21 @@ def write_contact_sheets(output_dir, track_crops):
     return written_paths
 
 
+def print_event_table(events, title="EVENT TABLE (Card 9)"):
+    print(title)
+    if not events:
+        print("- none")
+        return
+
+    for event in events:
+        print(
+            f"[EVENT] track_id={event['runtime_track_id']} "
+            f"type={event['event_type']} "
+            f"direction={event['direction']} "
+            f"timestamp={event['timestamp']}"
+        )
+
+
 def run_contact_sheet_self_tests():
     with tempfile.TemporaryDirectory() as tmp_dir:
         test_output_dir = Path(tmp_dir) / "output"
@@ -291,6 +311,95 @@ def run_trackv2_scenario_tests():
     print("TRACKV2 SCENARIO TESTS PASSED")
 
 
+def _event_test_tracker():
+    return TrackV2(TrackV2Config(
+        max_speed_px_per_sec=10000.0,
+        base_motion_gate=10000.0,
+        tentative_hits_to_activate=1,
+        unmatched_detection_buffer_frames=1,
+        max_misses_active=2,
+        max_misses_tentative=1,
+        min_track_lifetime_sec=0.0,
+    ))
+
+
+def _run_event_trajectory(points, detection_prefix="event"):
+    tracker = _event_test_tracker()
+    for frame_idx, center in enumerate(points):
+        timestamp = frame_idx * 0.1
+        tracker.update({
+            timestamp: [
+                scenario_observation(
+                    f"{detection_prefix}-{frame_idx}",
+                    timestamp,
+                    center,
+                )
+            ]
+        })
+    return tracker.tracks
+
+
+def run_card9_event_scenario_tests():
+    crossing_tracks = _run_event_trajectory(
+        [[-10, 0], [-5, 0], [5, 0], [10, 0]],
+        "crossing",
+    )
+    crossing_events = detect_events(crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    assert len(crossing_events) == 1, "Card 9 crossing scenario did not emit exactly one event"
+    assert crossing_events[0]["event_type"] == "ENTRY", "Card 9 crossing scenario emitted wrong event type"
+    assert crossing_events[0]["direction"] == "IN", "Card 9 crossing scenario emitted wrong direction"
+    assert crossing_events[0]["runtime_track_id"] == crossing_tracks[0].runtime_track_id
+
+    non_crossing_tracks = _run_event_trajectory(
+        [[10, -10], [10, 0], [10, 10], [10, 20]],
+        "parallel",
+    )
+    assert detect_events(non_crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
+        "Card 9 no-crossing scenario emitted an event"
+    )
+
+    oscillation_tracks = _run_event_trajectory(
+        [[-10, 0], [5, 0], [-10, 0]],
+        "oscillation",
+    )
+    assert detect_events(oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
+        "Card 9 oscillation scenario emitted an event"
+    )
+
+    multi_tracker = _event_test_tracker()
+    multi_trajectories = {
+        "crossing": [[-10, 0], [-5, 0], [5, 0], [10, 0]],
+        "right-side": [[20, 20], [20, 25], [20, 30], [20, 35]],
+        "left-side": [[-20, -20], [-20, -25], [-20, -30], [-20, -35]],
+    }
+    assigned_ids_by_prefix = defaultdict(set)
+    for frame_idx in range(4):
+        timestamp = frame_idx * 0.1
+        observations = [
+            scenario_observation(prefix, timestamp, points[frame_idx])
+            for prefix, points in multi_trajectories.items()
+        ]
+        _, assignments = multi_tracker.update({timestamp: observations})
+        for detection_id, runtime_track_id in assignments.items():
+            assigned_ids_by_prefix[detection_id].add(runtime_track_id)
+
+    multi_events = detect_events(multi_tracker.tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    crossing_track_id = next(iter(assigned_ids_by_prefix["crossing"]))
+    assert len(multi_events) == 1, "Card 9 multi-track scenario emitted wrong event count"
+    assert multi_events[0]["runtime_track_id"] == crossing_track_id, (
+        "Card 9 multi-track scenario emitted an event for the wrong track"
+    )
+
+    deterministic_once = detect_events(multi_tracker.tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    deterministic_twice = detect_events(multi_tracker.tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    deterministic_reversed = detect_events(list(reversed(multi_tracker.tracks)), CARD9_SYNTHETIC_LINE_CONFIG)
+    assert deterministic_once == deterministic_twice == deterministic_reversed, (
+        "Card 9 event detection is not deterministic"
+    )
+
+    print("CARD9 EVENT SCENARIO TESTS PASSED")
+
+
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -309,6 +418,10 @@ def main():
 
     frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    line_config = {
+        "point_a": [frame_w / 2.0, 0.0],
+        "point_b": [frame_w / 2.0, float(frame_h)],
+    }
 
     writer = cv2.VideoWriter(
         str(OUTPUT_PATH),
@@ -331,6 +444,7 @@ def main():
     track_rebirth_violations = 0
     frame_idx = 0
     track_crops = defaultdict(list)
+    latest_events = []
 
     print("\n========================")
     print("RUNNING TRACKV2 PIPELINE")
@@ -368,6 +482,7 @@ def main():
             observations_by_ts[timestamp].append(obs)
 
         tracks, assignment_map = tracker.update(observations_by_ts)
+        latest_events = detect_events(tracks, line_config)
         closed_tracks = {
             track.runtime_track_id: track
             for track in tracks
@@ -531,8 +646,10 @@ def main():
     print(f"TRACK CONTINUITY SCORE: {stability_score:.2f}%")
     print(f"TRACK FRAGMENTATION COUNT: {track_fragmentation_count}")
     print(f"TRACK REBIRTH VIOLATIONS: {track_rebirth_violations}")
+    print_event_table(latest_events)
 
 
 if __name__ == "__main__":
     run_contact_sheet_self_tests()
+    run_card9_event_scenario_tests()
     main()

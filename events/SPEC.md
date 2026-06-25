@@ -2,7 +2,7 @@
 
 ## Status and Scope
 
-This document is the locked implementation specification for Card 9 (`events/`). It is intentionally **not an implementation**. Phase B must implement only the module and test harness described here.
+This document is the locked implementation specification for Card 9 (`events/`). It accompanies the production module and describes the contract the implementation must preserve.
 
 Card 9 is a downstream, stateless consumer of Card 8 `RuntimeTrackV2` objects. It must not modify Card 5–8 modules and must not rely on detections, embeddings, frames, per-point timestamps, tracker internals, or velocity.
 
@@ -355,10 +355,10 @@ For a vertical line at `x=0`, define:
 line_config = {"point_a": [0.0, -10.0], "point_b": [0.0, 10.0]}
 ```
 
-With the specified cross-product formula, points with `x < 0` are side `B` and points with `x > 0` are side `A`. Therefore, for this oriented vertical line:
+With the specified cross-product formula, points with `x < 0` are side `A` and points with `x > 0` are side `B`. Therefore, for this oriented vertical line:
 
-- right-to-left (`x > 0` to `x < 0`) is `A → B`, `ENTRY / IN`.
-- left-to-right (`x < 0` to `x > 0`) is `B → A`, `EXIT / OUT`.
+- left-to-right (`x < 0` to `x > 0`) is `A → B`, `ENTRY / IN`.
+- right-to-left (`x > 0` to `x < 0`) is `B → A`, `EXIT / OUT`.
 
 Tests should choose trajectories accordingly.
 
@@ -367,7 +367,7 @@ Tests should choose trajectories accordingly.
 Trajectory:
 
 ```python
-[[10, 0], [5, 0], [-5, 0], [-10, 0]]
+[[-10, 0], [-5, 0], [5, 0], [10, 0]]
 ```
 
 Line:
@@ -382,7 +382,7 @@ Assertions:
 - `event_type == "ENTRY"`.
 - `direction == "IN"`.
 - `runtime_track_id` equals the crossing track's Card 8 `runtime_track_id`.
-- `supporting_positions` includes the transition window around `[5, 0]`, `[-5, 0]`, `[-10, 0]`.
+- `supporting_positions` includes the transition window around `[-5, 0]`, `[5, 0]`, `[10, 0]`.
 
 ### Test 2 — No Crossing
 
@@ -401,7 +401,7 @@ Assertions:
 Trajectory:
 
 ```python
-[[10, 0], [-5, 0], [10, 0]]
+[[-10, 0], [5, 0], [-10, 0]]
 ```
 
 This is `A → B → A` for the vertical test line.
@@ -415,7 +415,7 @@ Assertions:
 Trajectories:
 
 ```python
-crossing = [[10, 0], [5, 0], [-5, 0], [-10, 0]]
+crossing = [[-10, 0], [-5, 0], [5, 0], [10, 0]]
 non_crossing_1 = [[20, 20], [20, 25], [20, 30], [20, 35]]
 non_crossing_2 = [[-20, -20], [-20, -25], [-20, -30], [-20, -35]]
 ```
