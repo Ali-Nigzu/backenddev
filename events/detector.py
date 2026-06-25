@@ -52,18 +52,48 @@ def _stable_event_id(
     return "evt_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _debug_track(
+    runtime_track_id: str,
+    center_history: list[list[float]],
+    side_sequence: list[str],
+    compressed_side_sequence: list[str],
+    detected_transitions: list[dict[str, Any]],
+    final_event_emitted: bool,
+) -> None:
+    print("CARD9 DEBUG")
+    print(f"TRACK ID: {runtime_track_id}")
+    print(f"center_history: {center_history}")
+    print(f"side_sequence: {side_sequence}")
+    print(f"compressed_side_sequence: {compressed_side_sequence}")
+    print(f"detected_transitions: {detected_transitions}")
+    print(f"final_event_emitted: {'yes' if final_event_emitted else 'no'}")
+
+
 def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[float]) -> RuntimeEventCandidate | None:
     runtime_track_id = str(_field(track, "runtime_track_id"))
     timestamp = float(_field(track, "last_seen_timestamp"))
     center_history = [_point(point) for point in _field(track, "center_history")]
 
+    side_sequence = []
     compressed = []
     for original_index, point in enumerate(center_history):
         side = compute_side(point_a, point_b, point)
+        side_sequence.append(side)
         if side != "ON":
             compressed.append((original_index, side, point))
 
+    compressed_side_sequence = [side for _, side, _ in compressed]
+    detected_transitions: list[dict[str, Any]] = []
+
     if len(compressed) < MIN_STABLE_POINTS_AFTER_TRANSITION + 1:
+        _debug_track(
+            runtime_track_id,
+            center_history,
+            side_sequence,
+            compressed_side_sequence,
+            detected_transitions,
+            False,
+        )
         return None
 
     for compressed_index in range(1, len(compressed)):
@@ -73,12 +103,27 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
             continue
 
         stable_end_compressed_index = compressed_index + MIN_STABLE_POINTS_AFTER_TRANSITION - 1
+        transition_debug = {
+            "from": previous_side,
+            "to": transition_side,
+            "transition_original_index": transition_index,
+            "stable": False,
+        }
         if stable_end_compressed_index >= len(compressed):
-            return None
+            transition_debug["reason"] = "insufficient_points_after_transition"
+            detected_transitions.append(transition_debug)
+            continue
 
         stable_window = compressed[compressed_index:stable_end_compressed_index + 1]
         if any(side != transition_side for _, side, _ in stable_window):
-            return None
+            transition_debug["reason"] = "unstable_points_after_transition"
+            transition_debug["stable_window"] = [side for _, side, _ in stable_window]
+            detected_transitions.append(transition_debug)
+            continue
+
+        transition_debug["stable"] = True
+        transition_debug["stable_window"] = [side for _, side, _ in stable_window]
+        detected_transitions.append(transition_debug)
 
         event_type, direction = (
             ("ENTRY", "IN") if previous_side == "A" and transition_side == "B" else ("EXIT", "OUT")
@@ -89,7 +134,7 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
             for point in center_history[previous_index:stable_end_original_index + 1]
         ]
 
-        return RuntimeEventCandidate(
+        event = RuntimeEventCandidate(
             event_id=_stable_event_id(
                 runtime_track_id,
                 point_a,
@@ -104,7 +149,24 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
             direction=direction,
             supporting_positions=supporting_positions,
         )
+        _debug_track(
+            runtime_track_id,
+            center_history,
+            side_sequence,
+            compressed_side_sequence,
+            detected_transitions,
+            True,
+        )
+        return event
 
+    _debug_track(
+        runtime_track_id,
+        center_history,
+        side_sequence,
+        compressed_side_sequence,
+        detected_transitions,
+        False,
+    )
     return None
 
 

@@ -18,8 +18,8 @@ CONTACT_HEADER_HEIGHT = 120
 CONTACT_PADDING = 8
 PRINT_ASSIGNMENT_MAP = False
 CARD9_SYNTHETIC_LINE_CONFIG = {
-    "point_a": [0.0, -10.0],
-    "point_b": [0.0, 10.0],
+    "point_a": [400.0, 0.0],
+    "point_b": [400.0, 100.0],
 }
 
 
@@ -341,7 +341,7 @@ def _run_event_trajectory(points, detection_prefix="event"):
 
 def run_card9_event_scenario_tests():
     crossing_tracks = _run_event_trajectory(
-        [[-10, 0], [-5, 0], [5, 0], [10, 0]],
+        [[390, 50], [395, 50], [405, 50], [410, 50]],
         "crossing",
     )
     crossing_events = detect_events(crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
@@ -351,7 +351,7 @@ def run_card9_event_scenario_tests():
     assert crossing_events[0]["runtime_track_id"] == crossing_tracks[0].runtime_track_id
 
     non_crossing_tracks = _run_event_trajectory(
-        [[10, -10], [10, 0], [10, 10], [10, 20]],
+        [[410, 10], [410, 30], [410, 50], [410, 70]],
         "parallel",
     )
     assert detect_events(non_crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
@@ -359,7 +359,7 @@ def run_card9_event_scenario_tests():
     )
 
     oscillation_tracks = _run_event_trajectory(
-        [[-10, 0], [5, 0], [-10, 0]],
+        [[390, 50], [405, 50], [390, 50]],
         "oscillation",
     )
     assert detect_events(oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
@@ -368,9 +368,9 @@ def run_card9_event_scenario_tests():
 
     multi_tracker = _event_test_tracker()
     multi_trajectories = {
-        "crossing": [[-10, 0], [-5, 0], [5, 0], [10, 0]],
-        "right-side": [[20, 20], [20, 25], [20, 30], [20, 35]],
-        "left-side": [[-20, -20], [-20, -25], [-20, -30], [-20, -35]],
+        "crossing": [[390, 50], [395, 50], [405, 50], [410, 50]],
+        "right-side": [[420, 20], [420, 25], [420, 30], [420, 35]],
+        "left-side": [[380, 20], [380, 25], [380, 30], [380, 35]],
     }
     assigned_ids_by_prefix = defaultdict(set)
     for frame_idx in range(4):
