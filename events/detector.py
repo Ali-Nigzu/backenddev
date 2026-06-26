@@ -33,6 +33,26 @@ def _canonical(value: float) -> str:
     return format(float(value), ".12g")
 
 
+def _signed_cross(point_a: Sequence[float], point_b: Sequence[float], point: Sequence[float]) -> float:
+    ax, ay = _point(point_a)
+    bx, by = _point(point_b)
+    px, py = _point(point)
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+
+
+def _expected_vertical_side(point_a: Sequence[float], point_b: Sequence[float], point: Sequence[float]) -> str | None:
+    ax, _ = _point(point_a)
+    bx, _ = _point(point_b)
+    px, _ = _point(point)
+    if ax != bx:
+        return None
+    if px < ax:
+        return "A"
+    if px > ax:
+        return "B"
+    return "ON"
+
+
 def _stable_event_id(
     runtime_track_id: str,
     point_a: Sequence[float],
@@ -55,6 +75,10 @@ def _stable_event_id(
 def _debug_track(
     runtime_track_id: str,
     center_history: list[list[float]],
+    point_debug: list[dict[str, Any]],
+    min_x: float | None,
+    max_x: float | None,
+    line_x: float | None,
     side_sequence: list[str],
     compressed_side_sequence: list[str],
     detected_transitions: list[dict[str, Any]],
@@ -63,6 +87,10 @@ def _debug_track(
     print("CARD9 DEBUG")
     print(f"TRACK ID: {runtime_track_id}")
     print(f"center_history: {center_history}")
+    print(f"min_x: {min_x}")
+    print(f"max_x: {max_x}")
+    print(f"line_x: {line_x}")
+    print(f"point_debug: {point_debug}")
     print(f"side_sequence: {side_sequence}")
     print(f"compressed_side_sequence: {compressed_side_sequence}")
     print(f"detected_transitions: {detected_transitions}")
@@ -74,10 +102,25 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
     timestamp = float(_field(track, "last_seen_timestamp"))
     center_history = [_point(point) for point in _field(track, "center_history")]
 
+    line_x = float(point_a[0]) if point_a[0] == point_b[0] else None
+    min_x = min((point[0] for point in center_history), default=None)
+    max_x = max((point[0] for point in center_history), default=None)
+    point_debug: list[dict[str, Any]] = []
     side_sequence = []
     compressed = []
     for original_index, point in enumerate(center_history):
+        cross = _signed_cross(point_a, point_b, point)
         side = compute_side(point_a, point_b, point)
+        expected_side = _expected_vertical_side(point_a, point_b, point)
+        point_debug.append({
+            "index": original_index,
+            "point": point,
+            "x": point[0],
+            "cross": cross,
+            "side": side,
+            "expected_side": expected_side,
+            "mismatch": expected_side is not None and side != expected_side,
+        })
         side_sequence.append(side)
         if side != "ON":
             compressed.append((original_index, side, point))
@@ -89,6 +132,10 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
         _debug_track(
             runtime_track_id,
             center_history,
+            point_debug,
+            min_x,
+            max_x,
+            line_x,
             side_sequence,
             compressed_side_sequence,
             detected_transitions,
@@ -152,6 +199,10 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
         _debug_track(
             runtime_track_id,
             center_history,
+            point_debug,
+            min_x,
+            max_x,
+            line_x,
             side_sequence,
             compressed_side_sequence,
             detected_transitions,
@@ -162,6 +213,10 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
     _debug_track(
         runtime_track_id,
         center_history,
+        point_debug,
+        min_x,
+        max_x,
+        line_x,
         side_sequence,
         compressed_side_sequence,
         detected_transitions,
