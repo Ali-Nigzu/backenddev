@@ -79,7 +79,7 @@ def detect_events(tracks: list[RuntimeTrackV2], line_config: dict) -> list[Runti
 
 - Read only `runtime_track_id`, `center_history`, and `last_seen_timestamp` from tracks.
 - Never mutate track objects or nested `center_history` points.
-- Emit at most one event per track in Phase B.
+- Emit every valid chronological crossing event contained in each supplied trusted track.
 - Be stateless, deterministic, and free of random UUID generation.
 - Return events sorted deterministically.
 
@@ -129,11 +129,9 @@ Phase B must define these constants in `events.detector` or `events.geometry`:
 
 ```python
 LINE_SIDE_EPSILON = 1e-9
-MIN_STABLE_POINTS_AFTER_TRANSITION = 2
-MAX_EVENTS_PER_TRACK = 1
 ```
 
-`LINE_SIDE_EPSILON` prevents floating-point noise near the line. Because the brief defines an index-based, not time-based, detector, stability is measured only in trajectory indices.
+`LINE_SIDE_EPSILON` prevents floating-point noise near the line. Card 9 does not apply track-quality, confidence, or stability heuristics; Card 8 owns trajectory trustworthiness.
 
 ### Step 1 — Extract Trajectory
 
@@ -141,7 +139,7 @@ For each track, copy and normalize `center_history` into `list[list[float]]`.
 
 Validation rules:
 
-- Fewer than three usable non-`ON` positions cannot produce a stable transition.
+- Fewer than two usable non-`ON` positions cannot produce a geometric transition.
 - Malformed points should fail fast with a `ValueError`; silent repair is forbidden because it would hide contract violations.
 
 ### Step 2 — Compute Side Sequence
@@ -170,30 +168,23 @@ A, A, ON, B, B  =>  A, A, B, B
 
 If all points are `ON`, emit no event.
 
-### Step 4 — Detect First Stable Transition
+### Step 4 — Detect Every Geometric Transition
 
-A candidate transition exists at compressed index `i` when:
+A valid geometric transition exists at compressed index `i` when:
 
 ```text
 compressed_side[i - 1] != compressed_side[i]
 ```
 
-The transition is valid only if:
+Every such transition in the trusted trajectory must emit one event in chronological order. Card 9 must not reject transitions because a track is short, terminal, oscillatory, or lacks post-transition stability; those are track-quality concerns owned by Card 8.
 
-1. There is at least one side change.
-2. The post-transition side remains the same for at least `MIN_STABLE_POINTS_AFTER_TRANSITION` consecutive non-`ON` points, including the first point after transition.
-3. No immediate oscillation occurs.
+Examples:
 
-With `MIN_STABLE_POINTS_AFTER_TRANSITION = 2`:
-
-- `A, A, B, B` is valid.
-- `B, B, A, A` is valid.
-- `A, B, A` is invalid.
-- `A, B, A, A` is invalid for the first transition and must emit no event in Phase B because immediate oscillation invalidates that track's first crossing window.
-- `A, ON, B, B` is valid.
-- `A, ON, B, ON, B` is valid because `ON` points are ignored for stability.
-
-Only the first stable transition is emitted in Phase B. Later transitions must be ignored until a future multi-event contract is approved.
+- `A, A, B, B` emits one `ENTRY`.
+- `B, B, A, A` emits one `EXIT`.
+- `A, B, A` emits `ENTRY`, then `EXIT`.
+- `A, A, B, B, A, A, B, B` emits `ENTRY`, `EXIT`, `ENTRY`.
+- `A, ON, B, ON, B` emits one `ENTRY` because `ON` points are ignored for side transitions.
 
 ### Step 5 — Determine Event Semantics
 
@@ -227,11 +218,11 @@ The crossing index may be used for event ID generation and supporting window sel
 
 - The last non-`ON` point before transition.
 - The first non-`ON` point after transition.
-- The next stable non-`ON` point after transition when available and required by stability.
+- The next same-side non-`ON` point after transition when one is immediately available before another transition.
 
-For `A, A, B, B`, supporting positions are the original points corresponding to the second `A`, first `B`, and second `B`.
+For `A, A, B, B`, supporting positions are the original points corresponding to the second `A`, first `B`, and second `B`, preserving existing stable-crossing support context. For terminal or two-point crossings, supporting positions end at the transition point.
 
-If `ON` points exist between these positions, they may be included only if they fall inside the transition window. The recommended locked behavior is to include the continuous original-index slice from previous non-`ON` index through final stability-confirming non-`ON` index, preserving order.
+If `ON` points exist between these positions, they may be included only if they fall inside the transition window. The recommended locked behavior is to include the continuous original-index slice from previous non-`ON` index through the selected support end index, preserving order.
 
 All supporting coordinates must be copied as floats.
 
@@ -258,9 +249,8 @@ Output events must be sorted by:
 
 1. `timestamp` ascending.
 2. `runtime_track_id` ascending.
-3. `event_id` ascending.
 
-This guarantees stable output independent of input track list ordering. If a future consumer requires input-order preservation, that must be an explicit contract change.
+The detector must append events for each track in chronological transition order before sorting. Python's stable sort preserves that chronological order for multiple events from the same track that share the track-level timestamp.
 
 ## C. Integration Plan
 
@@ -437,7 +427,7 @@ Steps:
 2. Feed observations through `TrackV2.update(observations_by_ts)`.
 3. Pass returned tracks into `detect_events(tracks, line_config)`.
 4. Assert event count, event type, direction, track mapping, and supporting positions.
-5. Assert output ordering is stable by comparing to `sorted(events, key=lambda e: (e["timestamp"], e["runtime_track_id"], e["event_id"]))` if output is dict-based.
+5. Assert output ordering is stable by comparing to `sorted(events, key=lambda e: (e["timestamp"], e["runtime_track_id"]))` if output is dict-based.
 
 ### Test 6 — Determinism
 
@@ -462,9 +452,9 @@ Although the required suite is integration-first, Phase B should also include fo
 
 - Invalid zero-length line raises `ValueError`.
 - All points on the line emit no event.
-- `ON` points between sides do not block a stable crossing.
+- `ON` points between sides do not block a geometric crossing.
 - `B → A` emits `EXIT / OUT`.
-- Tracks with fewer than three usable points emit no event.
+- Tracks with fewer than two usable non-`ON` points emit no event.
 
 ## E. Risk Analysis and Open Questions
 
@@ -474,7 +464,7 @@ Resolved for Phase B by the SHA-256 content strategy above. The main risk is flo
 
 ### Oscillation Threshold Definition
 
-Resolved for Phase B as an index-based rule: at least two consecutive non-`ON` post-transition points are required, and `A → B → A` or `B → A → B` invalidates the first crossing window. No time threshold is permitted.
+Resolved for the geometry-only refactor as a pure transition rule: every `A → B` or `B → A` side change in the trusted compressed trajectory emits an event. Card 8 owns any track-quality filtering before Card 9 receives the trajectory.
 
 ### Stable Line Orientation Rules
 
@@ -482,11 +472,11 @@ Resolved for Phase B: `point_a -> point_b` defines orientation; `A` is negative 
 
 ### Multiple Crossings Per Track
 
-Open product question. Phase B must emit only the first stable transition per track. Multi-entry/multi-exit event streams require an explicit future contract for duplicate suppression and event lifecycle semantics.
+Resolved for the geometry-only refactor: Card 9 emits every valid chronological side transition in each trusted trajectory. Duplicate suppression and track trust remain outside Card 9.
 
 ### Ordering Guarantees
 
-Resolved for Phase B as sorted by `(timestamp, runtime_track_id, event_id)`. This avoids nondeterminism from caller-provided track order.
+Resolved for the geometry-only refactor as sorted by `(timestamp, runtime_track_id)` with stable preservation of chronological transition order within each track.
 
 ### Timestamp Source
 
