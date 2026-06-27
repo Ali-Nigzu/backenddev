@@ -21,6 +21,34 @@ CARD9_SYNTHETIC_LINE_CONFIG = {
     "point_a": [400.0, 0.0],
     "point_b": [400.0, 100.0],
 }
+SECTION_WIDTH = 41
+
+
+def print_section_header(title):
+    print("\n" + "=" * SECTION_WIDTH)
+    print(title)
+    print("=" * SECTION_WIDTH)
+
+
+def run_contact_sheet_self_tests_section():
+    print_section_header("CONTACT SHEET SELF TESTS")
+    run_contact_sheet_self_tests()
+    print("PASS")
+
+
+def run_card9_event_scenario_tests_section():
+    print_section_header("CARD 9 SYNTHETIC TESTS")
+    try:
+        run_card9_event_scenario_tests()
+    except AssertionError as exc:
+        print("FAIL")
+        print("\nReason:")
+        print(exc)
+        print("\nContinuing to full pipeline...")
+        return False
+
+    print("PASS")
+    return True
 
 
 def scenario_observation(detection_id, timestamp, center):
@@ -402,6 +430,7 @@ def run_card9_event_scenario_tests():
 
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    print_section_header("FULL PIPELINE")
 
     from detection.detection_engine import detect
     from embed.embed_engine import embed
@@ -446,9 +475,6 @@ def main():
     track_crops = defaultdict(list)
     latest_events = []
 
-    print("\n========================")
-    print("RUNNING TRACKV2 PIPELINE")
-    print("========================\n")
     print("TRACKV2 METHOD LOG:")
     print("- enforced strict motion-first continuity")
     print("- disabled bbox influence on identity decisions")
@@ -650,6 +676,6 @@ def main():
 
 
 if __name__ == "__main__":
-    run_contact_sheet_self_tests()
-    run_card9_event_scenario_tests()
+    run_contact_sheet_self_tests_section()
+    run_card9_event_scenario_tests_section()
     main()
