@@ -6,6 +6,7 @@ from .models import RuntimeEventCandidate
 
 
 MIN_STABLE_POINTS_AFTER_TRANSITION = 2
+MIN_STABLE_POINTS_BEFORE_TERMINAL_TRANSITION = 2
 MAX_EVENTS_PER_TRACK = 1
 
 
@@ -97,6 +98,60 @@ def _debug_track(
     print(f"final_event_emitted: {'yes' if final_event_emitted else 'no'}")
 
 
+def _run_length_before_transition(compressed: list[tuple[int, str, list[float]]], compressed_index: int) -> int:
+    previous_side = compressed[compressed_index - 1][1]
+    run_length = 0
+    for index in range(compressed_index - 1, -1, -1):
+        if compressed[index][1] != previous_side:
+            break
+        run_length += 1
+    return run_length
+
+
+def _is_terminal_transition(
+    compressed: list[tuple[int, str, list[float]]],
+    compressed_index: int,
+) -> bool:
+    return compressed_index == len(compressed) - 1
+
+
+def _make_event(
+    runtime_track_id: str,
+    timestamp: float,
+    center_history: list[list[float]],
+    point_a: Sequence[float],
+    point_b: Sequence[float],
+    previous_index: int,
+    previous_side: str,
+    transition_index: int,
+    transition_side: str,
+    stable_end_original_index: int,
+) -> RuntimeEventCandidate:
+    event_type, direction = (
+        ("ENTRY", "IN") if previous_side == "A" and transition_side == "B" else ("EXIT", "OUT")
+    )
+    supporting_positions = [
+        _point(point)
+        for point in center_history[previous_index:stable_end_original_index + 1]
+    ]
+
+    return RuntimeEventCandidate(
+        event_id=_stable_event_id(
+            runtime_track_id,
+            point_a,
+            point_b,
+            transition_index,
+            event_type,
+            direction,
+        ),
+        runtime_track_id=runtime_track_id,
+        timestamp=timestamp,
+        event_type=event_type,
+        direction=direction,
+        supporting_positions=supporting_positions,
+    )
+
+
 def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[float]) -> RuntimeEventCandidate | None:
     runtime_track_id = str(_field(track, "runtime_track_id"))
     timestamp = float(_field(track, "last_seen_timestamp"))
@@ -157,6 +212,44 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
             "stable": False,
         }
         if stable_end_compressed_index >= len(compressed):
+            previous_run_length = _run_length_before_transition(compressed, compressed_index)
+            is_terminal_transition = _is_terminal_transition(compressed, compressed_index)
+            transition_debug["previous_run_length"] = previous_run_length
+            transition_debug["is_terminal_transition"] = is_terminal_transition
+
+            if (
+                is_terminal_transition
+                and previous_run_length >= MIN_STABLE_POINTS_BEFORE_TERMINAL_TRANSITION
+            ):
+                transition_debug["stable"] = True
+                transition_debug["reason"] = "terminal_history_crossing"
+                detected_transitions.append(transition_debug)
+                event = _make_event(
+                    runtime_track_id,
+                    timestamp,
+                    center_history,
+                    point_a,
+                    point_b,
+                    previous_index,
+                    previous_side,
+                    transition_index,
+                    transition_side,
+                    transition_index,
+                )
+                _debug_track(
+                    runtime_track_id,
+                    center_history,
+                    point_debug,
+                    min_x,
+                    max_x,
+                    line_x,
+                    side_sequence,
+                    compressed_side_sequence,
+                    detected_transitions,
+                    True,
+                )
+                return event
+
             transition_debug["reason"] = "insufficient_points_after_transition"
             detected_transitions.append(transition_debug)
             continue
@@ -172,29 +265,18 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
         transition_debug["stable_window"] = [side for _, side, _ in stable_window]
         detected_transitions.append(transition_debug)
 
-        event_type, direction = (
-            ("ENTRY", "IN") if previous_side == "A" and transition_side == "B" else ("EXIT", "OUT")
-        )
         stable_end_original_index = stable_window[-1][0]
-        supporting_positions = [
-            _point(point)
-            for point in center_history[previous_index:stable_end_original_index + 1]
-        ]
-
-        event = RuntimeEventCandidate(
-            event_id=_stable_event_id(
-                runtime_track_id,
-                point_a,
-                point_b,
-                transition_index,
-                event_type,
-                direction,
-            ),
-            runtime_track_id=runtime_track_id,
+        event = _make_event(
+            runtime_track_id,
             timestamp=timestamp,
-            event_type=event_type,
-            direction=direction,
-            supporting_positions=supporting_positions,
+            center_history=center_history,
+            point_a=point_a,
+            point_b=point_b,
+            previous_index=previous_index,
+            previous_side=previous_side,
+            transition_index=transition_index,
+            transition_side=transition_side,
+            stable_end_original_index=stable_end_original_index,
         )
         _debug_track(
             runtime_track_id,

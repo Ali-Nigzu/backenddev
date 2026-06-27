@@ -394,6 +394,48 @@ def run_card9_event_scenario_tests():
         "Card 9 oscillation scenario emitted an event"
     )
 
+    reverse_oscillation_tracks = _run_event_trajectory(
+        [[410, 50], [395, 50], [410, 50]],
+        "reverse-oscillation",
+    )
+    assert detect_events(reverse_oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
+        "Card 9 reverse oscillation scenario emitted an event"
+    )
+
+    two_point_crossing_tracks = _run_event_trajectory(
+        [[395, 50], [405, 50]],
+        "two-point-crossing",
+    )
+    assert detect_events(two_point_crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
+        "Card 9 two-point crossing scenario emitted an event without enough terminal evidence"
+    )
+
+    terminal_entry_tracks = _run_event_trajectory(
+        [[390, 50], [395, 50], [405, 50]],
+        "terminal-entry",
+    )
+    terminal_entry_events = detect_events(terminal_entry_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    assert len(terminal_entry_events) == 1, "Card 9 terminal entry scenario did not emit exactly one event"
+    assert terminal_entry_events[0]["event_type"] == "ENTRY", (
+        "Card 9 terminal entry scenario emitted wrong event type"
+    )
+    assert terminal_entry_events[0]["direction"] == "IN", (
+        "Card 9 terminal entry scenario emitted wrong direction"
+    )
+
+    terminal_exit_tracks = _run_event_trajectory(
+        [[410, 50], [405, 50], [395, 50]],
+        "terminal-exit",
+    )
+    terminal_exit_events = detect_events(terminal_exit_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    assert len(terminal_exit_events) == 1, "Card 9 terminal exit scenario did not emit exactly one event"
+    assert terminal_exit_events[0]["event_type"] == "EXIT", (
+        "Card 9 terminal exit scenario emitted wrong event type"
+    )
+    assert terminal_exit_events[0]["direction"] == "OUT", (
+        "Card 9 terminal exit scenario emitted wrong direction"
+    )
+
     multi_tracker = _event_test_tracker()
     multi_trajectories = {
         "crossing": [[390, 50], [395, 50], [405, 50], [410, 50]],
