@@ -6,6 +6,7 @@ from .models import RuntimeEventCandidate
 
 
 MIN_STABLE_POINTS_AFTER_TRANSITION = 2
+MIN_STABLE_POINTS_BEFORE_TERMINAL_TRANSITION = 2
 MAX_EVENTS_PER_TRACK = 1
 
 
@@ -33,6 +34,26 @@ def _canonical(value: float) -> str:
     return format(float(value), ".12g")
 
 
+def _signed_cross(point_a: Sequence[float], point_b: Sequence[float], point: Sequence[float]) -> float:
+    ax, ay = _point(point_a)
+    bx, by = _point(point_b)
+    px, py = _point(point)
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+
+
+def _expected_vertical_side(point_a: Sequence[float], point_b: Sequence[float], point: Sequence[float]) -> str | None:
+    ax, _ = _point(point_a)
+    bx, _ = _point(point_b)
+    px, _ = _point(point)
+    if ax != bx:
+        return None
+    if px < ax:
+        return "A"
+    if px > ax:
+        return "B"
+    return "ON"
+
+
 def _stable_event_id(
     runtime_track_id: str,
     point_a: Sequence[float],
@@ -52,18 +73,129 @@ def _stable_event_id(
     return "evt_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _debug_track(
+    runtime_track_id: str,
+    center_history: list[list[float]],
+    point_debug: list[dict[str, Any]],
+    min_x: float | None,
+    max_x: float | None,
+    line_x: float | None,
+    side_sequence: list[str],
+    compressed_side_sequence: list[str],
+    detected_transitions: list[dict[str, Any]],
+    final_event_emitted: bool,
+) -> None:
+    print("CARD9 DEBUG")
+    print(f"TRACK ID: {runtime_track_id}")
+    print(f"center_history: {center_history}")
+    print(f"min_x: {min_x}")
+    print(f"max_x: {max_x}")
+    print(f"line_x: {line_x}")
+    print(f"point_debug: {point_debug}")
+    print(f"side_sequence: {side_sequence}")
+    print(f"compressed_side_sequence: {compressed_side_sequence}")
+    print(f"detected_transitions: {detected_transitions}")
+    print(f"final_event_emitted: {'yes' if final_event_emitted else 'no'}")
+
+
+def _run_length_before_transition(compressed: list[tuple[int, str, list[float]]], compressed_index: int) -> int:
+    previous_side = compressed[compressed_index - 1][1]
+    run_length = 0
+    for index in range(compressed_index - 1, -1, -1):
+        if compressed[index][1] != previous_side:
+            break
+        run_length += 1
+    return run_length
+
+
+def _is_terminal_transition(
+    compressed: list[tuple[int, str, list[float]]],
+    compressed_index: int,
+) -> bool:
+    return compressed_index == len(compressed) - 1
+
+
+def _make_event(
+    runtime_track_id: str,
+    timestamp: float,
+    center_history: list[list[float]],
+    point_a: Sequence[float],
+    point_b: Sequence[float],
+    previous_index: int,
+    previous_side: str,
+    transition_index: int,
+    transition_side: str,
+    stable_end_original_index: int,
+) -> RuntimeEventCandidate:
+    event_type, direction = (
+        ("ENTRY", "IN") if previous_side == "A" and transition_side == "B" else ("EXIT", "OUT")
+    )
+    supporting_positions = [
+        _point(point)
+        for point in center_history[previous_index:stable_end_original_index + 1]
+    ]
+
+    return RuntimeEventCandidate(
+        event_id=_stable_event_id(
+            runtime_track_id,
+            point_a,
+            point_b,
+            transition_index,
+            event_type,
+            direction,
+        ),
+        runtime_track_id=runtime_track_id,
+        timestamp=timestamp,
+        event_type=event_type,
+        direction=direction,
+        supporting_positions=supporting_positions,
+    )
+
+
 def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[float]) -> RuntimeEventCandidate | None:
     runtime_track_id = str(_field(track, "runtime_track_id"))
     timestamp = float(_field(track, "last_seen_timestamp"))
     center_history = [_point(point) for point in _field(track, "center_history")]
 
+    line_x = float(point_a[0]) if point_a[0] == point_b[0] else None
+    min_x = min((point[0] for point in center_history), default=None)
+    max_x = max((point[0] for point in center_history), default=None)
+    point_debug: list[dict[str, Any]] = []
+    side_sequence = []
     compressed = []
     for original_index, point in enumerate(center_history):
+        cross = _signed_cross(point_a, point_b, point)
         side = compute_side(point_a, point_b, point)
+        expected_side = _expected_vertical_side(point_a, point_b, point)
+        point_debug.append({
+            "index": original_index,
+            "point": point,
+            "x": point[0],
+            "cross": cross,
+            "side": side,
+            "expected_side": expected_side,
+            "mismatch": expected_side is not None and side != expected_side,
+        })
+        side_sequence.append(side)
         if side != "ON":
             compressed.append((original_index, side, point))
 
+    compressed_side_sequence = [side for _, side, _ in compressed]
+    detected_transitions: list[dict[str, Any]] = []
+
     if len(compressed) < MIN_STABLE_POINTS_AFTER_TRANSITION + 1:
+        _debug_track(
+            runtime_track_id,
+            center_history,
+            point_debug,
+            min_x,
+            max_x,
+            line_x,
+            side_sequence,
+            compressed_side_sequence,
+            detected_transitions,
+            False,
+        )
         return None
 
     for compressed_index in range(1, len(compressed)):
@@ -73,38 +205,105 @@ def _event_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[flo
             continue
 
         stable_end_compressed_index = compressed_index + MIN_STABLE_POINTS_AFTER_TRANSITION - 1
+        transition_debug = {
+            "from": previous_side,
+            "to": transition_side,
+            "transition_original_index": transition_index,
+            "stable": False,
+        }
         if stable_end_compressed_index >= len(compressed):
-            return None
+            previous_run_length = _run_length_before_transition(compressed, compressed_index)
+            is_terminal_transition = _is_terminal_transition(compressed, compressed_index)
+            transition_debug["previous_run_length"] = previous_run_length
+            transition_debug["is_terminal_transition"] = is_terminal_transition
+
+            if (
+                is_terminal_transition
+                and previous_run_length >= MIN_STABLE_POINTS_BEFORE_TERMINAL_TRANSITION
+            ):
+                transition_debug["stable"] = True
+                transition_debug["reason"] = "terminal_history_crossing"
+                detected_transitions.append(transition_debug)
+                event = _make_event(
+                    runtime_track_id,
+                    timestamp,
+                    center_history,
+                    point_a,
+                    point_b,
+                    previous_index,
+                    previous_side,
+                    transition_index,
+                    transition_side,
+                    transition_index,
+                )
+                _debug_track(
+                    runtime_track_id,
+                    center_history,
+                    point_debug,
+                    min_x,
+                    max_x,
+                    line_x,
+                    side_sequence,
+                    compressed_side_sequence,
+                    detected_transitions,
+                    True,
+                )
+                return event
+
+            transition_debug["reason"] = "insufficient_points_after_transition"
+            detected_transitions.append(transition_debug)
+            continue
 
         stable_window = compressed[compressed_index:stable_end_compressed_index + 1]
         if any(side != transition_side for _, side, _ in stable_window):
-            return None
+            transition_debug["reason"] = "unstable_points_after_transition"
+            transition_debug["stable_window"] = [side for _, side, _ in stable_window]
+            detected_transitions.append(transition_debug)
+            continue
 
-        event_type, direction = (
-            ("ENTRY", "IN") if previous_side == "A" and transition_side == "B" else ("EXIT", "OUT")
-        )
+        transition_debug["stable"] = True
+        transition_debug["stable_window"] = [side for _, side, _ in stable_window]
+        detected_transitions.append(transition_debug)
+
         stable_end_original_index = stable_window[-1][0]
-        supporting_positions = [
-            _point(point)
-            for point in center_history[previous_index:stable_end_original_index + 1]
-        ]
-
-        return RuntimeEventCandidate(
-            event_id=_stable_event_id(
-                runtime_track_id,
-                point_a,
-                point_b,
-                transition_index,
-                event_type,
-                direction,
-            ),
-            runtime_track_id=runtime_track_id,
+        event = _make_event(
+            runtime_track_id,
             timestamp=timestamp,
-            event_type=event_type,
-            direction=direction,
-            supporting_positions=supporting_positions,
+            center_history=center_history,
+            point_a=point_a,
+            point_b=point_b,
+            previous_index=previous_index,
+            previous_side=previous_side,
+            transition_index=transition_index,
+            transition_side=transition_side,
+            stable_end_original_index=stable_end_original_index,
         )
+        _debug_track(
+            runtime_track_id,
+            center_history,
+            point_debug,
+            min_x,
+            max_x,
+            line_x,
+            side_sequence,
+            compressed_side_sequence,
+            detected_transitions,
+            True,
+        )
+        return event
 
+    _debug_track(
+        runtime_track_id,
+        center_history,
+        point_debug,
+        min_x,
+        max_x,
+        line_x,
+        side_sequence,
+        compressed_side_sequence,
+        detected_transitions,
+        False,
+    )
     return None
 
 

@@ -18,9 +18,37 @@ CONTACT_HEADER_HEIGHT = 120
 CONTACT_PADDING = 8
 PRINT_ASSIGNMENT_MAP = False
 CARD9_SYNTHETIC_LINE_CONFIG = {
-    "point_a": [0.0, -10.0],
-    "point_b": [0.0, 10.0],
+    "point_a": [400.0, 0.0],
+    "point_b": [400.0, 100.0],
 }
+SECTION_WIDTH = 41
+
+
+def print_section_header(title):
+    print("\n" + "=" * SECTION_WIDTH)
+    print(title)
+    print("=" * SECTION_WIDTH)
+
+
+def run_contact_sheet_self_tests_section():
+    print_section_header("CONTACT SHEET SELF TESTS")
+    run_contact_sheet_self_tests()
+    print("PASS")
+
+
+def run_card9_event_scenario_tests_section():
+    print_section_header("CARD 9 SYNTHETIC TESTS")
+    try:
+        run_card9_event_scenario_tests()
+    except AssertionError as exc:
+        print("FAIL")
+        print("\nReason:")
+        print(exc)
+        print("\nContinuing to full pipeline...")
+        return False
+
+    print("PASS")
+    return True
 
 
 def scenario_observation(detection_id, timestamp, center):
@@ -341,7 +369,7 @@ def _run_event_trajectory(points, detection_prefix="event"):
 
 def run_card9_event_scenario_tests():
     crossing_tracks = _run_event_trajectory(
-        [[-10, 0], [-5, 0], [5, 0], [10, 0]],
+        [[390, 50], [395, 50], [405, 50], [410, 50]],
         "crossing",
     )
     crossing_events = detect_events(crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
@@ -351,7 +379,7 @@ def run_card9_event_scenario_tests():
     assert crossing_events[0]["runtime_track_id"] == crossing_tracks[0].runtime_track_id
 
     non_crossing_tracks = _run_event_trajectory(
-        [[10, -10], [10, 0], [10, 10], [10, 20]],
+        [[410, 10], [410, 30], [410, 50], [410, 70]],
         "parallel",
     )
     assert detect_events(non_crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
@@ -359,18 +387,60 @@ def run_card9_event_scenario_tests():
     )
 
     oscillation_tracks = _run_event_trajectory(
-        [[-10, 0], [5, 0], [-10, 0]],
+        [[390, 50], [405, 50], [390, 50]],
         "oscillation",
     )
     assert detect_events(oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
         "Card 9 oscillation scenario emitted an event"
     )
 
+    reverse_oscillation_tracks = _run_event_trajectory(
+        [[410, 50], [395, 50], [410, 50]],
+        "reverse-oscillation",
+    )
+    assert detect_events(reverse_oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
+        "Card 9 reverse oscillation scenario emitted an event"
+    )
+
+    two_point_crossing_tracks = _run_event_trajectory(
+        [[395, 50], [405, 50]],
+        "two-point-crossing",
+    )
+    assert detect_events(two_point_crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
+        "Card 9 two-point crossing scenario emitted an event without enough terminal evidence"
+    )
+
+    terminal_entry_tracks = _run_event_trajectory(
+        [[390, 50], [395, 50], [405, 50]],
+        "terminal-entry",
+    )
+    terminal_entry_events = detect_events(terminal_entry_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    assert len(terminal_entry_events) == 1, "Card 9 terminal entry scenario did not emit exactly one event"
+    assert terminal_entry_events[0]["event_type"] == "ENTRY", (
+        "Card 9 terminal entry scenario emitted wrong event type"
+    )
+    assert terminal_entry_events[0]["direction"] == "IN", (
+        "Card 9 terminal entry scenario emitted wrong direction"
+    )
+
+    terminal_exit_tracks = _run_event_trajectory(
+        [[410, 50], [405, 50], [395, 50]],
+        "terminal-exit",
+    )
+    terminal_exit_events = detect_events(terminal_exit_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    assert len(terminal_exit_events) == 1, "Card 9 terminal exit scenario did not emit exactly one event"
+    assert terminal_exit_events[0]["event_type"] == "EXIT", (
+        "Card 9 terminal exit scenario emitted wrong event type"
+    )
+    assert terminal_exit_events[0]["direction"] == "OUT", (
+        "Card 9 terminal exit scenario emitted wrong direction"
+    )
+
     multi_tracker = _event_test_tracker()
     multi_trajectories = {
-        "crossing": [[-10, 0], [-5, 0], [5, 0], [10, 0]],
-        "right-side": [[20, 20], [20, 25], [20, 30], [20, 35]],
-        "left-side": [[-20, -20], [-20, -25], [-20, -30], [-20, -35]],
+        "crossing": [[390, 50], [395, 50], [405, 50], [410, 50]],
+        "right-side": [[420, 20], [420, 25], [420, 30], [420, 35]],
+        "left-side": [[380, 20], [380, 25], [380, 30], [380, 35]],
     }
     assigned_ids_by_prefix = defaultdict(set)
     for frame_idx in range(4):
@@ -402,6 +472,7 @@ def run_card9_event_scenario_tests():
 
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    print_section_header("FULL PIPELINE")
 
     from detection.detection_engine import detect
     from embed.embed_engine import embed
@@ -446,9 +517,6 @@ def main():
     track_crops = defaultdict(list)
     latest_events = []
 
-    print("\n========================")
-    print("RUNNING TRACKV2 PIPELINE")
-    print("========================\n")
     print("TRACKV2 METHOD LOG:")
     print("- enforced strict motion-first continuity")
     print("- disabled bbox influence on identity decisions")
@@ -650,6 +718,6 @@ def main():
 
 
 if __name__ == "__main__":
-    run_contact_sheet_self_tests()
-    run_card9_event_scenario_tests()
+    run_contact_sheet_self_tests_section()
+    run_card9_event_scenario_tests_section()
     main()
