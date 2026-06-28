@@ -1,7 +1,7 @@
 import hashlib
 from typing import Any, Sequence
 
-from .geometry import side_from_cross
+from .geometry import compute_side, line_points_from_config
 from .models import RuntimeEventCandidate
 
 
@@ -17,14 +17,6 @@ def _point(point: Sequence[float]) -> list[float]:
     return [float(point[0]), float(point[1])]
 
 
-def _line_points(line_config: dict) -> tuple[list[float], list[float]]:
-    point_a = _point(line_config["point_a"])
-    point_b = _point(line_config["point_b"])
-    if point_a == point_b:
-        raise ValueError("LineConfig point_a and point_b must define a non-zero line")
-    return point_a, point_b
-
-
 def _canonical(value: float) -> str:
     return format(float(value), ".12g")
 
@@ -37,14 +29,16 @@ def _stable_event_id(
     event_type: str,
     direction: str,
 ) -> str:
-    payload = "|".join([
-        runtime_track_id,
-        f"{_canonical(point_a[0])},{_canonical(point_a[1])}",
-        f"{_canonical(point_b[0])},{_canonical(point_b[1])}",
-        str(int(transition_index)),
-        event_type,
-        direction,
-    ])
+    payload = "|".join(
+        [
+            runtime_track_id,
+            f"{_canonical(point_a[0])},{_canonical(point_a[1])}",
+            f"{_canonical(point_b[0])},{_canonical(point_b[1])}",
+            str(int(transition_index)),
+            event_type,
+            direction,
+        ]
+    )
     return "evt_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -61,11 +55,13 @@ def _make_event(
     support_end_index: int,
 ) -> RuntimeEventCandidate:
     event_type, direction = (
-        ("ENTRY", "IN") if previous_side == "A" and transition_side == "B" else ("EXIT", "OUT")
+        ("ENTRY", "IN")
+        if previous_side == "A" and transition_side == "B"
+        else ("EXIT", "OUT")
     )
     supporting_positions = [
         _point(point)
-        for point in center_history[previous_index:support_end_index + 1]
+        for point in center_history[previous_index : support_end_index + 1]
     ]
 
     return RuntimeEventCandidate(
@@ -85,18 +81,16 @@ def _make_event(
     )
 
 
-def _events_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[float]) -> list[RuntimeEventCandidate]:
+def _events_for_track(
+    track: Any, point_a: Sequence[float], point_b: Sequence[float]
+) -> list[RuntimeEventCandidate]:
     runtime_track_id = str(_field(track, "runtime_track_id"))
     timestamp = float(_field(track, "last_seen_timestamp"))
     center_history = [_point(point) for point in _field(track, "center_history")]
 
-    ax, ay = point_a
-    bx, by = point_b
     compressed: list[tuple[int, str]] = []
     for original_index, point in enumerate(center_history):
-        px, py = point
-        cross = (px - ax) * (by - ay) - (py - ay) * (bx - ax)
-        side = side_from_cross(cross)
+        side = compute_side(point_a, point_b, point)
         if side != "ON":
             compressed.append((original_index, side))
 
@@ -135,7 +129,7 @@ def _events_for_track(track: Any, point_a: Sequence[float], point_b: Sequence[fl
 
 
 def detect_events(tracks: list[Any], line_config: dict) -> list[RuntimeEventCandidate]:
-    point_a, point_b = _line_points(line_config)
+    point_a, point_b = line_points_from_config(line_config)
     events = []
 
     for track in tracks:

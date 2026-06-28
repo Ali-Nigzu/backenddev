@@ -1,59 +1,19 @@
-from pathlib import Path
 from typing import Sequence
 
 import cv2
 import numpy as np
 
-
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov"}
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 LINE_COLOR_BGR = (255, 255, 255)
 POINT_A_COLOR_BGR = (0, 0, 255)
 POINT_B_COLOR_BGR = (255, 0, 0)
 LINE_THICKNESS = 2
 POINT_RADIUS = 6
 
-INPUT_PATH = "/workspaces/backenddev/videoplayback.mp4"
-OUTPUT_PATH = "/workspaces/backenddev/line_debug.png"
-
-CARD9_SYNTHETIC_LINE_CONFIG = {
-    "point_a": [0.0, -10.0],
-    "point_b": [0.0, 10.0],
-}
-
 
 def _point_xy(point: Sequence[float], name: str) -> tuple[float, float]:
     if len(point) != 2:
         raise ValueError(f"{name} must contain exactly two coordinates")
     return float(point[0]), float(point[1])
-
-
-def _load_first_frame(input_path: str) -> np.ndarray:
-    path = Path(input_path)
-    extension = path.suffix.lower()
-
-    if extension in IMAGE_EXTENSIONS:
-        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"Cannot read image: {input_path}")
-        return image
-
-    if extension in VIDEO_EXTENSIONS:
-        capture = cv2.VideoCapture(str(path))
-        try:
-            if not capture.isOpened():
-                raise ValueError(f"Cannot open video: {input_path}")
-            ok, frame = capture.read()
-            if not ok or frame is None:
-                raise ValueError(f"Cannot read first frame from video: {input_path}")
-            return frame
-        finally:
-            capture.release()
-
-    raise ValueError(
-        "Unsupported input extension. Expected one of: "
-        f"{sorted(IMAGE_EXTENSIONS | VIDEO_EXTENSIONS)}"
-    )
 
 
 def _line_intersections_with_frame(
@@ -106,7 +66,7 @@ def _extended_line_points(
         best_pair = (intersections[0], intersections[1])
         best_distance = -1
         for first_index, first in enumerate(intersections):
-            for second in intersections[first_index + 1:]:
+            for second in intersections[first_index + 1 :]:
                 distance = (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2
                 if distance > best_distance:
                     best_distance = distance
@@ -124,7 +84,9 @@ def _extended_line_points(
     )
 
 
-def _draw_point(frame: np.ndarray, point: tuple[float, float], color: tuple[int, int, int]) -> None:
+def _draw_point(
+    frame: np.ndarray, point: tuple[float, float], color: tuple[int, int, int]
+) -> None:
     cv2.circle(
         frame,
         (int(round(point[0])), int(round(point[1]))),
@@ -135,14 +97,8 @@ def _draw_point(frame: np.ndarray, point: tuple[float, float], color: tuple[int,
     )
 
 
-def render_line_overlay(
-    input_path: str,
-    line_config: dict,
-    output_path: str | None = None,
-) -> np.ndarray:
-    frame = _load_first_frame(input_path).copy()
+def draw_line_overlay(frame: np.ndarray, line_config: dict) -> np.ndarray:
     height, width = frame.shape[:2]
-
     point_a = _point_xy(line_config["point_a"], "point_a")
     point_b = _point_xy(line_config["point_b"], "point_b")
     line_start, line_end = _extended_line_points(point_a, point_b, width, height)
@@ -157,18 +113,8 @@ def render_line_overlay(
     )
     _draw_point(frame, point_a, POINT_A_COLOR_BGR)
     _draw_point(frame, point_b, POINT_B_COLOR_BGR)
-
-    if output_path is not None:
-        if not cv2.imwrite(str(output_path), frame):
-            raise IOError(f"Failed to write line overlay image: {output_path}")
-
     return frame
 
 
-if __name__ == "__main__":
-    frame = render_line_overlay(
-        INPUT_PATH,
-        CARD9_SYNTHETIC_LINE_CONFIG,
-        OUTPUT_PATH,
-    )
-    print(f"saved -> {OUTPUT_PATH}")
+def render_line_overlay(frame: np.ndarray, line_config: dict) -> np.ndarray:
+    return draw_line_overlay(frame.copy(), line_config)

@@ -1,6 +1,5 @@
 from typing import Sequence
 
-
 LINE_SIDE_EPSILON = 1e-9
 
 
@@ -31,3 +30,11 @@ def side_from_cross(cross: float) -> str:
 
 def compute_side(a: Sequence[float], b: Sequence[float], p: Sequence[float]) -> str:
     return side_from_cross(signed_cross(a, b, p))
+
+
+def line_points_from_config(line_config: dict) -> tuple[list[float], list[float]]:
+    point_a = list(_as_xy(line_config["point_a"], "point_a"))
+    point_b = list(_as_xy(line_config["point_b"], "point_b"))
+    if point_a == point_b:
+        raise ValueError("LineConfig point_a and point_b must define a non-zero line")
+    return point_a, point_b
