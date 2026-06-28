@@ -1,56 +1,100 @@
 # Card 9 Duplicate Event Emission — Root Cause Analysis
 
-## Root cause
+## Follow-up proof status
 
-The duplicate-looking Card 9 rows originate inside the Card 9 detector when a supplied `center_history` contains repeated side changes across the configured line. `detect_events()` is stateless and scans every supplied track from the beginning on every invocation. For each non-`ON` side transition in the compressed trajectory, it appends one event. It has no memory of previously emitted transitions and no lifecycle gating.
+The requested proof for runtime track `1ac37490-5e87-484e-a267-0ceaac7bea74` cannot be completed from the artifacts present in this checkout. The repository does not contain the source video (`videoplayback.mp4`), any persisted tracker trace, any event-table log containing that runtime track ID, or any saved `center_history` for that runtime track. The local environment also lacks `cv2`, so the full video harness cannot currently be executed even if the video were supplied.
 
-In the full video harness, `detect_events(tracks, line_config)` is invoked once per processed frame with the complete `tracker.tracks` list, not only once at the end and not only for newly closed tracks. The harness overwrites `latest_events` with the complete regenerated result each frame and prints only the final regenerated list. Therefore the final event table is not produced by appending old events across invocations; it is the current complete Card 9 interpretation of all track histories at the last frame.
+This is an evidence boundary, not a conclusion about the offending geometry. The previous hypothesis that Card 8 produced an oscillating `center_history` remains plausible from code inspection, but it is not proven for the named runtime track without the missing runtime data.
 
-The same timestamp on multiple rows is expected under the current Card 9 event model because `_events_for_track()` assigns every event for a track to `track.last_seen_timestamp`, not to the actual crossing point. Multiple events from one runtime track will share the track's last timestamp even when they correspond to different transition indices.
+Commands run to verify the boundary:
 
-## Code path
+```text
+find /workspace -iname 'videoplayback.mp4' -o -iname '*.mp4' -o -iname '*event*' -o -iname '*trace*'
+python - <<'PY'
+from pathlib import Path
+print('video exists', Path('videoplayback.mp4').exists())
+try:
+ import cv2
+ print('cv2 ok')
+except Exception as e:
+ print('cv2 unavailable', type(e).__name__, e)
+PY
+```
 
-1. `test_tracking_v2_pipeline.py::__main__` calls `run_contact_sheet_self_tests_section()`, `run_card9_event_scenario_tests_section()`, and then `main()`.
-2. `main()` opens the video, builds a vertical center-line `line_config`, constructs `TrackV2`, and enters the frame loop.
-3. Each frame is detected, embedded, converted to observations, and supplied to `tracker.update(observations_by_ts)`.
-4. `TrackV2.update()` updates matched tracks by appending `track.current_center` to `track.center_history`, promotes tracks when hit thresholds are met, closes stale active/tentative tracks, and returns `self.tracks`.
-5. In the same frame loop, the harness calls `latest_events = detect_events(tracks, line_config)` with the complete returned track list.
-6. `detect_events()` normalizes the line, calls `_events_for_track()` for every supplied track, extends a local `events` list, sorts by timestamp and runtime track ID, and returns that list.
-7. After the frame loop finishes, `print_event_table(latest_events)` prints exactly the last regenerated `latest_events` list.
+Observed output:
 
-## Evidence
+```text
+/workspace/backenddev/events
+/workspace/backenddev/docs/card9_duplicate_event_rca.md
+/workspace/backenddev/test_events_card9_geometry.py
+video exists False
+cv2 unavailable ModuleNotFoundError No module named 'cv2'
+```
 
-### Invocation frequency and aggregation
+## What is proven from the repository
 
-`detect_events()` is called from the full pipeline inside the `while True` frame loop immediately after each `tracker.update(...)`. The target variable is reassigned, not appended. At end-of-run, `print_event_table(latest_events)` prints only that most recent regenerated result.
+### Root cause that can be proven statically
 
-This proves Card 9 is called every frame with the full track list, and also proves the final table is not an accumulating event store in the harness.
+Card 9 is a stateless full-history geometric detector. For every invocation, `detect_events()` evaluates every supplied track from the beginning of its `center_history`. `_events_for_track()` computes the side of every point relative to the configured line, discards `ON` points, and emits one event every time adjacent compressed side values differ. It does not store or consult an already-emitted transition marker.
 
-### Runtime track lifecycle
+The full video harness calls `detect_events(tracks, line_config)` once per processed frame with the complete `tracker.tracks` list. It reassigns `latest_events` rather than appending to it, and it prints only the final regenerated list after the video loop finishes. Therefore the inspected harness does not create final duplicate rows by accumulating old event lists.
 
-Runtime tracks are created by `create_track()` with state `TENTATIVE`, a UUID `runtime_track_id`, `last_seen_timestamp`, and an initial one-point `center_history`. `TrackV2.update()` appends one center to `center_history` on every matched update and calls `promote_if_ready()`. `promote_if_ready()` changes `TENTATIVE` to `ACTIVE` when `hit_count >= tentative_hits_to_activate`. `close_stale_tracks()` changes unmatched tracks to `CLOSED` after configured miss/lifetime thresholds. Closed tracks remain in `self.tracks`, and the harness continues passing `self.tracks` to Card 9 on later frames.
+The same timestamp on multiple events from one track is expected under the current event model because Card 9 assigns every event for that track to `track.last_seen_timestamp`, not to a per-transition timestamp.
 
-### Transition discovery
+### Code path
 
-`_events_for_track()` copies the full `center_history`, computes side values for every point relative to the configured line, discards `ON` points from the compressed side sequence, and emits an event every time adjacent compressed sides differ. It always starts at index 0 of the track history. It does not read or write any processed-transition marker. It intentionally supports multiple crossings by emitting one event for every side change.
+1. `test_tracking_v2_pipeline.py::__main__` calls `main()` after self-tests.
+2. `main()` opens the video, builds a vertical center-line config, constructs `TrackV2`, and enters the frame loop.
+3. Each frame is passed through detection, embedding, observation building, and `tracker.update(observations_by_ts)`.
+4. `TrackV2.update()` appends matched observation centers into `track.center_history`, promotes tracks, closes stale tracks, and returns `self.tracks`.
+5. The harness calls `latest_events = detect_events(tracks, line_config)` inside the frame loop.
+6. `detect_events()` calls `_events_for_track()` for every supplied track, extends a local list, sorts the list, and returns it.
+7. After the loop, `print_event_table(latest_events)` prints the final regenerated event list once.
 
-Event IDs are stable for the same track ID, line, transition index, event type, and direction. Therefore repeated invocations over unchanged input regenerate the same event IDs; new rows with unique transition indices come from additional side changes in the supplied geometry, not from the printing loop.
+## Required proof that is still missing
 
-### Geometry validation method
+The follow-up request asks for a complete reconstruction of the offending track:
 
-For the vertical line used by the full harness (`point_a=[frame_w/2, 0]`, `point_b=[frame_w/2, frame_h]`), Card 9 computes:
+- every `center_history` point;
+- frame index and timestamp for every point;
+- signed cross product, x coordinate, and side for every point;
+- every transition index;
+- every emitted event mapped to its transition;
+- visual validation against the source frames.
+
+Those deliverables require the actual offending runtime data. The current `RuntimeTrackV2` model does not store per-point frame indices or per-point timestamps in `center_history`; it stores only `[x, y]` points plus track-level timestamps. Per-point frame/timestamp reconstruction therefore requires tracing during the video run or a previously persisted trace. No such trace is present in this checkout.
+
+## Production geometry needed for the reconstruction
+
+For the vertical counting line reported in the follow-up (`x ≈ 315`), production Card 9 computes:
 
 ```text
 cross = (px - ax) * (by - ay) - (py - ay) * (bx - ax)
 ```
 
-Because `bx == ax`, side is determined by the x coordinate relative to the line: `px < ax` is side `A`, `px > ax` is side `B`, and `px == ax` is `ON` within epsilon. A side sequence `A, B, A, B` produces `ENTRY, EXIT, ENTRY`; `A, B, A, B, A` produces `ENTRY, EXIT, ENTRY, EXIT`.
+When the line is vertical (`ax == bx`) and `by > ay`, this reduces to side being determined by `px - ax`:
 
-Thus, if the duplicated runtime track's `center_history` reconstructs as `A → B → A → B`, Card 9 is doing what its current logic specifies: emitting multiple geometric crossings for one runtime track. If the source video contains no such physical re-crossing, the false events are supported by the runtime track geometry but not by the real-world video, which assigns ownership to upstream track geometry/association quality rather than to event storage or printing.
+- `x < 315` => negative cross => side `A`;
+- `x > 315` => positive cross => side `B`;
+- `x == 315` within epsilon => side `ON`.
 
-### Reproduction trace
+Therefore an emitted sequence `ENTRY, EXIT, ENTRY, EXIT` for a single track requires the compressed non-`ON` side sequence to contain at least five alternating side runs, for example:
 
-A minimal trace with one two-point crossing and then repeated closed-track invocations produced the same event ID on every invocation, while the harness-style `latest_events = ...` reassignment would retain only one row:
+```text
+A -> B -> A -> B -> A
+```
+
+or the reverse sequence:
+
+```text
+B -> A -> B -> A -> B
+```
+
+This statement follows directly from Card 9 control flow, but it still does not prove that the named track contains that sequence.
+
+## Minimal trace that proves repeated invocation is not enough
+
+A synthetic trace with one unchanged crossing track was run to isolate invocation behavior. It shows repeated calls over an unchanged active/closed track regenerate the same event ID each time. Repeated invocation alone does not create multiple final rows unless a caller appends returned lists; the inspected full harness does not append.
 
 ```text
 frame 0 state [('ACTIVE', [[390.0, 0.0]])] events []
@@ -60,28 +104,42 @@ frame 3 state [('CLOSED', 3.0)] events [('ENTRY', 'evt_7bc0351be343aea9')]
 frame 4 state [('CLOSED', 3.0)] events [('ENTRY', 'evt_7bc0351be343aea9')]
 ```
 
-This proves repeated analysis of the same unchanged completed track regenerates identical results, but does not by itself create duplicate rows in the final table unless a caller appends those results. The checked full harness does not append them.
+## Answer to the follow-up question
 
-## Fault ownership
+Does runtime track `1ac37490-5e87-484e-a267-0ceaac7bea74` actually contain enough geometric evidence for:
 
-- **Card 9 detector:** owns the stateless full-history rescanning behavior. This is intentional per the current spec/tests and is required for deterministic repeated calls, but it means Card 9 cannot suppress previously consumed transitions.
-- **Card 8 runtime tracking:** owns the geometry supplied in `center_history`. If a single runtime track's history crosses the line more times than the real person did, Card 9 will faithfully emit those crossings because it is a pure geometry consumer.
-- **Test harness:** owns calling Card 9 every frame with all tracks, including active and closed tracks. However, the harness overwrites `latest_events` and prints only once at the end, so it is not the source of duplicated final rows in the inspected pipeline.
-- **Event aggregation/storage/printing:** no persistent aggregation or storage layer was found in the full harness. Printing iterates the supplied list once. It does not duplicate events.
+```text
+ENTRY
+EXIT
+ENTRY
+EXIT
+```
 
-## Proposed resolution
+**Unknown from the available repository artifacts.**
 
-Do not change Card 9 as part of this investigation. For a later fix, choose one architectural direction explicitly:
+The repository proves how Card 9 would generate those four events if the track history oscillated across `x ≈ 315`, and it proves the final table is not duplicated by the inspected harness's event-list append behavior. It does **not** contain the named track's complete `center_history` or source frames, so it cannot prove whether the named track actually oscillated around the counting line, whether Card 8 generated invalid geometry, or whether the visual source video contradicts the runtime geometry.
 
-1. **Preferred if Card 9 remains purely geometric/stateless:** fix Card 8 or its input association so each runtime track's `center_history` represents only the actual person trajectory. Under this contract, every side transition in the history is a legitimate event.
-2. **If the runtime system needs incremental event emission:** add an event-consumption layer outside the pure detector that records emitted `(runtime_track_id, transition_index/event_id)` values and publishes only newly discovered events. This should not change `detect_events()` semantics unless the Card 9 contract is revised.
-3. **If events must be timestamped at crossings:** extend the upstream track history to include per-point timestamps and update the Card 9 contract to timestamp each event from the transition segment instead of using `last_seen_timestamp` for all events in a track.
+## Evidence required to complete the investigation
 
-## Commands used
+To complete the requested proof without modifying production behavior, capture a one-run trace with the following fields for every update of the offending runtime track:
 
-- `rg "def detect_events|detect_events\(|Card 9|EVENT TABLE|center_history|RuntimeTrack|CLOSED|ACTIVE" -n .`
-- `sed -n '1,220p' events/detector.py`
-- `sed -n '580,760p' test_tracking_v2_pipeline.py`
-- `sed -n '1,180p' track/tracker.py`
-- `sed -n '1,120p' track/lifecycle.py`
-- `python - <<'PY' ... minimal repeated-invocation trace ... PY`
+```text
+runtime_track_id
+state
+frame_idx
+timestamp
+center_history_index
+x
+y
+last_seen_timestamp
+last_matched_frame_index
+last_unmatched_frame_index
+closed_timestamp
+event_id
+event_type
+direction
+transition_index
+supporting_positions
+```
+
+Then compute the production Card 9 side sequence from that trace and compare the transition frames against the source video frames. Without that data, assigning the final discrepancy to Card 8 invalid geometry versus Card 9 misinterpretation would be speculation.
