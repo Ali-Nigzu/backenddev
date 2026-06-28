@@ -212,15 +212,20 @@ def write_contact_sheets(output_dir, track_crops):
     return written_paths
 
 
-def print_event_table(events, title="EVENT TABLE (Card 9)"):
+def print_event_table(events, runtime_to_display_id=None, title="EVENT TABLE (Card 9)"):
     print(title)
     if not events:
         print("- none")
         return
 
+    runtime_to_display_id = runtime_to_display_id or {}
+
     for event in events:
+        runtime_track_id = event["runtime_track_id"]
+        display_id = runtime_to_display_id.get(runtime_track_id)
+        track_label = f"track={display_id}" if display_id is not None else f"track_id={runtime_track_id}"
         print(
-            f"[EVENT] track_id={event['runtime_track_id']} "
+            f"[EVENT] {track_label} "
             f"type={event['event_type']} "
             f"direction={event['direction']} "
             f"timestamp={event['timestamp']}"
@@ -784,7 +789,7 @@ def main():
     print(f"TRACK CONTINUITY SCORE: {stability_score:.2f}%")
     print(f"TRACK FRAGMENTATION COUNT: {track_fragmentation_count}")
     print(f"TRACK REBIRTH VIOLATIONS: {track_rebirth_violations}")
-    print_event_table(latest_events)
+    print_event_table(latest_events, runtime_to_display_id)
 
 
 if __name__ == "__main__":
