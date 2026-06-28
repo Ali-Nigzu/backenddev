@@ -10,7 +10,7 @@ def _as_xy(point: Sequence[float], name: str) -> tuple[float, float]:
     return float(point[0]), float(point[1])
 
 
-def compute_side(a: Sequence[float], b: Sequence[float], p: Sequence[float]) -> str:
+def signed_cross(a: Sequence[float], b: Sequence[float], p: Sequence[float]) -> float:
     ax, ay = _as_xy(a, "point_a")
     bx, by = _as_xy(b, "point_b")
     px, py = _as_xy(p, "point")
@@ -18,9 +18,16 @@ def compute_side(a: Sequence[float], b: Sequence[float], p: Sequence[float]) -> 
     if ax == bx and ay == by:
         raise ValueError("LineConfig point_a and point_b must define a non-zero line")
 
-    cross = (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+
+
+def side_from_cross(cross: float) -> str:
     if cross < -LINE_SIDE_EPSILON:
         return "A"
     if cross > LINE_SIDE_EPSILON:
         return "B"
     return "ON"
+
+
+def compute_side(a: Sequence[float], b: Sequence[float], p: Sequence[float]) -> str:
+    return side_from_cross(signed_cross(a, b, p))

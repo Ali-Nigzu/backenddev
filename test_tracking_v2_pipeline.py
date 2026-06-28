@@ -367,7 +367,26 @@ def _run_event_trajectory(points, detection_prefix="event"):
     return tracker.tracks
 
 
+def _print_card9_progress(current, total, label):
+    width = 20
+    filled = int(width * current / total)
+    bar = "█" * filled + "░" * (width - filled)
+    percent = int(100 * current / total)
+    print(f"Analysing tracks... {bar} {percent}% ({current}/{total}) {label}")
+
+
+def _event_track(track_id, points, timestamp=None):
+    return {
+        "runtime_track_id": track_id,
+        "last_seen_timestamp": float(len(points) if timestamp is None else timestamp),
+        "center_history": points,
+    }
+
+
 def run_card9_event_scenario_tests():
+    scenarios = 9
+    completed = 0
+
     crossing_tracks = _run_event_trajectory(
         [[390, 50], [395, 50], [405, 50], [410, 50]],
         "crossing",
@@ -377,6 +396,8 @@ def run_card9_event_scenario_tests():
     assert crossing_events[0]["event_type"] == "ENTRY", "Card 9 crossing scenario emitted wrong event type"
     assert crossing_events[0]["direction"] == "IN", "Card 9 crossing scenario emitted wrong direction"
     assert crossing_events[0]["runtime_track_id"] == crossing_tracks[0].runtime_track_id
+    completed += 1
+    _print_card9_progress(completed, scenarios, "single crossing")
 
     non_crossing_tracks = _run_event_trajectory(
         [[410, 10], [410, 30], [410, 50], [410, 70]],
@@ -385,30 +406,40 @@ def run_card9_event_scenario_tests():
     assert detect_events(non_crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
         "Card 9 no-crossing scenario emitted an event"
     )
+    completed += 1
+    _print_card9_progress(completed, scenarios, "no crossing")
 
     oscillation_tracks = _run_event_trajectory(
         [[390, 50], [405, 50], [390, 50]],
         "oscillation",
     )
-    assert detect_events(oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
-        "Card 9 oscillation scenario emitted an event"
+    oscillation_events = detect_events(oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    assert [event["event_type"] for event in oscillation_events] == ["ENTRY", "EXIT"], (
+        "Card 9 oscillation scenario should emit deterministic geometry crossings"
     )
 
     reverse_oscillation_tracks = _run_event_trajectory(
         [[410, 50], [395, 50], [410, 50]],
         "reverse-oscillation",
     )
-    assert detect_events(reverse_oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
-        "Card 9 reverse oscillation scenario emitted an event"
+    reverse_oscillation_events = detect_events(reverse_oscillation_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    assert [event["event_type"] for event in reverse_oscillation_events] == ["EXIT", "ENTRY"], (
+        "Card 9 reverse oscillation scenario should emit deterministic geometry crossings"
     )
+    completed += 1
+    _print_card9_progress(completed, scenarios, "oscillation")
 
     two_point_crossing_tracks = _run_event_trajectory(
         [[395, 50], [405, 50]],
         "two-point-crossing",
     )
-    assert detect_events(two_point_crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG) == [], (
-        "Card 9 two-point crossing scenario emitted an event without enough terminal evidence"
+    two_point_crossing_events = detect_events(two_point_crossing_tracks, CARD9_SYNTHETIC_LINE_CONFIG)
+    assert len(two_point_crossing_events) == 1, (
+        "Card 9 geometry engine should emit a trusted two-point crossing"
     )
+    assert two_point_crossing_events[0]["event_type"] == "ENTRY"
+    completed += 1
+    _print_card9_progress(completed, scenarios, "two-point crossing")
 
     terminal_entry_tracks = _run_event_trajectory(
         [[390, 50], [395, 50], [405, 50]],
@@ -435,6 +466,41 @@ def run_card9_event_scenario_tests():
     assert terminal_exit_events[0]["direction"] == "OUT", (
         "Card 9 terminal exit scenario emitted wrong direction"
     )
+    completed += 1
+    _print_card9_progress(completed, scenarios, "terminal crossings")
+
+    multi_crossing_track = _event_track(
+        "multi-crossing",
+        [[390, 50], [395, 50], [405, 50], [410, 50], [395, 50], [390, 50], [405, 50], [410, 50]],
+    )
+    multi_crossing_events = detect_events([multi_crossing_track], CARD9_SYNTHETIC_LINE_CONFIG)
+    assert [event["event_type"] for event in multi_crossing_events] == ["ENTRY", "EXIT", "ENTRY"], (
+        "Card 9 multi-crossing trajectory emitted wrong event sequence"
+    )
+    assert [event["direction"] for event in multi_crossing_events] == ["IN", "OUT", "IN"], (
+        "Card 9 multi-crossing trajectory emitted wrong directions"
+    )
+    assert len({event["event_id"] for event in multi_crossing_events}) == 3, (
+        "Card 9 multi-crossing events must have unique deterministic IDs"
+    )
+    completed += 1
+    _print_card9_progress(completed, scenarios, "multiple crossings")
+
+    on_line_track = _event_track(
+        "on-line",
+        [[390, 50], [400, 50], [405, 50], [400, 60], [410, 50]],
+    )
+    on_line_events = detect_events([on_line_track], CARD9_SYNTHETIC_LINE_CONFIG)
+    assert len(on_line_events) == 1, "Card 9 ON-line handling emitted wrong event count"
+    assert on_line_events[0]["supporting_positions"] == [[390.0, 50.0], [400.0, 50.0], [405.0, 50.0], [400.0, 60.0], [410.0, 50.0]], (
+        "Card 9 ON-line supporting positions should preserve original transition slice"
+    )
+    all_on_track = _event_track("all-on-line", [[400, 10], [400, 20], [400, 30]])
+    assert detect_events([all_on_track], CARD9_SYNTHETIC_LINE_CONFIG) == [], (
+        "Card 9 ON-line-only trajectory emitted an event"
+    )
+    completed += 1
+    _print_card9_progress(completed, scenarios, "ON-line handling")
 
     multi_tracker = _event_test_tracker()
     multi_trajectories = {
@@ -459,13 +525,17 @@ def run_card9_event_scenario_tests():
     assert multi_events[0]["runtime_track_id"] == crossing_track_id, (
         "Card 9 multi-track scenario emitted an event for the wrong track"
     )
+    completed += 1
+    _print_card9_progress(completed, scenarios, "multiple tracks")
 
-    deterministic_once = detect_events(multi_tracker.tracks, CARD9_SYNTHETIC_LINE_CONFIG)
-    deterministic_twice = detect_events(multi_tracker.tracks, CARD9_SYNTHETIC_LINE_CONFIG)
-    deterministic_reversed = detect_events(list(reversed(multi_tracker.tracks)), CARD9_SYNTHETIC_LINE_CONFIG)
+    deterministic_once = detect_events(multi_tracker.tracks + [multi_crossing_track], CARD9_SYNTHETIC_LINE_CONFIG)
+    deterministic_twice = detect_events(multi_tracker.tracks + [multi_crossing_track], CARD9_SYNTHETIC_LINE_CONFIG)
+    deterministic_reversed = detect_events([multi_crossing_track] + list(reversed(multi_tracker.tracks)), CARD9_SYNTHETIC_LINE_CONFIG)
     assert deterministic_once == deterministic_twice == deterministic_reversed, (
         "Card 9 event detection is not deterministic"
     )
+    completed += 1
+    _print_card9_progress(completed, scenarios, "determinism")
 
     print("CARD9 EVENT SCENARIO TESTS PASSED")
 
@@ -721,3 +791,7 @@ if __name__ == "__main__":
     run_contact_sheet_self_tests_section()
     run_card9_event_scenario_tests_section()
     main()
+
+
+def test_card9_event_scenario_tests():
+    assert run_card9_event_scenario_tests_section()
