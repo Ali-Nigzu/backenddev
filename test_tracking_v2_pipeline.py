@@ -18,6 +18,27 @@ CONTACT_TILE_SIZE = 96
 CONTACT_HEADER_HEIGHT = 120
 CONTACT_PADDING = 8
 PROGRESS_BAR_WIDTH = 30
+SEX_LABELS = {
+    0: "Male",
+    1: "Female",
+}
+RACE_LABELS = {
+    0: "White",
+    1: "Black",
+    2: "Asian",
+    3: "Indian",
+}
+AGE_LABELS = {
+    0: "0-2",
+    1: "3-9",
+    2: "10-19",
+    3: "20-29",
+    4: "30-39",
+    5: "40-49",
+    6: "50-59",
+    7: "60-69",
+    8: "70+",
+}
 
 
 def clamp_bbox_to_frame(bbox, frame_shape):
@@ -216,10 +237,13 @@ def print_event_table(events, runtime_to_display_id):
         track_label = (
             f"Track {display_id}" if display_id is not None else runtime_track_id
         )
+        sex = SEX_LABELS[event["sex"]]
+        race = RACE_LABELS[event["race"]]
+        age = AGE_LABELS[event["age"]]
         print(
             f"{event['timestamp']:.3f}s | {track_label} | "
             f"{event['event_type']} | {event['direction']} | {event['event_id']} | "
-            f"sex={event['sex']} race={event['race']} age={event['age']}"
+            f"sex={sex} race={race} age={age}"
         )
 
 
