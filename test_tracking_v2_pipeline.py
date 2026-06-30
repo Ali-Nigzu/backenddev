@@ -18,6 +18,27 @@ CONTACT_TILE_SIZE = 96
 CONTACT_HEADER_HEIGHT = 120
 CONTACT_PADDING = 8
 PROGRESS_BAR_WIDTH = 30
+SEX_LABELS = {
+    0: "Male",
+    1: "Female",
+}
+RACE_LABELS = {
+    0: "White",
+    1: "Black",
+    2: "Asian",
+    3: "Indian",
+}
+AGE_LABELS = {
+    0: "0-2",
+    1: "3-9",
+    2: "10-19",
+    3: "20-29",
+    4: "30-39",
+    5: "40-49",
+    6: "50-59",
+    7: "60-69",
+    8: "70+",
+}
 
 
 def clamp_bbox_to_frame(bbox, frame_shape):
@@ -216,9 +237,13 @@ def print_event_table(events, runtime_to_display_id):
         track_label = (
             f"Track {display_id}" if display_id is not None else runtime_track_id
         )
+        sex = SEX_LABELS[event["sex"]]
+        race = RACE_LABELS[event["race"]]
+        age = AGE_LABELS[event["age"]]
         print(
             f"{event['timestamp']:.3f}s | {track_label} | "
-            f"{event['event_type']} | {event['direction']} | {event['event_id']}"
+            f"{event['event_type']} | {event['direction']} | {event['event_id']} | "
+            f"sex={sex} race={race} age={age}"
         )
 
 
@@ -273,12 +298,16 @@ def main():
         raise ValueError(f"Cannot open output video writer: {output_video_path}")
 
     from detection.detection_engine import detect
+    from demographics import DemographicsEngine
     from embed.embed_engine import embed
     from build_observation import build_observation
 
     embedder = embed()
+    demographics_engine = DemographicsEngine()
     tracker = TrackV2(TrackV2Config())
     runtime_to_display_id = {}
+    best_detection_by_runtime_track = {}
+    demographics_by_event_id = {}
     next_display_id = 1
     track_crops = defaultdict(list)
     latest_events = []
@@ -324,6 +353,35 @@ def main():
                 if runtime_track_id not in runtime_to_display_id:
                     runtime_to_display_id[runtime_track_id] = next_display_id
                     next_display_id += 1
+
+            for det in detections:
+                runtime_track_id = assignment_map.get(det["detection_id"])
+                if runtime_track_id is None:
+                    continue
+
+                current_best = best_detection_by_runtime_track.get(runtime_track_id)
+                if (
+                    current_best is None
+                    or float(det["confidence"]) > float(current_best["confidence"])
+                ):
+                    best_detection_by_runtime_track[runtime_track_id] = det
+
+            enriched_events = []
+            for event in latest_events:
+                event = dict(event)
+                demographics = demographics_by_event_id.get(event["event_id"])
+                if demographics is None:
+                    best_detection = best_detection_by_runtime_track.get(
+                        event["runtime_track_id"]
+                    )
+                    if best_detection is None:
+                        continue
+                    demographics = demographics_engine.predict(best_detection["image"])
+                    demographics_by_event_id[event["event_id"]] = demographics
+
+                event.update(demographics)
+                enriched_events.append(event)
+            latest_events = enriched_events
 
             for obs in observations_by_ts[timestamp]:
                 runtime_track_id = assignment_map.get(obs["detection_id"])
