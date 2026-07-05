@@ -77,10 +77,11 @@ The constitutional analytics pipeline consists of the following ordered stages:
 5. `Embedding Module`
 6. `Observation Module`
 7. `Tracking State Transition Module`
-8. `Event Derivation Module`
-9. `Demographics Module`
-10. `Analytics Assembly Module`
-11. `Output Boundary`
+8. `Best-Crop State Transition Module`
+9. `Event Derivation Module`
+10. `Demographics Module`
+11. `Analytics Assembly Module`
+12. `Output Boundary`
 
 A conforming system MAY omit an optional module only by emitting a contract that explicitly marks the corresponding result as unavailable. Omission MUST NOT alter required contracts for other modules.
 
@@ -106,25 +107,29 @@ The embedding module consumes a `CropBatch` and emits an `EmbeddingBatch`. Each 
 
 ### 2.6 Observation Module
 
-The observation module consumes `DetectionBatch`, `EmbeddingBatch`, selected frame metadata, and optional crop metadata. It emits an `ObservationBatch`. Each observation is the canonical per-frame subject measurement used by stateful downstream modules.
+The observation module consumes `DetectionBatch`, `EmbeddingBatch`, selected frame metadata, and crop reference metadata. It emits an `ObservationBatch`. Each observation is the canonical per-frame subject measurement used by stateful downstream modules. Observations MUST carry lightweight crop provenance and crop-quality facts when imagery was produced; they MUST NOT carry long-lived crop image buffers.
 
 ### 2.7 Tracking State Transition Module
 
 The tracking transition module consumes the previous `TrackingState`, the current `ObservationBatch`, and the applicable `TrackingConfig`. It emits a new `TrackingState`, a `TrackSnapshotBatch`, and an `ObservationAssignmentBatch`. It MUST NOT mutate the previous state object after accepting it. The emitted state is the sole tracking state for the next transition.
 
-### 2.8 Event Derivation Module
+### 2.8 Best-Crop State Transition Module
+
+The best-crop transition module consumes prior `BestCropState`, current `ObservationBatch`, `ObservationAssignmentBatch`, and current frame-scope crop references. It emits next `BestCropState` and `BestCropSnapshotBatch`. It retains only the current winning crop or crop reference per track according to explicit quality policy, and all losing candidate crops MUST be discarded at frame-lifetime destruction.
+
+### 2.9 Event Derivation Module
 
 The event derivation module consumes `TrackSnapshotBatch`, `EventConfig`, and optional prior `EventState`. It emits `EventBatch` and an updated `EventState` when event de-duplication or historical event context is required. It MUST NOT modify tracking state.
 
-### 2.9 Demographics Module
+### 2.10 Demographics Module
 
-The demographics module consumes subject imagery represented by `CropBatch` or crop references plus subject identity context represented by assignments or tracks. It emits `DemographicsBatch`. Demographic outputs are descriptive attributes with explicit confidence and taxonomy metadata. The module MUST NOT affect tracking identity, event identity, or observation validity.
+The demographics module consumes subject imagery represented by `BestCropSnapshotBatch` when track-level demographic attribution is required, or by frame-scope `CropBatch` only when configured for per-frame attribution. It emits `DemographicsBatch`. Demographic outputs are descriptive attributes with explicit confidence and taxonomy metadata. The module MUST NOT affect tracking identity, event identity, or observation validity.
 
-### 2.10 Analytics Assembly Module
+### 2.11 Analytics Assembly Module
 
 The assembly module consumes all selected outputs from prior modules and emits `AnalyticsOutput`. It joins objects only through declared identifiers and index-alignment guarantees. It MUST NOT compute new detection, embedding, tracking, event, or demographic facts except for packaging metadata and consistency diagnostics.
 
-### 2.11 Output Boundary
+### 2.12 Output Boundary
 
 The output boundary transfers immutable `AnalyticsOutput` objects to downstream consumers. After transfer, the engine MUST NOT mutate the emitted output object.
 
@@ -214,19 +219,19 @@ The output boundary transfers immutable `AnalyticsOutput` objects to downstream 
 
 **Purpose:** Build canonical frame-local subject observations.
 
-**Responsibilities:** combine detection facts and descriptor facts into `Observation` objects; preserve detection identity; define canonical subject point, geometry, timestamp, and optional descriptor reference.
+**Responsibilities:** combine detection facts, descriptor facts, and lightweight crop reference facts into `Observation` objects; preserve detection identity; define canonical subject point, geometry, timestamp, optional descriptor reference, crop reference, and crop quality.
 
 **Allowed responsibilities:** contract joining, field canonicalization, alignment verification, observation validity reporting.
 
 **Forbidden responsibilities:** persistent state ownership, track identity assignment, event emission, demographic attribution, image mutation.
 
-**Inputs:** `DetectionBatch`, `EmbeddingBatch`, `ObservationConfig`, selected `ValidatedFrame` metadata.
+**Inputs:** `DetectionBatch`, `EmbeddingBatch`, `CropBatch` metadata, `ObservationConfig`, selected `ValidatedFrame` metadata.
 
 **Outputs:** `ObservationBatch`, `ObservationDiagnosticBatch`.
 
-**Upstream producers:** detection module and embedding module.
+**Upstream producers:** detection module, crop selection module, and embedding module.
 
-**Downstream consumers:** tracking state transition module, analytics assembly module.
+**Downstream consumers:** tracking state transition module, best-crop state transition module, analytics assembly module.
 
 **Dependencies:** detection, embedding, and frame metadata contracts.
 
@@ -250,7 +255,27 @@ The output boundary transfers immutable `AnalyticsOutput` objects to downstream 
 
 **Dependencies:** observation contract, tracking state contract, tracking configuration contract, processing clock contract.
 
-### 3.7 Event Derivation Module
+### 3.7 Best-Crop State Transition Module
+
+**Purpose:** Select and retain the single best demographic crop candidate per track without retaining every crop across a track lifetime.
+
+**Responsibilities:** compare each assigned observation's crop-quality score against the currently retained best candidate for that track; emit explicit best-crop snapshots; retain only the configured winning crop payload or durable crop reference; discard non-winning crop candidates at frame-lifetime destruction.
+
+**Allowed responsibilities:** best-crop state transition, crop-quality comparison, best-crop diagnostics, explicit unavailable reporting.
+
+**Forbidden responsibilities:** assigning tracks, changing track lifecycle, computing demographic labels, deriving events, retaining unbounded crop history, silently retaining image buffers outside declared state.
+
+**Inputs:** `BestCropState`, `ObservationBatch`, `ObservationAssignmentBatch`, frame-scope `CropBatch`, `BestCropConfig`.
+
+**Outputs:** next `BestCropState`, `BestCropSnapshotBatch`, `BestCropDiagnosticBatch`.
+
+**Upstream producers:** previous best-crop transition, observation module, crop selection module, tracking state transition module.
+
+**Downstream consumers:** demographics module, analytics assembly module, next best-crop transition.
+
+**Dependencies:** observation crop reference and quality fields, assignment contract, crop contract, best-crop configuration contract.
+
+### 3.8 Event Derivation Module
 
 **Purpose:** Derive semantic movement events from track snapshots and event configuration.
 
@@ -270,7 +295,7 @@ The output boundary transfers immutable `AnalyticsOutput` objects to downstream 
 
 **Dependencies:** track snapshot contract and event configuration contract.
 
-### 3.8 Demographics Module
+### 3.9 Demographics Module
 
 **Purpose:** Produce descriptive subject attribute observations.
 
@@ -280,7 +305,7 @@ The output boundary transfers immutable `AnalyticsOutput` objects to downstream 
 
 **Forbidden responsibilities:** track state mutation, event derivation, detection geometry mutation, output contract mutation after emission.
 
-**Inputs:** `CropBatch`, `ObservationAssignmentBatch`, optional `TrackSnapshotBatch`, `DemographicsConfig`.
+**Inputs:** `BestCropSnapshotBatch` for track-level attribution, or `CropBatch` plus `ObservationAssignmentBatch` for explicitly configured per-frame attribution, optional `TrackSnapshotBatch`, `DemographicsConfig`.
 
 **Outputs:** `DemographicsBatch`, `DemographicsDiagnosticBatch`.
 
@@ -288,9 +313,9 @@ The output boundary transfers immutable `AnalyticsOutput` objects to downstream 
 
 **Downstream consumers:** analytics assembly module and external attribute consumers.
 
-**Dependencies:** crop, assignment, track snapshot, and demographics configuration contracts.
+**Dependencies:** best-crop snapshot, crop, assignment, track snapshot, and demographics configuration contracts.
 
-### 3.9 Analytics Assembly Module
+### 3.10 Analytics Assembly Module
 
 **Purpose:** Produce the canonical output package for a processed frame or processing window.
 
@@ -412,6 +437,8 @@ A `Crop` is a subject image region derived for a detection.
 | `width` | `UInt32` | pixels | crop selection module | crop selection module | image consumers | crop lifetime | immutable | greater than zero when image exists | image extent |
 | `height` | `UInt32` | pixels | crop selection module | crop selection module | image consumers | crop lifetime | immutable | greater than zero when image exists | image extent |
 | `availability` | `Availability` | enum | crop selection module | crop selection module | all crop consumers | frame lifetime | immutable | `AVAILABLE` or reasoned unavailable value | explicit missing data |
+| `quality_score` | `Float32` or `Unavailable` | unit interval | crop selection module | crop selection module | observation, best-crop selection, diagnostics | frame lifetime | immutable | `[0.0, 1.0]` when available; computed by declared heuristic | lightweight suitability for downstream demographic imagery |
+| `quality_components` | `MetadataMap` | key-value | crop selection module | crop selection module | observation, diagnostics | frame lifetime | immutable | schema-safe; bounded keys | explains quality score inputs such as size, confidence, blur, occlusion, or pose when available |
 
 ### 5.6 `CropBatch`
 
@@ -451,6 +478,8 @@ An `Observation` is the canonical frame-local measurement of a subject.
 | `confidence` | `Float32` | unit interval | observation module | detection module through observation module | tracking, output | frame lifetime | immutable | `[0.0, 1.0]` or unavailable marker | observation certainty |
 | `embedding_ref` | `EngineId` or `Unavailable` | string | observation module | observation module | tracking, output | frame lifetime | immutable | references embedding when present | descriptor linkage |
 | `embedding_vector` | `NumericArray<Float32>` or omitted by reference policy | descriptor units | observation module | embedding module through observation module | tracking | frame lifetime unless copied into tracking state | immutable | schema-compatible when present | optional descriptor payload |
+| `crop_ref` | `EngineId` or `Unavailable` | string | observation module | crop selection through observation module | best-crop selection, demographics by declared lookup, output | frame lifetime unless selected into explicit best-crop state | immutable | references crop when present; unavailable reason otherwise | lightweight imagery provenance without carrying image buffer |
+| `crop_quality_score` | `Float32` or `Unavailable` | unit interval | observation module | crop selection through observation module | best-crop selection, diagnostics | frame lifetime | immutable | `[0.0, 1.0]` when available | comparable score for incremental best-crop selection |
 | `validity` | `ValidityStatus` | enum | observation module | observation module | tracking, output | frame lifetime | immutable | explicit valid or invalid reason | processing eligibility |
 
 ### 5.10 `ObservationBatch`
@@ -486,6 +515,7 @@ An `Observation` is the canonical frame-local measurement of a subject.
 | `subject_point_history` | array of `Point2D` | pixels | tracking transition module | tracking transition module | events | bounded track lifetime | immutable within state snapshot | ordered by time | event support |
 | `descriptor_ref` | `EngineId` or `Unavailable` | string | tracking transition module | tracking transition module | next transition | state snapshot lifetime | immutable | references compatible descriptor when present | descriptor continuity |
 | `closed_timestamp` | `Timestamp` or `Unavailable` | seconds | tracking transition module | tracking transition module | output | track lifetime | immutable once set | not earlier than first seen | closure time |
+| `closure_emitted` | `Boolean` | binary | tracking transition module | tracking transition module | next transition | state snapshot lifetime | immutable within state snapshot | true only after a closed snapshot has been emitted | prevents duplicate closure visibility while preserving exactly-once event derivation |
 
 ### 5.13 `TrackSnapshot`
 
@@ -501,7 +531,33 @@ An `Observation` is the canonical frame-local measurement of a subject.
 | `runtime_track_id` | `EngineId` or `Unavailable` | tracking transition module | tracking transition module | demographics, output | frame lifetime | immutable | references track when assigned | track link |
 | `assignment_status` | `AssignmentStatus` | enum | tracking transition module | tracking transition module | output | frame lifetime | immutable | explicit assigned or unassigned reason | interpretation |
 
-### 5.15 `Event`
+### 5.15 `BestCropState`
+
+`BestCropState` is the complete explicit state required to retain the current winning crop candidate per runtime track. It MAY be embedded inside `TrackingState` only when the combined contract declares ownership, lifetime, and memory limits for the best-crop fields; otherwise it MUST be a separate state object.
+
+| Field | Type | Owner | Producer | Consumers | Lifetime | Mutability | Invariants | Purpose |
+|---|---|---|---|---|---|---|---|---|
+| `state_id` | `EngineId` | best-crop transition module | best-crop transition module | next best-crop transition, diagnostics | transition lifetime until superseded | immutable after emission | unique | identifies state snapshot |
+| `source_id` | `EngineId` | best-crop transition module | best-crop transition module | next best-crop transition | source lifetime | immutable | matches tracking source | stream binding |
+| `items` | array of `BestCropRecord` | best-crop transition module | best-crop transition module | next best-crop transition, demographics through snapshots | track lifetime until demographic attribution or configured purge | immutable after emission | at most one active record per runtime track | retained winner set |
+| `schema_version` | `SchemaVersion` | best-crop transition module | best-crop transition module | consumers | state lifetime | immutable | supported version | state schema identity |
+
+### 5.16 `BestCropRecord`
+
+| Field | Type | Units / Format | Owner | Producer | Consumers | Lifetime | Mutability | Valid Range / Invariants | Purpose |
+|---|---|---|---|---|---|---|---|---|---|
+| `runtime_track_id` | `EngineId` | string | best-crop transition module | best-crop transition module | demographics, output | track attribution lifetime | immutable | references assigned track | subject identity binding |
+| `crop_ref` | `EngineId` or durable reference | string | best-crop transition module | best-crop transition module | demographics, output | declared best-crop retention lifetime | immutable | resolves to retained crop payload or declared external crop store entry | selected imagery handle |
+| `source_observation_id` | `EngineId` | string | best-crop transition module | observation through best-crop transition | diagnostics, output | record lifetime | immutable | references observation that produced selected crop | provenance |
+| `source_detection_id` | `EngineId` | string | best-crop transition module | observation through best-crop transition | diagnostics, output | record lifetime | immutable | references detection that produced selected crop | provenance |
+| `quality_score` | `Float32` or `Unavailable` | unit interval | best-crop transition module | observation through best-crop transition | demographics, diagnostics | record lifetime | immutable | `[0.0, 1.0]` when available | selected-crop quality |
+| `availability` | `Availability` | enum | best-crop transition module | best-crop transition module | demographics, output | record lifetime | immutable | explicit available or unavailable reason | demographic input readiness |
+
+### 5.17 `BestCropSnapshot`
+
+`BestCropSnapshot` is the externally visible read-only projection of the current best crop per track. It MUST identify the runtime track, selected crop reference, source detection or observation, quality score, and availability. It MUST NOT expose mutable internal state containers or non-winning crop candidates.
+
+### 5.18 `Event`
 
 | Field | Type | Units / Format | Owner | Producer | Consumers | Lifetime | Mutability | Valid Range / Invariants | Purpose |
 |---|---|---|---|---|---|---|---|---|---|
@@ -514,18 +570,19 @@ An `Observation` is the canonical frame-local measurement of a subject.
 | `event_config_id` | `EngineId` | string | event derivation module | event derivation module | output | event lifetime | immutable | references event config | interpretation context |
 | `confidence` | `Float32` or `Unavailable` | unit interval | event derivation module | event derivation module | output | event lifetime | immutable | `[0.0, 1.0]` when present | event certainty |
 
-### 5.16 `DemographicsResult`
+### 5.19 `DemographicsResult`
 
 | Field | Type | Units / Format | Owner | Producer | Consumers | Lifetime | Mutability | Valid Range / Invariants | Purpose |
 |---|---|---|---|---|---|---|---|---|---|
 | `demographics_id` | `EngineId` | string | demographics module | demographics module | output | frame or track attribution lifetime | immutable | unique | identifies result |
-| `detection_id` | `EngineId` | string | demographics module | demographics module | output | frame lifetime | immutable | references detection | detection provenance |
+| `detection_id` | `EngineId` or `Unavailable` | string | demographics module | demographics module | output | result lifetime | immutable | references selected detection when available | detection provenance |
 | `runtime_track_id` | `EngineId` or `Unavailable` | string | demographics module | demographics module | output | result lifetime | immutable | references assigned track when present | track attribution |
+| `best_crop_ref` | `EngineId` or `Unavailable` | string | demographics module | best-crop snapshot through demographics module | output | result lifetime | immutable | references selected crop when track-level attribution is used | imagery provenance |
 | `attributes` | array of `DemographicAttribute` | taxonomy values | demographics module | demographics module | output | result lifetime | immutable | taxonomy declared | descriptive facts |
 | `taxonomy_version` | `SchemaVersion` | version | demographics module | demographics module | output | result lifetime | immutable | non-empty when attributes present | meaning of attributes |
 | `availability` | `Availability` | enum | demographics module | demographics module | output | result lifetime | immutable | explicit value | missing-data semantics |
 
-### 5.17 `AnalyticsOutput`
+### 5.20 `AnalyticsOutput`
 
 `AnalyticsOutput` is the immutable output package emitted by the engine for a frame or processing window.
 
@@ -540,7 +597,8 @@ An `Observation` is the canonical frame-local measurement of a subject.
 | `tracks` | `TrackSnapshotBatch` projection | assembly module | tracking module through assembly | external consumers | external retention lifetime | immutable | preserves track facts | track output |
 | `assignments` | `ObservationAssignmentBatch` projection | assembly module | tracking module through assembly | external consumers | external retention lifetime | immutable | references valid observations | association output |
 | `events` | `EventBatch` projection | assembly module | event module through assembly | external consumers | external retention lifetime | immutable | stable ordering | event output |
-| `demographics` | `DemographicsBatch` projection | assembly module | demographics module through assembly | external consumers | external retention lifetime | immutable | references detections/tracks | attribute output |
+| `best_crops` | `BestCropSnapshotBatch` projection | assembly module | best-crop module through assembly | external consumers | external retention lifetime | immutable | references tracks and selected crops only | selected demographic imagery provenance |
+| `demographics` | `DemographicsBatch` projection | assembly module | demographics module through assembly | external consumers | external retention lifetime | immutable | references detections/tracks/best crops | attribute output |
 | `diagnostics` | `DiagnosticBatch` | assembly module | all modules through assembly | external consumers | external retention lifetime | immutable | deterministic ordering | auditability |
 | `schema_versions` | map | assembly module | schema registry | external consumers | external retention lifetime | immutable | all emitted schemas declared | compatibility |
 
@@ -548,7 +606,7 @@ An `Observation` is the canonical frame-local measurement of a subject.
 
 ### 6.1 Identity Graph
 
-`Frame` is the root object for frame-scoped data. `Detection`, `Crop`, `Embedding`, and `Observation` MUST reference exactly one frame directly or transitively. `TrackStateRecord` MAY reference observations across frames through bounded history references. `Event` MUST reference at least one track. `DemographicsResult` MUST reference a detection and MAY reference a track when assignment exists. `AnalyticsOutput` MUST reference the processed frame or window and contain only objects from that scope or stable projections of explicitly referenced state.
+`Frame` is the root object for frame-scoped data. `Detection`, `Crop`, `Embedding`, and `Observation` MUST reference exactly one frame directly or transitively. `TrackStateRecord` MAY reference observations across frames through bounded history references. `BestCropRecord` MUST reference at most one selected crop candidate per runtime track. `Event` MUST reference at least one track. `DemographicsResult` MUST reference a best-crop record for track-level attribution or a detection for per-frame attribution and MAY reference a track when assignment exists. `AnalyticsOutput` MUST reference the processed frame or window and contain only objects from that scope or stable projections of explicitly referenced state.
 
 ### 6.2 Batch Relationships
 
@@ -558,6 +616,7 @@ An `Observation` is the canonical frame-local measurement of a subject.
 - `ObservationBatch` belongs to one `DetectionBatch` and MAY reference one `EmbeddingBatch`.
 - `TrackSnapshotBatch` belongs to one tracking transition.
 - `ObservationAssignmentBatch` belongs to one `ObservationBatch` and one tracking transition.
+- `BestCropSnapshotBatch` belongs to one best-crop transition boundary.
 - `EventBatch` belongs to one event derivation boundary.
 - `DemographicsBatch` belongs to one demographic attribution boundary.
 
@@ -625,7 +684,9 @@ Every image-bearing contract MUST declare colour space, channel order, element t
 | `ObservationBatch` | observation module | engine orchestrator | tracking, assembly | none after emission | after tracking transition and output policy | immutable transfer |
 | `TrackingState` | tracking transition module | engine orchestrator until next transition | tracking transition only | next transition creates replacement | superseded state destruction after safe transfer | ownership transfer into transition; replacement returned |
 | `TrackSnapshotBatch` | tracking transition module | engine orchestrator | events, demographics, assembly | none after emission | output policy | immutable transfer |
-| `ObservationAssignmentBatch` | tracking transition module | engine orchestrator | demographics, assembly | none after emission | output policy | immutable transfer |
+| `ObservationAssignmentBatch` | tracking transition module | engine orchestrator | best-crop, demographics, assembly | none after emission | output policy | immutable transfer |
+| `BestCropState` | best-crop transition module | engine orchestrator until next transition | best-crop transition only | next transition creates replacement | superseded state destruction after safe transfer or configured demographic completion | ownership transfer into transition; replacement returned |
+| `BestCropSnapshotBatch` | best-crop transition module | engine orchestrator | demographics, assembly | none after emission | output policy | immutable transfer |
 | `EventState` | event derivation module | engine orchestrator until next event boundary | event derivation only | next event boundary creates replacement | superseded state destruction after safe transfer | ownership transfer into event boundary; replacement returned |
 | `EventBatch` | event derivation module | engine orchestrator | assembly | none after emission | output policy | immutable transfer |
 | `DemographicsBatch` | demographics module | engine orchestrator | assembly | none after emission | output policy | immutable transfer |
@@ -655,7 +716,7 @@ Only the owner may write to an object, and only while the object is in a mutable
 
 ### 9.2 Lifetime Requirements
 
-Every object MUST declare one lifetime class. Objects MUST NOT be retained beyond their lifetime. State objects MUST define destruction or supersession points. Frame image buffers MUST NOT be retained in long-lived state unless represented by a separate explicit object with declared retention and ownership.
+Every object MUST declare one lifetime class. Objects MUST NOT be retained beyond their lifetime. State objects MUST define destruction or supersession points. Frame image buffers MUST NOT be retained in long-lived state unless represented by a separate explicit object with declared retention and ownership. Non-winning crop image buffers MUST be discarded at frame-lifetime destruction and MUST NOT be retained for later best-crop comparison.
 
 ## 10. Memory Model
 
@@ -747,11 +808,15 @@ Producer: tracking transition module → Consumers: event derivation, demographi
 
 Producer: tracking transition module → Consumers: demographics, assembly → Destruction: after output policy completes.
 
-### 12.9 Event Flow
+### 12.9 Best-Crop Flow
+
+Producer: best-crop transition module → Consumers: demographics module and assembly → Destruction: after demographic attribution and output policy, or earlier when track closes and no demographic attribution is configured.
+
+### 12.10 Event Flow
 
 Producer: event derivation module → Consumers: assembly and external event consumers → Destruction: external retention policy.
 
-### 12.10 Demographics Flow
+### 12.11 Demographics Flow
 
 Producer: demographics module → Consumers: assembly and external attribute consumers → Destruction: external retention policy.
 
@@ -777,6 +842,9 @@ Producer: demographics module → Consumers: assembly and external attribute con
 18. Image format MUST be declared wherever image data appears.
 19. Coordinate system MUST be declared and consistent.
 20. External consumers MUST receive immutable outputs.
+21. Track closure MUST be emitted as an explicit snapshot transition exactly once; downstream modules MUST NOT infer closure solely from absence.
+22. Observations MUST carry crop references and quality scores when crop imagery exists, but MUST NOT carry long-lived crop image buffers.
+23. Best-crop selection MUST retain only the current winning candidate per track and MUST discard losing crop candidates immediately at frame-lifetime destruction.
 
 ## 14. Global Standards
 
@@ -818,9 +886,9 @@ Schema evolution MUST be additive or explicitly versioned. Removing fields, chan
 
 Dependencies flow from upstream contracts to downstream modules only:
 
-`Frame Validation → Detection → Crop Selection → Embedding → Observation → Tracking → Event Derivation → Demographics / Analytics Assembly → Output`
+`Frame Validation → Detection → Crop Selection → Embedding → Observation → Tracking → Best-Crop Selection → Event Derivation → Demographics / Analytics Assembly → Output`
 
-Demographics MAY depend on crop and assignment contracts. Event derivation MAY depend on track snapshots. Assembly MAY depend on all module outputs.
+Best-crop selection MAY depend on observation, assignment, and crop contracts. Demographics MAY depend on best-crop snapshots or explicitly configured per-frame crop and assignment contracts. Event derivation MAY depend on track snapshots. Assembly MAY depend on all module outputs.
 
 ### 15.2 Prohibited Dependencies
 
@@ -829,8 +897,9 @@ Demographics MAY depend on crop and assignment contracts. Event derivation MAY d
 - Embedding MUST NOT depend on tracking, events, demographics, or assembly.
 - Observation MUST NOT depend on tracking, events, or demographics.
 - Tracking MUST NOT depend on events, demographics, or assembly.
+- Best-crop selection MUST NOT influence tracking identity or lifecycle.
 - Event derivation MUST NOT depend on demographics or assembly.
-- Demographics MUST NOT mutate or influence tracking or event state.
+- Demographics MUST NOT mutate or influence tracking, best-crop, or event state.
 - No module may depend on private data structures of another module.
 
 ### 15.3 Adapter Rule
@@ -896,3 +965,4 @@ A future module MUST NOT require changes to existing constitutional contracts un
 28. No object may be retained without an ownership, lifetime, and memory rule.
 29. No external type may cross a constitutional module boundary unless represented by a constitutional contract.
 30. Deterministic outputs are required for identical inputs, configuration, state, and schema versions.
+31. Crop image reachability for demographics must be represented by an explicit crop reference, best-crop state record, or configured per-frame crop path; dead or unreachable crop contracts are invalid.
