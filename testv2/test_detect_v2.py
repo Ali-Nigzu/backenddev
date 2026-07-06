@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from detection import DetectV2, DetectV2Config, DetectV2InputError, RawDetection
+from detection import DetectV2, DetectV2Config, DetectV2InputError
+from detection.detect_v2 import RawDetection
 
 SAMPLE_IMAGE = ROOT / "data" / "samples" / "1000040807.jpg"
 

@@ -77,10 +77,11 @@ class UltralyticsYoloBackend:
     only persistent resource retained by this backend.
     """
 
-    __slots__ = ("_config", "_model")
+    __slots__ = ("_classes_arg", "_config", "_model")
 
     def __init__(self, config: DetectV2Config) -> None:
         self._config = config
+        self._classes_arg = list(config.classes)
         self._enable_deterministic_torch()
 
         try:
@@ -111,7 +112,7 @@ class UltralyticsYoloBackend:
 
         results = self._model(
             image,
-            classes=list(cfg.classes),
+            classes=self._classes_arg,
             conf=cfg.confidence_threshold,
             iou=cfg.iou_threshold,
             max_det=cfg.max_detections,
@@ -123,18 +124,20 @@ class UltralyticsYoloBackend:
         candidate_index = 0
         for result in results:
             boxes = getattr(result, "boxes", None)
-            if boxes is None:
+            if boxes is None or len(boxes) == 0:
                 continue
-            for box in boxes:
-                xyxy = box.xyxy[0].tolist()
-                confidence = float(box.conf[0])
+
+            xyxy_values = boxes.xyxy.detach().cpu().numpy()
+            confidence_values = boxes.conf.detach().cpu().numpy()
+            for row_index in range(len(confidence_values)):
+                xyxy = xyxy_values[row_index]
                 candidates.append(
                     RawDetection(
                         x1=float(xyxy[0]),
                         y1=float(xyxy[1]),
                         x2=float(xyxy[2]),
                         y2=float(xyxy[3]),
-                        confidence=confidence,
+                        confidence=float(confidence_values[row_index]),
                         candidate_index=candidate_index,
                     )
                 )
@@ -219,14 +222,14 @@ class DetectV2:
         width: int,
         height: int,
     ) -> list[dict[str, Any]]:
+        max_detections = self._config.max_detections
+        if max_detections == 0:
+            return []
+
         valid_candidates = self._valid_candidates(raw_candidates, width, height)
         nms_candidates = self._deterministic_nms(valid_candidates)
-        nms_candidates.sort(key=self._ordering_key)
-
-        if self._config.max_detections:
-            nms_candidates = nms_candidates[: self._config.max_detections]
-        else:
-            nms_candidates = []
+        if len(nms_candidates) > max_detections:
+            del nms_candidates[max_detections:]
 
         detections: list[dict[str, Any]] = [None] * len(  # type: ignore[list-item]
             nms_candidates
@@ -252,28 +255,33 @@ class DetectV2:
         width_f = float(width)
         height_f = float(height)
 
-        for candidate in raw_candidates:
-            values = (
-                candidate.x1,
-                candidate.y1,
-                candidate.x2,
-                candidate.y2,
-                candidate.confidence,
-            )
-            if not all(isfinite(float(value)) for value in values):
-                continue
+        confidence_threshold = self._config.confidence_threshold
 
-            x1 = min(max(float(candidate.x1), 0.0), width_f)
-            y1 = min(max(float(candidate.y1), 0.0), height_f)
-            x2 = min(max(float(candidate.x2), 0.0), width_f)
-            y2 = min(max(float(candidate.y2), 0.0), height_f)
+        for candidate in raw_candidates:
+            x1_raw = float(candidate.x1)
+            y1_raw = float(candidate.y1)
+            x2_raw = float(candidate.x2)
+            y2_raw = float(candidate.y2)
             confidence = float(candidate.confidence)
 
+            if not (
+                isfinite(x1_raw)
+                and isfinite(y1_raw)
+                and isfinite(x2_raw)
+                and isfinite(y2_raw)
+                and isfinite(confidence)
+            ):
+                continue
+
+            if confidence < confidence_threshold or confidence > 1.0:
+                continue
+
+            x1 = min(max(x1_raw, 0.0), width_f)
+            y1 = min(max(y1_raw, 0.0), height_f)
+            x2 = min(max(x2_raw, 0.0), width_f)
+            y2 = min(max(y2_raw, 0.0), height_f)
+
             if x1 >= x2 or y1 >= y2:
-                continue
-            if confidence < 0.0 or confidence > 1.0:
-                continue
-            if confidence < self._config.confidence_threshold:
                 continue
 
             valid.append(
@@ -337,10 +345,3 @@ class DetectV2:
         if union <= 0.0:
             return 0.0
         return intersection / union
-
-
-def detect_v2(frame: Frame, detector: DetectV2 | None = None) -> DetectionBatch:
-    """Convenience function for callers that do not manage a detector instance."""
-
-    runtime = detector or DetectV2()
-    return runtime.detect(frame)
