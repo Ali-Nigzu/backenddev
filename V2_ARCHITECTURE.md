@@ -507,3 +507,151 @@ This document does not:
 - define deployment routing;
 - perform cutover from the current pipeline to V2;
 - preserve any deleted architecture authority.
+
+## 13. DetectV2 Implementation Plan
+
+### 13.1 Scope and contract boundary
+
+`DetectV2` is a stateless spatial object detection module. It accepts exactly one `Frame` and returns exactly one `DetectionBatch`. It does not perform embedding, observation construction, tracking, event generation, demographic inference, crop generation as an output, temporal reasoning, or pipeline orchestration.
+
+The module boundary is:
+
+```text
+Frame -> DetectV2 -> DetectionBatch
+```
+
+`DetectV2` must treat `Frame.image` as read-only input owned by the orchestrator. After the call returns, the module retains no reference to the input `Frame`, the input image, model pre-processing buffers, raw backend outputs, NMS tensors, or temporary arrays. The returned `DetectionBatch` is the only analytics artifact produced by the module.
+
+### 13.2 Contract field mapping
+
+The output mapping is fixed and must not add compatibility fields:
+
+| Output field | Source or derivation |
+| --- | --- |
+| `DetectionBatch.frame_id` | copied exactly from `Frame.frame_id` |
+| `DetectionBatch.timestamp` | copied exactly from `Frame.timestamp` |
+| `DetectionBatch.detections` | newly allocated list containing zero or more `Detection` objects |
+| `Detection.detection_id` | deterministic identifier derived from `frame_id` and final deterministic detection index |
+| `Detection.bbox.x1` | final post-NMS box left coordinate as `float32`, clamped to image bounds |
+| `Detection.bbox.y1` | final post-NMS box top coordinate as `float32`, clamped to image bounds |
+| `Detection.bbox.x2` | final post-NMS box right coordinate as `float32`, clamped to image bounds |
+| `Detection.bbox.y2` | final post-NMS box bottom coordinate as `float32`, clamped to image bounds |
+| `Detection.confidence` | final post-NMS model confidence as `float32` |
+
+`DetectV2` must not include `frame_id`, `timestamp`, crops, image tensors, centers, embeddings, class labels, backend metadata, or tracking identifiers inside each `Detection` because these fields are not part of the locked `Detection` contract.
+
+### 13.3 Internal architecture
+
+The production implementation should use a small module-owned runtime object for non-analytics resources only:
+
+1. `DetectV2Config` contains immutable thresholds, model input dimensions, maximum detections per frame, NMS settings, deterministic backend flags, and supported image layout requirements.
+2. `DetectV2Runtime` owns loaded model weights, execution provider handles, and reusable scratch buffers if the selected backend safely supports per-call reuse without retaining analytics content after return.
+3. `detect(frame: Frame) -> DetectionBatch` validates the frame, prepares backend input, executes inference, applies thresholding and NMS, sorts final detections deterministically, builds the single output batch, clears or releases temporary references, and returns.
+
+The runtime object may persist model weights and compute handles, but it must not persist per-frame detections, image content, image-derived tensors, camera-specific state, previous outputs, counters used for analytics semantics, or global mutable analytics data.
+
+### 13.4 Inference strategy
+
+The detector backend may be YOLO-style, transformer-based, or another object detector, provided that its public output is normalized into the locked `DetectionBatch` contract. Pre-processing is internal and may include resize, letterbox padding, normalization, and layout conversion required by the model backend.
+
+The implementation should prefer a backend path that can consume the input image without a full-frame Python-level copy. If the backend requires a normalized tensor, the copy must be limited to the model input tensor and must not duplicate the original full-resolution frame. Backend output tensors must be consumed immediately and converted into final contract objects only after thresholding and NMS.
+
+Only object detection is allowed in this module. It must not produce per-detection crops for embedding, because crop ownership belongs outside the `DetectionBatch` contract and per-detection cropping would create avoidable allocation pressure in the detection hot path.
+
+### 13.5 Memory model
+
+The per-frame memory lifecycle is:
+
+1. Borrow immutable `Frame.image` for validation and backend input preparation.
+2. Allocate or reuse one bounded pre-processing tensor if required by the backend.
+3. Hold raw model outputs only long enough to run thresholding and NMS.
+4. Allocate exactly one `DetectionBatch` and one detection list for the returned frame.
+5. Pre-size the detection list to the known post-NMS count when the implementation language supports it; otherwise, append only after final count is known or enforce a configured maximum to avoid unbounded resizing.
+6. Allocate one small `Detection` object per final detection.
+7. Release local references to image-derived buffers before returning.
+
+The module must not allocate image objects per detection, must not copy crops, must not retain temporary arrays in closures, and must not store final detections in module-level or runtime-level containers. A no-detection frame returns an allocated `DetectionBatch` with `detections = []`.
+
+### 13.6 Batching strategy
+
+The public V2 contract remains single-frame: one `Frame` in and one `DetectionBatch` out. If the orchestrator later groups calls for throughput, batching may occur only behind an adapter that preserves single-frame contract semantics and deterministic output mapping.
+
+Internal backend batching is allowed only when all of the following are true:
+
+- batch membership and output association are explicit;
+- each output `DetectionBatch` copies the exact `frame_id` and `timestamp` from its corresponding input frame;
+- final detection ordering within each frame is deterministic;
+- no frame waits in module-owned analytics state beyond the active inference call;
+- failed frames have a consistent controlled failure response independent of neighbouring frames.
+
+For the first production implementation, the recommended default is single-frame inference with optional backend micro-batching disabled until the TestV2 harness includes multi-frame association and determinism checks.
+
+### 13.7 NMS and ordering
+
+Thresholding and NMS are internal implementation details. NMS must use deterministic settings and must not rely on uncontrolled nondeterministic GPU kernels. If GPU NMS cannot be made deterministic, NMS should run on CPU or use a backend deterministic mode.
+
+Final output ordering must be repeatable across runs. The required sort key after NMS is:
+
+1. confidence descending;
+2. `x1` ascending;
+3. `y1` ascending;
+4. `x2` ascending;
+5. `y2` ascending;
+6. backend candidate index ascending as a final stable tie-breaker.
+
+`detection_id` is assigned only after this final ordering step, using a deterministic format such as `{frame_id}:det:{zero_based_index}`. Random UUIDs, process-local counters, wall-clock values, or camera-level counters are forbidden because they break deterministic replay.
+
+### 13.8 Bounding box handling
+
+All returned bounding boxes must satisfy:
+
+- `0.0 <= x1 < x2 <= image_width`;
+- `0.0 <= y1 < y2 <= image_height`;
+- all four coordinates are finite `float32` values.
+
+Coordinates are transformed from model input space back into original image coordinates before clipping. Boxes that become invalid after clipping are discarded. The detector must not compute or return centers; centers are owned by the later Observe stage.
+
+### 13.9 Failure handling strategy
+
+Corrupt or invalid image input must raise a controlled `DetectV2InputError`. This includes missing required frame fields, non-`uint8` image data, non-three-channel shape, non-contiguous row-major memory, non-RGB channel order when metadata is available, empty dimensions, non-finite timestamp, or an image buffer inconsistent with its declared shape.
+
+The module must not return a partially valid batch for corrupt input because that would hide upstream data quality failures. Valid images with no detected objects return `DetectionBatch(frame_id, timestamp, detections=[])`.
+
+### 13.10 Determinism controls
+
+The implementation must configure deterministic execution at module initialization and test startup. Required controls include fixed model version, fixed pre-processing parameters, fixed confidence and NMS thresholds, deterministic backend flags where available, stable CPU fallback for nondeterministic NMS, disabled stochastic test-time augmentation, disabled random UUID generation, and explicit final sorting.
+
+If a selected inference provider cannot guarantee deterministic output for identical inputs, it is not acceptable for production `DetectV2` unless the nondeterministic stage is isolated and replaced with a deterministic post-processing path that produces identical contract outputs.
+
+### 13.11 Performance optimisation plan
+
+Optimisation must focus on reducing copies and allocation pressure without changing the contract:
+
+- validate image metadata before expensive work;
+- use view-based input access where possible;
+- allocate only the backend input tensor required by the model;
+- avoid original full-frame duplication;
+- avoid per-detection crops and image objects;
+- filter low-confidence candidates before NMS;
+- cap maximum detections per frame by configuration;
+- pre-size the output detection list from the final count;
+- avoid Python object creation until after final NMS;
+- expose backend warmup outside the per-frame hot path;
+- measure peak allocated memory and retained object count in TestV2 stress tests.
+
+### 13.12 TestV2 extension plan
+
+The TestV2 harness must add a `DetectV2` test suite using small deterministic fixtures loaded as RGB `uint8` contiguous row-major arrays. Fixture loading should explicitly convert source image files into the locked `Image` representation once per test setup, then pass fresh `Frame` objects into the detector. Synthetic blank images should be generated in memory for empty-frame and corrupt-input tests to avoid relying on model-specific fixture content.
+
+Required assertions:
+
+1. Schema validation: output has `frame_id`, `timestamp`, and `detections`; each detection has only `detection_id`, `bbox`, and `confidence`; each `bbox` has `x1`, `y1`, `x2`, and `y2`; numeric fields have the required float-compatible types.
+2. Contract mapping: `DetectionBatch.frame_id == Frame.frame_id` and `DetectionBatch.timestamp == Frame.timestamp` for every valid frame.
+3. Determinism: invoking `detect()` multiple times with byte-identical image input and identical frame metadata produces byte-for-byte equivalent serialized `DetectionBatch` values, including detection order and `detection_id` values.
+4. Empty frame: a valid blank or model-thresholded image returns `detections = []`, not `null`, not a missing field, and not a detection containing a crop or placeholder box.
+5. Sequential stress: many sequential calls with fresh frames do not grow retained memory after warmup; the harness should compare snapshots before and after a fixed call window and allow only bounded backend cache warmup configured outside the measured interval.
+6. Bounding box sanity: every detection satisfies `x1 < x2`, `y1 < y2`, coordinates are within original image bounds, and coordinates are finite.
+7. Failure mode: corrupt image input raises `DetectV2InputError` consistently and does not produce a partial `DetectionBatch`.
+8. No hidden retention: after a call, weak-reference or memory-snapshot checks confirm the module does not retain the input `Frame.image` or per-frame temporary arrays where the implementation language supports those checks.
+
+The test suite must not assert embeddings, centers, track IDs, event fields, demographics, crop contents, camera identity, temporal continuity, or downstream pipeline behaviour.
