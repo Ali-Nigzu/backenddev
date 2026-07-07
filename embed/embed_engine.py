@@ -1,11 +1,10 @@
 """DetectionBatch -> EmbeddingBatch."""
 
-import inspect
-from math import isfinite
 from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from ._osnet import osnet_x0_25
 
@@ -18,70 +17,40 @@ class Embed:
     def __init__(self) -> None:
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._model = osnet_x0_25()
-
         checkpoint = torch.load(
             Path(__file__).with_name("osnet_x0_25_msmt17.pth"),
             map_location=self._device,
         )
-        state_dict = (
-            checkpoint["state_dict"]
-            if isinstance(checkpoint, dict) and "state_dict" in checkpoint
-            else checkpoint
-        )
-        model_dict = self._model.state_dict()
-        model_dict.update(
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        self._model.load_state_dict(
             {
                 key.replace("module.", ""): value
                 for key, value in state_dict.items()
-                if "classifier" not in key
-                and key.replace("module.", "") in model_dict
-                and model_dict[key.replace("module.", "")].shape == value.shape
-            }
+                if not key.replace("module.", "").startswith("classifier")
+            },
+            strict=False,
         )
-        self._model.load_state_dict(model_dict, strict=False)
         self._model.to(self._device)
         self._model.eval()
 
     def __call__(self, detection_batch):
-        for field in ("frame_id", "timestamp", "detections"):
+        for field in ("frame_id", "timestamp", "frame", "detections"):
             if field not in detection_batch:
                 raise ValueError(f"Missing required DetectionBatch field: {field}")
 
-        frame_id = detection_batch["frame_id"]
-        timestamp = detection_batch["timestamp"]
-        detections = detection_batch["detections"]
-
-        if not isinstance(frame_id, str) or not frame_id:
-            raise ValueError("DetectionBatch.frame_id must be a non-empty string")
-        if not isinstance(timestamp, (float, int)) or not isfinite(float(timestamp)):
-            raise ValueError("DetectionBatch.timestamp must be finite")
-        if not isinstance(detections, list):
-            raise ValueError("DetectionBatch.detections must be a list")
-
-        image = None
-        if detections:
-            caller_frame = inspect.currentframe().f_back
-            for value in caller_frame.f_locals.values():
-                if (
-                    isinstance(value, dict)
-                    and value.get("frame_id") == frame_id
-                    and value.get("timestamp") == timestamp
-                    and isinstance(value.get("image"), np.ndarray)
-                ):
-                    image = value["image"]
-                    break
-            del caller_frame
-            if image is None or image.ndim != 3 or image.shape[2] != 3:
-                raise ValueError("Current Frame.image is required when detections are present")
+        image = detection_batch["frame"].get("image")
+        if image is None:
+            raise ValueError("Missing required DetectionBatch frame image")
 
         embeddings = []
-        for detection in detections:
+        for detection in detection_batch["detections"]:
             detection_id = detection["detection_id"]
             bbox = detection["bbox"]
-            crop = image[
-                max(0, int(bbox["y1"])) : min(image.shape[0], int(bbox["y2"])),
-                max(0, int(bbox["x1"])) : min(image.shape[1], int(bbox["x2"])),
-            ]
+            x1 = max(0, int(bbox["x1"]))
+            y1 = max(0, int(bbox["y1"]))
+            x2 = min(image.shape[1], int(bbox["x2"]))
+            y2 = min(image.shape[0], int(bbox["y2"]))
+            crop = image[y1:y2, x1:x2]
             if crop.size == 0:
                 raise ValueError("Detection bbox produced an empty crop")
 
@@ -91,12 +60,17 @@ class Embed:
                 .unsqueeze(0)
                 .float()
                 .to(self._device)
+                / 255.0
             )
+            tensor = F.interpolate(tensor, size=(256, 128), mode="bilinear", align_corners=False)
+            mean = torch.tensor([0.485, 0.456, 0.406], device=self._device).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], device=self._device).view(1, 3, 1, 1)
+            tensor = (tensor - mean) / std
+
             with torch.inference_mode():
                 vector = (
                     self._model(tensor)
                     .squeeze(0)
-                    .detach()
                     .cpu()
                     .numpy()
                     .astype(np.float32, copy=False)
@@ -118,7 +92,7 @@ class Embed:
             )
 
         return {
-            "frame_id": frame_id,
-            "timestamp": float(timestamp),
+            "frame_id": detection_batch["frame_id"],
+            "timestamp": detection_batch["timestamp"],
             "embeddings": embeddings,
         }

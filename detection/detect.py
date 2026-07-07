@@ -85,5 +85,6 @@ class Detect:
         return {
             "frame_id": frame_id,
             "timestamp": float(timestamp),
+            "frame": {"image": image},
             "detections": detections,
         }

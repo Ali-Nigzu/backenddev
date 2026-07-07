@@ -29,9 +29,10 @@ detection_batch = detect(frame)
 
 print(detection_batch)
 
-assert set(detection_batch.keys()) == {"frame_id", "timestamp", "detections"}
+assert set(detection_batch.keys()) == {"frame_id", "timestamp", "frame", "detections"}
 assert detection_batch["frame_id"] == frame["frame_id"]
 assert detection_batch["timestamp"] == frame["timestamp"]
+assert detection_batch["frame"]["image"] is image
 assert isinstance(detection_batch["detections"], list)
 
 for detection in detection_batch["detections"]:
@@ -63,3 +64,5 @@ for detection, embedding in zip(detection_batch["detections"], embedding_batch["
     assert len(vector["shape"]) == 1
     assert isinstance(vector["values"], list)
     assert len(vector["values"]) == vector["shape"][0]
+    assert len(vector["values"]) > 0
+    assert all(isinstance(value, float) for value in vector["values"])
