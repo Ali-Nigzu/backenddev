@@ -12,7 +12,7 @@ __all__ = ["Embed"]
 
 
 class Embed:
-    __slots__ = ("_device", "_model")
+    __slots__ = ("_device", "_mean", "_model", "_std")
 
     def __init__(self) -> None:
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -32,6 +32,12 @@ class Embed:
         )
         self._model.to(self._device)
         self._model.eval()
+        self._mean = torch.tensor([0.485, 0.456, 0.406], device=self._device).view(
+            1, 3, 1, 1
+        )
+        self._std = torch.tensor([0.229, 0.224, 0.225], device=self._device).view(
+            1, 3, 1, 1
+        )
 
     def __call__(self, detection_batch):
         for field in ("frame_id", "timestamp", "frame", "detections"):
@@ -47,7 +53,6 @@ class Embed:
             raise ValueError("Missing required DetectionBatch detections")
 
         tensors = []
-        detection_ids = []
         for detection in detections:
             bbox = detection["bbox"]
             crop = image[
@@ -72,18 +77,11 @@ class Embed:
                     align_corners=False,
                 ).squeeze(0)
             )
-            detection_ids.append(detection["detection_id"])
 
         embeddings = []
         if tensors:
             batch = torch.stack(tensors).to(self._device)
-            mean = torch.tensor([0.485, 0.456, 0.406], device=self._device).view(
-                1, 3, 1, 1
-            )
-            std = torch.tensor([0.229, 0.224, 0.225], device=self._device).view(
-                1, 3, 1, 1
-            )
-            batch = (batch - mean) / std
+            batch = (batch - self._mean) / self._std
 
             with torch.inference_mode():
                 vectors = (
@@ -93,10 +91,10 @@ class Embed:
             norms = np.linalg.norm(vectors, axis=1, keepdims=True)
             np.divide(vectors, norms, out=vectors, where=norms > 0.0)
 
-            for detection_id, vector in zip(detection_ids, vectors):
+            for detection, vector in zip(detections, vectors):
                 embeddings.append(
                     {
-                        "detection_id": detection_id,
+                        "detection_id": detection["detection_id"],
                         "vector": {
                             "dtype": "float32",
                             "shape": [int(vector.shape[0])],
