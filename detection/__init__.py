@@ -1,5 +1,5 @@
-"""Public detection package exports for Analytics Engine V2."""
+"""Locked public detection package export."""
 
-from .detect_v2 import DetectV2
+from .detect import Detect
 
-__all__ = ["DetectV2"]
+__all__ = ["Detect"]
