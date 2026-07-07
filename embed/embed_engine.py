@@ -44,26 +44,35 @@ class Embed:
             if field not in detection_batch:
                 raise ValueError(f"Missing required DetectionBatch field: {field}")
 
-        image = detection_batch["frame"].get("image")
-        if image is None:
-            raise ValueError("Missing required DetectionBatch frame image")
-
         detections = detection_batch["detections"]
         if detections is None:
             raise ValueError("Missing required DetectionBatch detections")
 
+        embeddings = []
+        if len(detections) == 0:
+            return {
+                "frame_id": detection_batch["frame_id"],
+                "timestamp": detection_batch["timestamp"],
+                "embeddings": embeddings,
+            }
+
+        image = detection_batch["frame"].get("image")
+        if image is None:
+            raise ValueError("Missing required DetectionBatch frame image")
+
+        height, width = image.shape[:2]
         tensors = []
         for detection in detections:
             bbox = detection["bbox"]
             crop = image[
-                max(0, int(bbox["y1"])) : min(image.shape[0], int(bbox["y2"])),
-                max(0, int(bbox["x1"])) : min(image.shape[1], int(bbox["x2"])),
+                max(0, int(bbox["y1"])) : min(height, int(bbox["y2"])),
+                max(0, int(bbox["x1"])) : min(width, int(bbox["x2"])),
             ]
             if crop.size == 0:
                 raise ValueError("Detection bbox produced an empty crop")
 
             tensor = (
-                torch.from_numpy(np.ascontiguousarray(crop))
+                torch.from_numpy(crop)
                 .permute(2, 0, 1)
                 .unsqueeze(0)
                 .float()
@@ -78,30 +87,26 @@ class Embed:
                 ).squeeze(0)
             )
 
-        embeddings = []
-        if tensors:
-            batch = torch.stack(tensors).to(self._device)
-            batch = (batch - self._mean) / self._std
+        batch = torch.stack(tensors).to(self._device)
+        batch = (batch - self._mean) / self._std
 
-            with torch.inference_mode():
-                vectors = (
-                    self._model(batch).cpu().numpy().astype(np.float32, copy=False)
-                )
+        with torch.inference_mode():
+            vectors = self._model(batch).cpu().numpy().astype(np.float32, copy=False)
 
-            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-            np.divide(vectors, norms, out=vectors, where=norms > 0.0)
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        np.divide(vectors, norms, out=vectors, where=norms > 0.0)
 
-            for detection, vector in zip(detections, vectors):
-                embeddings.append(
-                    {
-                        "detection_id": detection["detection_id"],
-                        "vector": {
-                            "dtype": "float32",
-                            "shape": [int(vector.shape[0])],
-                            "values": vector.tolist(),
-                        },
-                    }
-                )
+        for detection, vector in zip(detections, vectors):
+            embeddings.append(
+                {
+                    "detection_id": detection["detection_id"],
+                    "vector": {
+                        "dtype": "float32",
+                        "shape": [int(vector.shape[0])],
+                        "values": vector.tolist(),
+                    },
+                }
+            )
 
         return {
             "frame_id": detection_batch["frame_id"],
