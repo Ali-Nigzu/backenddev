@@ -1,73 +1,124 @@
+"""DetectionBatch -> EmbeddingBatch."""
+
+import inspect
+from math import isfinite
 from pathlib import Path
-import torch
+
 import numpy as np
-from embed.osnet import osnet_x0_25
+import torch
+
+from ._osnet import osnet_x0_25
+
+__all__ = ["Embed"]
 
 
-class embed:
+class Embed:
+    __slots__ = ("_device", "_model")
 
-    def __init__(self):
+    def __init__(self) -> None:
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._model = osnet_x0_25()
 
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
+        checkpoint = torch.load(
+            Path(__file__).with_name("osnet_x0_25_msmt17.pth"),
+            map_location=self._device,
         )
+        state_dict = (
+            checkpoint["state_dict"]
+            if isinstance(checkpoint, dict) and "state_dict" in checkpoint
+            else checkpoint
+        )
+        model_dict = self._model.state_dict()
+        model_dict.update(
+            {
+                key.replace("module.", ""): value
+                for key, value in state_dict.items()
+                if "classifier" not in key
+                and key.replace("module.", "") in model_dict
+                and model_dict[key.replace("module.", "")].shape == value.shape
+            }
+        )
+        self._model.load_state_dict(model_dict, strict=False)
+        self._model.to(self._device)
+        self._model.eval()
 
-        # -------------------------
-        # Model (architecture only)
-        # -------------------------
-        self.model = osnet_x0_25()
+    def __call__(self, detection_batch):
+        for field in ("frame_id", "timestamp", "detections"):
+            if field not in detection_batch:
+                raise ValueError(f"Missing required DetectionBatch field: {field}")
 
-        # -------------------------
-        # LOCAL WEIGHT RESOLUTION (LIKE DETECTION)
-        # -------------------------
-        MODEL_PATH = Path(__file__).parent / "osnet_x0_25_msmt17.pth"
+        frame_id = detection_batch["frame_id"]
+        timestamp = detection_batch["timestamp"]
+        detections = detection_batch["detections"]
 
-        checkpoint = torch.load(MODEL_PATH, map_location=self.device)
+        if not isinstance(frame_id, str) or not frame_id:
+            raise ValueError("DetectionBatch.frame_id must be a non-empty string")
+        if not isinstance(timestamp, (float, int)) or not isfinite(float(timestamp)):
+            raise ValueError("DetectionBatch.timestamp must be finite")
+        if not isinstance(detections, list):
+            raise ValueError("DetectionBatch.detections must be a list")
 
-        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        else:
-            state_dict = checkpoint
+        image = None
+        if detections:
+            caller_frame = inspect.currentframe().f_back
+            for value in caller_frame.f_locals.values():
+                if (
+                    isinstance(value, dict)
+                    and value.get("frame_id") == frame_id
+                    and value.get("timestamp") == timestamp
+                    and isinstance(value.get("image"), np.ndarray)
+                ):
+                    image = value["image"]
+                    break
+            del caller_frame
+            if image is None or image.ndim != 3 or image.shape[2] != 3:
+                raise ValueError("Current Frame.image is required when detections are present")
 
-        model_dict = self.model.state_dict()
+        embeddings = []
+        for detection in detections:
+            detection_id = detection["detection_id"]
+            bbox = detection["bbox"]
+            crop = image[
+                max(0, int(bbox["y1"])) : min(image.shape[0], int(bbox["y2"])),
+                max(0, int(bbox["x1"])) : min(image.shape[1], int(bbox["x2"])),
+            ]
+            if crop.size == 0:
+                raise ValueError("Detection bbox produced an empty crop")
 
-        filtered = {}
+            tensor = (
+                torch.from_numpy(np.ascontiguousarray(crop))
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .float()
+                .to(self._device)
+            )
+            with torch.inference_mode():
+                vector = (
+                    self._model(tensor)
+                    .squeeze(0)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
 
-        for k, v in state_dict.items():
-            k = k.replace("module.", "")
+            norm = np.linalg.norm(vector)
+            if norm > 0.0:
+                vector = (vector / norm).astype(np.float32, copy=False)
 
-            if "classifier" in k:
-                continue
-
-            if k in model_dict and model_dict[k].shape == v.shape:
-                filtered[k] = v
-
-        model_dict.update(filtered)
-        self.model.load_state_dict(model_dict, strict=False)
-
-        self.model.to(self.device)
-        self.model.eval()
-
-    def embed(self, detection: dict):
-
-        img = detection["image"]
-
-        if img is None:
-            raise ValueError("Empty image in detection")
-
-        x = torch.from_numpy(img)
-        x = x.permute(2, 0, 1).unsqueeze(0).float().to(self.device)
-
-        with torch.inference_mode():
-            feat = self.model(x)
-
-        vec = feat.squeeze(0).cpu().numpy()
-
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
+            embeddings.append(
+                {
+                    "detection_id": detection_id,
+                    "vector": {
+                        "dtype": "float32",
+                        "shape": [int(vector.shape[0])],
+                        "values": vector.tolist(),
+                    },
+                }
+            )
 
         return {
-            "detection_id": detection["detection_id"],
-            "embedding": vec
+            "frame_id": frame_id,
+            "timestamp": float(timestamp),
+            "embeddings": embeddings,
         }

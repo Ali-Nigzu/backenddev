@@ -1,5 +1,3 @@
-from __future__ import division, absolute_import
-
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -192,36 +190,4 @@ def osnet_x0_25():
         blocks=[OSBlock, OSBlock, OSBlock],
         layers=[2, 2, 2],
         channels=[16, 64, 96, 128]
-    )
-
-
-def osnet_x0_5():
-    return OSNet(
-        blocks=[OSBlock, OSBlock, OSBlock],
-        layers=[2, 2, 2],
-        channels=[32, 128, 192, 256]
-    )
-
-
-def osnet_x0_75():
-    return OSNet(
-        blocks=[OSBlock, OSBlock, OSBlock],
-        layers=[2, 2, 2],
-        channels=[48, 192, 288, 384]
-    )
-
-
-def osnet_x1_0():
-    return OSNet(
-        blocks=[OSBlock, OSBlock, OSBlock],
-        layers=[2, 2, 2],
-        channels=[64, 256, 384, 512]
-    )
-
-
-def osnet_ibn_x1_0():
-    return OSNet(
-        blocks=[OSBlock, OSBlock, OSBlock],
-        layers=[2, 2, 2],
-        channels=[64, 256, 384, 512]
     )
