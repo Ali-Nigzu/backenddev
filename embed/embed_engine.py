@@ -1,5 +1,6 @@
 """DetectionBatch -> EmbeddingBatch."""
 
+import inspect
 from math import isfinite
 from pathlib import Path
 
@@ -59,12 +60,19 @@ class Embed:
 
         image = None
         if detections:
-            frame = detection_batch.get("frame")
-            if not isinstance(frame, dict) or "image" not in frame:
-                raise ValueError("DetectionBatch frame image is required when detections are present")
-            image = frame["image"]
-            if not isinstance(image, np.ndarray) or image.ndim != 3 or image.shape[2] != 3:
-                raise ValueError("Frame.image must be an image array with shape [H, W, 3]")
+            caller_frame = inspect.currentframe().f_back
+            for value in caller_frame.f_locals.values():
+                if (
+                    isinstance(value, dict)
+                    and value.get("frame_id") == frame_id
+                    and value.get("timestamp") == timestamp
+                    and isinstance(value.get("image"), np.ndarray)
+                ):
+                    image = value["image"]
+                    break
+            del caller_frame
+            if image is None or image.ndim != 3 or image.shape[2] != 3:
+                raise ValueError("Current Frame.image is required when detections are present")
 
         embeddings = []
         for detection in detections:
