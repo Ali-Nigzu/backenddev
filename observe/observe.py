@@ -15,7 +15,7 @@ class Observe:
         for field in ("frame_id", "timestamp", "detections"):
             if field not in detection_batch:
                 raise ValueError(f"Missing required DetectionBatch field: {field}")
-        for field in ("frame_id", "embeddings"):
+        for field in ("frame_id", "timestamp", "embeddings"):
             if field not in embedding_batch:
                 raise ValueError(f"Missing required EmbeddingBatch field: {field}")
 
@@ -23,6 +23,8 @@ class Observe:
         timestamp = detection_batch["timestamp"]
         if frame_id != embedding_batch["frame_id"]:
             raise ValueError("DetectionBatch.frame_id must match EmbeddingBatch.frame_id")
+        if timestamp != embedding_batch["timestamp"]:
+            raise ValueError("DetectionBatch.timestamp must match EmbeddingBatch.timestamp")
 
         detections = detection_batch["detections"]
         embeddings = embedding_batch["embeddings"]
