@@ -37,7 +37,11 @@ detection_batch = detect(frame)
 
 print(detection_batch)
 
-assert_has_fields("DetectionBatch", detection_batch, ("frame_id", "detections"))
+assert_has_fields(
+    "DetectionBatch",
+    detection_batch,
+    ("frame_id", "timestamp", "detections"),
+)
 assert set(detection_batch.keys()) == {"frame_id", "timestamp", "frame", "detections"}
 assert detection_batch["frame_id"] == frame["frame_id"]
 assert detection_batch["timestamp"] == frame["timestamp"]
@@ -57,7 +61,11 @@ embedding_batch = embed(detection_batch)
 
 print(embedding_batch)
 
-assert_has_fields("EmbeddingBatch", embedding_batch, ("frame_id", "embeddings"))
+assert_has_fields(
+    "EmbeddingBatch",
+    embedding_batch,
+    ("frame_id", "timestamp", "embeddings"),
+)
 assert set(embedding_batch.keys()) == {"frame_id", "timestamp", "embeddings"}
 assert embedding_batch["frame_id"] == detection_batch["frame_id"]
 assert embedding_batch["timestamp"] == detection_batch["timestamp"]
@@ -90,6 +98,7 @@ assert_has_fields(
 assert set(observation_batch.keys()) == {"frame_id", "timestamp", "observations"}
 assert observation_batch["frame_id"] == detection_batch["frame_id"]
 assert observation_batch["timestamp"] == detection_batch["timestamp"]
+assert observation_batch["timestamp"] == embedding_batch["timestamp"]
 assert isinstance(observation_batch["observations"], list)
 assert len(observation_batch["observations"]) == len(embedding_batch["embeddings"])
 assert len(observation_batch["observations"]) == len(detection_batch["detections"])
@@ -147,3 +156,29 @@ for embedding in embedding_batch["embeddings"]:
         if observation["detection_id"] == embedding["detection_id"]
     ]
     assert len(matches) == 1
+
+
+# Observe must reject DetectionBatch/EmbeddingBatch timestamp mismatches.
+mismatched_embedding_batch = {
+    "frame_id": embedding_batch["frame_id"],
+    "timestamp": embedding_batch["timestamp"] + 1.0,
+    "embeddings": embedding_batch["embeddings"],
+}
+try:
+    observe(detection_batch, mismatched_embedding_batch)
+except ValueError as exc:
+    assert str(exc) == "DetectionBatch.timestamp must match EmbeddingBatch.timestamp"
+else:
+    raise AssertionError("Observe must reject mismatched batch timestamps")
+
+# Observe must require EmbeddingBatch.timestamp.
+missing_timestamp_embedding_batch = {
+    "frame_id": embedding_batch["frame_id"],
+    "embeddings": embedding_batch["embeddings"],
+}
+try:
+    observe(detection_batch, missing_timestamp_embedding_batch)
+except ValueError as exc:
+    assert str(exc) == "Missing required EmbeddingBatch field: timestamp"
+else:
+    raise AssertionError("Observe must require EmbeddingBatch.timestamp")
