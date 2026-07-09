@@ -1,585 +1,777 @@
-# Track Module V2 Transformation Plan
+# Track Module V2 Architecture Redesign From Locked IO Contract
 
-## Purpose
+## 1. Confirmation of Locked IO Contract
 
-This document is an investigation and migration plan for converting the current Track module into the strict V2 state-transition architecture. It intentionally does **not** implement the refactor.
-
-Target contract:
-
-```text
-Track(tracking_state, observation_batch) -> tracking_state
-```
-
-Track must become one deterministic transition from `State(t)` plus `ObservationBatch(t)` to `State(t+1)`. It must not own video reading, frame iteration, detection, embedding, observation construction, persistence, window management, output rendering, demographics, event assembly, or other pipeline orchestration.
-
-## Existing V2 Architecture Context
+This document is an investigation and architecture design plan only. It does **not** implement Track V2.
 
 The locked V2 pipeline is:
 
 ```text
 Frame
-  ↓
+  |
 Detect
-  ↓
+  |
 Embed
-  ↓
+  |
 Observe
-  ↓
+  |
 Track
-  ↓
+  |
 Event
-  ↓
+  |
 Demographic
-  ↓
+  |
 Assemble
-  ↓
+  |
 Output
 ```
 
-The currently completed direction is:
+The locked Track transition is:
 
 ```text
-DetectionBatch + EmbeddingBatch
-            |
-            v
-        Observe()
-            |
-            v
-     ObservationBatch
+Track(TrackingState(t), ObservationBatch(t)) -> TrackingState(t+1)
 ```
 
-`Observe` already returns the expected V2 shape: `frame_id`, `timestamp`, and ordered `observations`, where each observation has `detection_id`, `bbox`, `center`, `embedding`, and `confidence`.
-
-## Current Track Folder Structure
-
-```text
-track/
-  __init__.py      Public exports for TrackV2, TrackV2Config, RuntimeTrackV2.
-  config.py        Thresholds and lifecycle/motion configuration.
-  lifecycle.py     Track creation, matchable-track selection, promotion, stale closure.
-  matching.py      Motion gate, cosine embedding similarity, candidate building, assignment.
-  models.py        RuntimeTrackV2 mutable runtime dataclass.
-  motion.py        Prediction, velocity, distance helpers.
-  tracker.py       Stateful TrackV2 wrapper and update loop.
-```
-
-Related current runner/test harness:
-
-```text
-test_tracking_v2_pipeline.py
-```
-
-Despite its name, `test_tracking_v2_pipeline.py` is a full runnable pipeline script: it opens video, calls detection, calls embedding, builds observations, updates the tracker, detects events, predicts demographics, renders video overlays, writes contact sheets, and prints summaries.
-
-## Current Track Execution Flow
-
-```text
-External script / runner
-  |
-  | owns video capture loop, FPS, frame index, output writer, overlay, summaries
-  v
-For each video frame:
-  |
-  | build frame_packet
-  v
-Detect(frame_packet) or legacy detect(frame_packet)
-  |
-  v
-For each detection:
-  |
-  | call embedder.embed(...)
-  | call build_observation(...)
-  v
-observations_by_ts[timestamp] = [observation, ...]
-  |
-  v
-tracker.update(observations_by_ts)
-  |
-  | TrackV2.update owns an internal timestamp loop over sorted(observations_by_ts.keys())
-  | TrackV2 owns persistent mutable state:
-  |   - self.tracks
-  |   - self.pending_births
-  |   - self.frame_index
-  |   - self.last_update_timestamp
-  |   - debug counters
-  v
-For each timestamp inside update:
-  |
-  | eligible_tracks = ACTIVE + TENTATIVE tracks
-  v
-assign_matches(eligible_tracks, observations, config)
-  |
-  | build_candidates(...)
-  |   - motion_gate(...)
-  |   - predict_center(...)
-  |   - distance(...)
-  |   - embedding_similarity(track.last_embedding, observation.embedding)
-  |
-  | greedy assignment:
-  |   - sort by motion distance, track index, observation index
-  |   - resolve motion ambiguity with embedding similarity
-  v
-Matched tracks updated in place
-  |
-  | update velocity, center, bbox, embedding, timestamps, hit/miss counts,
-  | detection history, center history, lifecycle state
-  v
-close_stale_tracks(...)
-  |
-  | increment miss counts for unmatched ACTIVE/TENTATIVE tracks
-  | close tentative/active tracks according to age and miss thresholds
-  v
-Unmatched observations processed
-  |
-  | skip if gated to an existing track but not chosen
-  | skip if recent unmatched track remains plausible
-  | otherwise record/advance pending birth buffer
-  | create RuntimeTrackV2 when birth buffer threshold is reached
-  v
-Prune pending births, update last timestamp, increment internal frame_index
-  |
-  v
-Return (list(self.tracks), assignment_map)
-  |
-  v
-External script consumes tracks and assignment_map for events, display IDs,
-contact-sheet crops, best detections, demographics, overlays, and summaries.
-```
-
-## Where Key Things Happen Today
-
-| Concern | Current location | Notes |
-| --- | --- | --- |
-| Entry point | `TrackV2.update(observations_by_ts, current_timestamp=None)` | Accepts a timestamp-to-observations map, not a single `ObservationBatch`. |
-| Frame loop ownership | `test_tracking_v2_pipeline.py` | Not inside `track/`, but tightly coupled to current tracker return shape. |
-| Timestamp loop ownership | `TrackV2.update` | Tracker can process multiple timestamps in one call, which conflicts with one-batch V2 transition. |
-| Observations enter | `observations_by_ts[timestamp]` | Current observations are legacy dicts using list-shaped `bbox`/`center`, not the locked V2 dict-shaped `bbox`/`center`. |
-| Matching happens | `track/matching.py` | Valuable algorithmic core. |
-| Motion helpers | `track/motion.py` | Valuable deterministic helper logic. |
-| Lifecycle handling | `track/lifecycle.py` and `TrackV2.update` | Valuable but currently mutates hidden object state. |
-| State lives | `TrackV2` instance and `RuntimeTrackV2` objects | Hidden state violates strict V2 stateless module principle. |
-| Outputs produced | `TrackV2.update` plus runner | Tracker returns tracks and `assignment_map`; runner derives events, overlays, crops, demographics, display IDs. |
-
-## Responsibility Map
-
-### KEEP: Tracking Intelligence to Preserve
-
-These behaviours should survive unless founder decisions explicitly change them:
-
-- Cosine embedding similarity for appearance comparison.
-- Motion prediction based on current center, velocity, and elapsed time.
-- Distance-based motion gating.
-- Maximum speed rejection.
-- Candidate construction across matchable tracks and current observations.
-- Deterministic greedy assignment ordered by motion distance, track index, and observation index.
-- Ambiguity resolution that uses embedding similarity when motion distances are close.
-- ACTIVE/TENTATIVE/CLOSED lifecycle semantics.
-- Promotion from TENTATIVE to ACTIVE after enough hits.
-- Miss counting and stale closure for unmatched tracks.
-- Minimum lifetime before closure.
-- Pending-birth buffering for unmatched detections.
-- Plausibility check for recently unmatched tracks to avoid premature new-track creation.
-- Velocity smoothing.
-- Threshold/config behaviour in `TrackV2Config`.
-
-### MOVE: Responsibilities Belonging Elsewhere
-
-These should be moved out of the Track module contract or owned by an orchestrator/test harness:
-
-- Video reading and frame iteration.
-- FPS normalization and timestamp generation from frame index.
-- Detection calls.
-- Embedding calls.
-- Observation construction.
-- Event detection invocation after tracking.
-- Demographic prediction.
-- Best detection/crop collection.
-- Runtime display-ID mapping for visualization.
-- Video writer and overlay rendering.
-- Contact-sheet generation.
-- Summary printing and progress display.
-- Multi-timestamp batching/window management currently accepted by `TrackV2.update`.
-- Persistence or loading/saving of tracking state, if added later.
-
-### DELETE or Redesign: V2-Violating Shape
-
-These should not remain in the V2 Track interface:
-
-- Hidden persistent analytics state inside a `TrackV2` instance.
-- `TrackV2.update(observations_by_ts)` as the primary contract.
-- Multiple timestamp transitions inside one Track call.
-- Implicit synthetic timestamp fallback when no observations are supplied.
-- Random UUID generation inside the deterministic transition unless seeded or replaced by state-owned deterministic ID allocation.
-- Debug counters as hidden mutable instance fields.
-- Legacy observation shape assumptions: `center[0]`, `center[1]`, and list bbox values.
-- Returning `assignment_map` as an undeclared side output if the non-negotiable contract remains strictly `TrackingState` only.
-
-## Current State Inventory
-
-The current tracker preserves these values between frame updates:
-
-### Tracker-level State
-
-- `tracks`: list of all runtime tracks, including CLOSED tracks.
-- `pending_births`: buffered unmatched observations with center, observation, first/last seen frame, and count.
-- `frame_index`: monotonically incremented internal counter.
-- `last_update_timestamp`: timestamp of last processed update.
-- `last_new_tracks_created`: debug/diagnostic counter.
-- `last_debug_report`: debug counters for new tracks, continuations, rejected gates, and forced continuations.
-- `config`: thresholds and policy values.
-
-### Per-track State
-
-- `runtime_track_id`.
-- `state`: `TENTATIVE`, `ACTIVE`, or `CLOSED`.
-- `current_center`.
-- `current_bbox`.
-- `velocity`.
-- `first_seen_timestamp`.
-- `last_seen_timestamp`.
-- `hit_count`.
-- `miss_count`.
-- `detection_history`.
-- `center_history`.
-- `last_embedding`.
-- `closed_timestamp`.
-- `created_frame_index`.
-- `last_matched_frame_index`.
-- `last_unmatched_frame_index`.
-
-## Proposed V2 Track Architecture
-
-### High-level Shape
-
-```text
-ObservationBatch(t)
-        |
-        v
-Track(tracking_state, observation_batch)
-        |
-        | pure/explicit transition using config + helper functions
-        v
-TrackingState(t+1)
-```
-
-Track should be a stateless callable or function. It may have immutable configuration, but no per-camera/per-run/per-frame analytics state in the module object.
-
-Recommended public shape for implementation discussion:
-
-```python
-class Track:
-    def __init__(self, config: TrackConfig | None = None):
-        self.config = config or TrackConfig()
-
-    def __call__(self, tracking_state: dict, observation_batch: dict) -> dict:
-        ...
-```
-
-The callable may mutate and return `tracking_state` only if the contract explicitly allows `TrackingState` mutation. Otherwise it should return a copied/updated state. The V2 architecture says the only modified analytics object is `TrackingState`, so in-place mutation can be acceptable if documented and tested.
-
-### Internal Engine Extraction
-
-Extract the current algorithm from `TrackV2.update` into an engine function that processes exactly one timestamp/frame:
-
-```text
-transition_one_batch(state, observation_batch, config) -> state
-```
-
-The existing helpers should remain recognizable:
-
-- `embedding_similarity` stays algorithmically unchanged.
-- `motion_gate` stays algorithmically unchanged, after adapting observation accessors to V2 shape.
-- `assign_matches` stays algorithmically unchanged, after adapting data access.
-- `compute_velocity`, `predict_center`, and `distance` stay unchanged or receive small type-normalization wrappers.
-- `promote_if_ready`, `close_track`, and stale closure logic stay unchanged in behaviour, but operate on explicit state-held track records.
-- Pending-birth and recent-unmatched plausibility logic move from hidden `self` fields into explicit `TrackingState` fields.
-
-## Proposed TrackingState Contract
-
-The locked architecture currently states a minimal public `TrackingState`:
+The locked Track input/output state is:
 
 ```text
 TrackingState:
-  tracks: Track[]
+    tracks: Track[]
 
 Track:
-  track_id: string
-  path: Points[]
-  best_crop: BestCrop
+    track_id: string
+    path: Points[]
+    best_crop: BestCrop
+    best_crop_confidence: float32
+
+BestCrop:
+    frame_id: string
+    bbox: BoundingBox
+
+Points:
+    timestamp: float64
+    center: Point2D
 ```
 
-That public shape is not enough to preserve the current tracking algorithm. The current algorithm requires runtime fields for matching, lifecycle, IDs, velocity, misses, hits, and pending births. There are two viable contract directions for founder decision.
-
-### Option A: Expand TrackingState to Include Runtime Tracking Fields
-
-Recommended if behaviour preservation is the priority and Track must return only `TrackingState`.
-
-```text
-TrackingState:
-  tracks: RuntimeTrack[]
-  pending_births: PendingBirth[]
-  frame_index: int
-  last_update_timestamp: float | null
-  next_track_index: int or id_allocator state
-  diagnostics: TrackingDiagnostics | optional
-
-RuntimeTrack:
-  track_id: string
-  lifecycle_state: TENTATIVE | ACTIVE | CLOSED
-  current_center: Point2D
-  current_bbox: BoundingBox
-  velocity: Point2D-like vector
-  first_seen_timestamp: float64
-  last_seen_timestamp: float64
-  hit_count: int
-  miss_count: int
-  detection_history: string[]
-  path: Points[]
-  last_embedding: FeatureVector | null
-  best_crop: BestCrop | null
-  closed_timestamp: float64 | null
-  created_frame_index: int
-  last_matched_frame_index: int
-  last_unmatched_frame_index: int | null
-
-PendingBirth:
-  center: Point2D
-  observation: Observation
-  first_seen_frame: int
-  last_seen_frame: int
-  count: int
-
-TrackingDiagnostics optional:
-  last_assignment_map: { detection_id: track_id }
-  last_new_tracks_created: int
-  last_debug_report: dict
-```
-
-Why each field is needed:
-
-- `tracks`: persistent identities and histories.
-- `pending_births`: preserves current delayed-birth logic.
-- `frame_index`: required by pending-birth pruning and max association gap behaviour.
-- `last_update_timestamp`: currently used for empty updates and useful for monotonic validation.
-- `next_track_index` or equivalent: needed to replace nondeterministic UUIDs.
-- `current_center`, `current_bbox`, `velocity`, `last_embedding`: matching and updates.
-- `first_seen_timestamp`, `last_seen_timestamp`, `created_frame_index`, `last_matched_frame_index`, `last_unmatched_frame_index`: lifecycle and plausibility logic.
-- `hit_count`, `miss_count`, `lifecycle_state`, `closed_timestamp`: lifecycle semantics.
-- `detection_history` and `path`: regression/debug/event semantics.
-- `best_crop`: required by downstream Event/Demographic contracts.
-- diagnostics/assignment map: needed only if downstream consumers require per-observation track assignment after the call.
-
-### Option B: Keep Public TrackingState Minimal and Add Private Runtime State
-
-This aligns with the existing locked text more closely but creates a conflict: V2 says persistent analytics memory must live only in `TrackingState`, so a private runtime state outside `TrackingState` would violate the stateless-module principle unless it is still part of `TrackingState` under a namespaced internal field.
-
-A compromise is:
-
-```text
-TrackingState:
-  tracks: Track[]
-  runtime: TrackRuntimeState
-```
-
-This keeps public downstream track data clear while explicitly carrying algorithmic runtime state in the only allowed state object.
-
-## ObservationBatch Requirements
-
-The provided expected contract is sufficient for current matching if Track normalizes V2-shaped fields:
+The locked Track observation input is:
 
 ```text
 ObservationBatch:
-  frame_id: string
-  timestamp: float64
-  observations:
+    frame_id: string
+    observations: Observation[]
+
+Observation:
     detection_id: string
-    bbox: {x1, y1, x2, y2}
-    center: {x, y}
+    bbox: BoundingBox
+    center: Point2D
     embedding: FeatureVector
     confidence: float32
 ```
 
-Additional fields may be required only for the following decisions:
+Track returns only `TrackingState`. There is no assignment map, no secondary output, no debug output, and no hidden contract extension in the public return value.
 
-- `frame_id` should be retained in `best_crop` updates.
-- A raw crop/image should **not** be added to ObservationBatch unless the locked `BestCrop` contract requires Track to own actual crop pixels. Current locked text only names bbox, confidence, embedding, and frame id.
-- If lifecycle should be frame-count based, `TrackingState.frame_index` is enough. If lifecycle should be timestamp-only, frame index can eventually be removed after behaviour changes are approved.
+Track is responsible only for assigning observations to tracks, creating tracks, updating track paths, updating representative crop references, and applying lifecycle policy that can be expressed through the locked state. Track must not own frame loading, frame iteration, detection, embedding generation, observation creation, event detection, demographics, output generation, or orchestration.
 
-## Output Semantics
+## 2. Current Track Implementation Summary
 
-The non-negotiable target says Track returns `TrackingState`, not `(TrackingState, TrackOutput)`. However, current downstream code depends on `assignment_map` to label observations and collect crops for the current frame.
-
-Possible resolutions needing founder decision:
-
-1. Store `last_assignment_map` inside `TrackingState.diagnostics` or `TrackingState.last_assignments`.
-2. Return a second object, e.g. `TrackOutput`, despite the stated target.
-3. Derive current assignments from updated tracks' latest detection history, if sufficient and deterministic.
-
-Do not implement until this is decided.
-
-## Existing Tests and Regression Value
-
-Current test coverage is limited:
-
-- `testv2/test_detect_v2.py` validates Frame -> Detect -> Embed -> Observe and confirms the ObservationBatch shape.
-- `test_tracking_v2_pipeline.py` is not a deterministic unit test for Track. It is a full video pipeline runner and visual/regression harness.
-
-### Algorithm Validation to Preserve/Add
-
-The current code lacks focused deterministic Track unit tests. Add tests that pin existing algorithm behaviour before or during extraction:
-
-- Same person across frames keeps one track ID.
-- Motion gate rejects impossible jumps.
-- Embedding similarity breaks ambiguous motion ties.
-- Tentative track promotes after configured hit count.
-- Unmatched tentative/active tracks close after configured misses and minimum lifetime.
-- Pending birth creates a track only after buffer threshold.
-- Recent unmatched plausible track suppresses premature birth.
-- Velocity smoothing updates predictably.
-- Closed tracks are not matchable.
-
-### Architecture Validation to Add
-
-Add tests for strict V2 shape:
-
-- `Track` accepts `TrackingState` and one `ObservationBatch`.
-- `Track` returns the same `TrackingState` object if in-place mutation is chosen, or a new state if immutability is chosen.
-- No hidden state survives in the Track instance between calls.
-- Two independent states processed by the same Track instance do not influence each other.
-- Empty ObservationBatch advances lifecycle according to the approved timestamp/frame policy.
-- ObservationBatch order produces deterministic assignment results.
-
-## Deterministic State-transition Test Strategy
-
-Do not rely on full videos for primary Track validation. Test transitions directly:
+Current files:
 
 ```text
-previous TrackingState
-+ ObservationBatch
-+ config
-= expected next TrackingState
+track/
+  __init__.py      Exports TrackV2, TrackV2Config, RuntimeTrackV2.
+  config.py        Motion, lifecycle, birth-buffer, and threshold configuration.
+  lifecycle.py     Runtime track creation, promotion, closure, stale handling.
+  matching.py      Motion gating, cosine embedding similarity, candidate assignment.
+  models.py        Mutable RuntimeTrackV2 dataclass with runtime-only fields.
+  motion.py        Prediction, velocity, and distance helpers.
+  tracker.py       Stateful TrackV2 wrapper containing tracks, pending births, frame index, and update loop.
 ```
 
-Proposed tests:
+Current execution flow:
 
-1. **First person appears**
-   - Initial empty state.
-   - One observation.
-   - Depending on pending-birth config, assert pending birth or new TENTATIVE track.
+```text
+External runner owns frame/video loop
+  |
+  v
+Detection and embedding are produced outside Track
+  |
+  v
+Legacy observations are grouped as observations_by_ts[timestamp]
+  |
+  v
+TrackV2.update(observations_by_ts)
+  |
+  | internal mutable state:
+  |   self.tracks
+  |   self.pending_births
+  |   self.frame_index
+  |   self.last_update_timestamp
+  |   self.last_debug_report
+  v
+For each timestamp sorted inside TrackV2.update:
+  |
+  v
+matchable_tracks = ACTIVE + TENTATIVE runtime tracks
+  |
+  v
+assign_matches(matchable_tracks, observations, config)
+  |
+  | motion_gate(track, observation)
+  | embedding_similarity(track.last_embedding, observation.embedding)
+  | greedy deterministic assignment
+  v
+Update matched tracks in place
+  |
+  | center, bbox, velocity, last_embedding, timestamps,
+  | hit/miss counters, detection history, center history
+  v
+close_stale_tracks(...)
+  |
+  v
+Process unmatched observations through pending-birth logic
+  |
+  v
+Return (tracks, assignment_map)
+```
 
-2. **Person moves**
-   - Existing ACTIVE/TENTATIVE track with center, velocity, embedding.
-   - New observation within motion gate.
-   - Assert same track ID, updated center/bbox/path, hit count, miss reset, velocity smoothing.
+Important mismatch with locked V2: the current implementation is a stateful tracker engine. V2 Track must become a deterministic transition over explicit `TrackingState` and one `ObservationBatch`.
 
-3. **Multiple people**
-   - Two tracks and two observations.
-   - Assert deterministic one-to-one assignment independent of incidental object identity.
+## 3. State Sufficiency Analysis
 
-4. **Missing observation**
-   - Existing active track, empty observations.
-   - Assert miss count increments and no new track is created.
+The central question is whether the locked state:
 
-5. **New person appears**
-   - Existing track plus far unmatched observation.
-   - Assert birth buffering first, then new track creation after threshold.
+```text
+track_id + path[] + best_crop + best_crop_confidence
+```
 
-6. **Matching failure**
-   - Observation outside motion/speed gate.
-   - Assert old track is not updated and unmatched observation follows birth policy.
+is sufficient to reconstruct the behaviours currently implemented with hidden runtime fields.
 
-7. **Lifecycle transitions**
-   - TENTATIVE to ACTIVE after hits.
-   - TENTATIVE to CLOSED after misses.
-   - ACTIVE to CLOSED after misses.
-   - CLOSED tracks ignored by matcher.
+### 3.1 Identity Continuity
 
-8. **Timestamp behaviour**
-   - Monotonic timestamp updates accepted.
-   - Negative `dt` rejected or raises a contract error, depending on founder decision.
-   - Large timestamp gaps interact with motion gate and max speed as expected.
+Identity continuity can be represented by `track_id`. If Track appends new path points to the same `track_id`, downstream modules can observe continuity without an assignment map.
 
-9. **Embedding ambiguity**
-   - Two candidates with close motion distances.
-   - Stronger embedding match wins only when threshold delta is met.
+Sufficiency: **yes**, for representing existing identities.
 
-10. **Deterministic IDs**
-    - Given identical initial `TrackingState.next_track_index`, identical observations produce identical new track IDs.
+Limitation: deterministic creation of new `track_id` values is not specified. Random UUIDs would violate deterministic replay. A deterministic ID can be derived from locked state without adding a field, for example:
 
-### Role of Existing Video Tests
+```text
+next_id = "track-" + (1 + max numeric suffix already present)
+```
 
-Full-video tests should remain as higher-level regression tests after deterministic unit tests exist. They are useful for catching integration drift in detection/embedding/observe/track/event/demographic interactions, but they should not be the only proof of Track correctness because video tests are slow, model-dependent, environment-sensitive, and difficult to diagnose.
+This requires a defined ID format. If arbitrary existing `track_id` strings must be accepted, ID allocation needs founder-approved rules.
 
-## Migration Steps
+### 3.2 Distance Calculation
 
-1. **Freeze current behaviour with tests**
-   - Add deterministic tests around `track/matching.py`, `track/lifecycle.py`, and `TrackV2.update` using synthetic observations.
+Given a track's latest path point and an observation center:
 
-2. **Define V2 state schema**
-   - Resolve founder decisions on runtime fields, assignment output, ID allocation, closed-track retention, config ownership, and lifecycle timing.
+```text
+latest = path[-1].center = (x_t, y_t)
+obs = observation.center = (x_o, y_o)
+```
 
-3. **Add adapters without behaviour change**
-   - Create small normalization helpers from V2 `ObservationBatch` dicts to the current internal observation access pattern.
-   - Do not rewrite scoring or matching.
+distance is derivable:
 
-4. **Extract one-batch engine**
-   - Move the body of the per-timestamp loop from `TrackV2.update` into a function that accepts explicit state, one timestamp, observations, and config.
+```text
+d = sqrt((x_o - x_t)^2 + (y_o - y_t)^2)
+```
 
-5. **Introduce V2 `Track` facade**
-   - `Track(tracking_state, observation_batch) -> tracking_state` delegates to the extracted engine.
-   - Ensure the Track object owns only immutable config/resources.
+Sufficiency: **yes**.
 
-6. **Make state explicit**
-   - Move `tracks`, `pending_births`, `frame_index`, `last_update_timestamp`, debug counters, and ID allocator out of `self` and into `TrackingState`.
+### 3.3 Velocity Estimation and Motion Prediction
 
-7. **Replace nondeterministic IDs**
-   - Replace UUID creation with deterministic IDs derived from `TrackingState` allocator policy.
+If a track has at least two path points:
 
-8. **Backwards compatibility layer**
-   - Keep `TrackV2.update` temporarily as an adapter over the new engine if existing scripts need it.
-   - Mark it legacy and do not let new V2 tests depend on it.
+```text
+p1 = path[-2] = (timestamp t1, center (x1, y1))
+p2 = path[-1] = (timestamp t2, center (x2, y2))
+```
 
-9. **Wire with Observe output**
-   - Add architecture tests using `Observe()` output directly as Track input.
+then velocity can be reconstructed as:
 
-10. **Retire or move pipeline-runner responsibilities**
-    - Keep full-video harness outside Track as integration/regression tooling.
+```text
+vx = (x2 - x1) / (t2 - t1)
+vy = (y2 - y1) / (t2 - t1)
+```
 
-## Risks and Hidden Dependencies
+For a current observation timestamp `t3`, predicted position is:
 
-- Current UUID generation makes exact deterministic replay impossible.
-- Current observations are list-shaped, while V2 observations are dict-shaped for `bbox`, `center`, and `embedding` values.
-- `TrackV2.update` processes multiple timestamps per call; extracting one timestamp can subtly alter frame-index increments if callers pass multiple timestamps today.
-- Empty updates synthesize timestamps today; V2 should likely require explicit `ObservationBatch.timestamp`.
-- `closed_track_cooldown_sec` exists in config but is not currently used by the inspected tracking flow; changing or removing it may break expected future behaviour.
-- `unmatched_track_indices` is returned by `assign_matches` but not used in `TrackV2.update`; refactor should avoid accidentally changing closure semantics.
-- `gated_observation_indices` counts observations with at least one allowed candidate, not rejected pairs; debug metric naming may be misleading.
-- Pending births store the full observation, including embedding; memory growth is bounded by pruning but still must be explicit in V2 state.
-- `last_embedding` stores whatever object the embedder returns; V2 FeatureVector is a dict with `values`, so current `_iter_values` may need adaptation or `embedding_similarity` will return zero.
-- Event detection currently expects runtime fields such as `runtime_track_id`, `last_seen_timestamp`, and `center_history`, not the minimal locked `Track` shape.
-- Downstream visualization currently needs `assignment_map`; if Track only returns state, that dependency must be redesigned.
-- Frame-count lifecycle fields and timestamp lifecycle fields coexist. Changing from frame counts to timestamp-only lifecycle can change behaviour.
-- Best-crop ownership is not implemented in current `RuntimeTrackV2`; adding it during Track refactor could alter downstream demographics/event responsibilities.
-- In-place mutation of `TrackingState` must be consistent and documented; accidental mutation of input `ObservationBatch` should be forbidden.
+```text
+predicted_x = x2 + vx * (t3 - t2)
+predicted_y = y2 + vy * (t3 - t2)
+```
 
-## Open Questions Requiring Founder Decisions
+Sufficiency: **conditionally yes**.
 
-1. Should `Track` return strictly `TrackingState`, or may it return `TrackingState + TrackOutput` for current-frame assignments?
-2. If the return must be only `TrackingState`, should `last_assignment_map` live inside `TrackingState`?
-3. Should `TrackingState.tracks` be the minimal locked public track shape, or should it include runtime fields required by the algorithm?
-4. If runtime fields are included, should they be top-level track fields or nested under a `runtime` namespace?
-5. Should CLOSED/dead tracks remain in `TrackingState`, and for how long?
-6. Where should configuration live: immutable `Track` constructor config, explicit function argument, or inside `TrackingState`?
-7. Should track IDs remain globally unique, per process, per camera, or per `TrackingState`?
-8. What deterministic ID format should replace UUIDs?
-9. Should lifecycle timing be driven by frame counts, timestamps, or both during compatibility migration?
-10. Should `Track` own lifecycle timing, or should another module decide when tracks are retired from state?
-11. Is `pending_births` an approved part of `TrackingState`, or should new-track creation be immediate in V2?
-12. Should `best_crop` be selected inside Track from observation confidence, or owned by Event/Demographic/Assemble?
-13. Should `ObservationBatch` ever carry crop pixels, or only bbox/frame references and embeddings?
-14. Should negative timestamps raise errors, close no tracks, or simply reject matching candidates as today?
-15. Should existing `TrackV2.update` remain as a compatibility adapter after V2 `Track` is introduced?
+Conditions:
 
-## Recommended Next Action
+1. `path` must contain at least two points.
+2. Consecutive path timestamps must differ by more than zero.
+3. The current observation batch must provide the current timestamp.
 
-Before implementation, resolve the founder decisions above, then add deterministic regression tests around the current algorithm. After tests pin behaviour, extract a one-batch explicit-state engine and introduce a strict V2 `Track` facade over it.
+Concrete limitation: the locked `Points` contract includes `timestamp`, but the locked `ObservationBatch` shown in the brief does **not** include `timestamp`. Without an input timestamp, Track cannot append a valid `Points(timestamp, center)` and cannot compute `dt = t3 - t2` for prediction. Therefore either:
+
+- `ObservationBatch.timestamp` must be confirmed as part of the locked contract, as earlier V2 Observe work already used; or
+- timestamp must be supplied by another locked field; or
+- Track cannot produce contract-valid path points.
+
+This is a proven technical limitation, not an optimization preference.
+
+### 3.4 Smoothed Velocity
+
+The current tracker stores smoothed velocity:
+
+```text
+v_smooth(t+1) = alpha * v_smooth(t) + (1 - alpha) * v_measured(t+1)
+```
+
+The locked state does not store `v_smooth(t)`. It stores only path points.
+
+Can smoothed velocity be reconstructed exactly from the full path? Mathematically, yes **if** all historical path points are retained and the smoothing constant is fixed. One can replay the recurrence from the start of the path.
+
+Practical implication:
+
+- If full path history is retained, stored velocity is not mathematically required.
+- If path history is bounded/truncated, exact smoothed velocity cannot be reconstructed unless velocity is stored.
+
+Recommendation: prefer deriving velocity from the last two path points for V2 simplicity unless founder approval requires exact compatibility with current smoothed-velocity behaviour.
+
+### 3.5 Motion Gating
+
+Motion gating can be expressed using derived prediction:
+
+```text
+allowed_distance = base_motion_gate + max_speed_px_per_sec * dt
+motion_distance = distance(predicted_center, observation.center)
+allowed = motion_distance <= allowed_distance
+```
+
+Sufficiency: **yes**, if current timestamp exists and path has enough points. For one-point tracks, use a no-velocity fallback:
+
+```text
+predicted_center = path[-1].center
+```
+
+### 3.6 Track Matching
+
+Motion-only matching can be performed from locked state:
+
+1. For each track, derive latest center and optional velocity from `path`.
+2. For each observation, compute predicted-position distance.
+3. Reject impossible motion using gate thresholds.
+4. Solve one-to-one assignment deterministically by sorted candidate cost.
+
+Sufficiency: **yes for motion-only matching**.
+
+Sufficiency for current behaviour including appearance matching: **no**, explained below.
+
+## 4. Embedding Matching Requirements
+
+Current tracker uses appearance continuity:
+
+```text
+similarity = cosine(track.last_embedding, observation.embedding)
+```
+
+The locked `ObservationBatch` exposes only current observation embeddings. Locked `TrackingState.Track` does not contain any previous embedding, average embedding, best-crop embedding, or embedding reference.
+
+### 4.1 Can Previous Embedding Be Reconstructed?
+
+No. Given only:
+
+```text
+track_id
+path[]
+best_crop.frame_id
+best_crop.bbox
+best_crop_confidence
+```
+
+there is no mathematical function that reconstructs a prior embedding vector. Many different embedding histories can produce the same path and best crop metadata.
+
+Proof by counterexample:
+
+```text
+State A track path = [(t1, center1)]
+State B track path = [(t1, center1)]
+State A prior embedding = [1, 0]
+State B prior embedding = [0, 1]
+```
+
+Both states are identical under the locked contract, but for a new observation embedding `[1, 0]`, cosine similarity differs:
+
+```text
+cos([1,0], [1,0]) = 1
+cos([0,1], [1,0]) = 0
+```
+
+Therefore appearance matching cannot be reconstructed from the locked `TrackingState`.
+
+### 4.2 Minimum Extension If Appearance Matching Is Required
+
+If founder approval requires preserving embedding-based matching, the minimum state extension is one retained vector or vector reference per track:
+
+```text
+Track:
+    matching_embedding: FeatureVector
+```
+
+or, if embedding should remain hidden from downstream public track shape:
+
+```text
+TrackingState:
+    tracks: Track[]
+    internal_track_memory:
+        track_id -> matching_embedding
+```
+
+However, the second option is still a contract extension because all persistent analytics memory must be in `TrackingState` and must be serializable through the transition boundary.
+
+Impact: the locked contract would need to change. Without this extension, V2 Track can only use embeddings from the current batch for tie-breaking between observations if no previous appearance state is needed; it cannot compare current observations to historical track appearance.
+
+## 5. Lifecycle Reconstruction
+
+Current tracker has hidden lifecycle fields:
+
+```text
+TENTATIVE / ACTIVE / CLOSED
+hit_count
+miss_count
+first_seen_timestamp
+last_seen_timestamp
+closed_timestamp
+created_frame_index
+last_matched_frame_index
+last_unmatched_frame_index
+pending_births
+```
+
+The locked state has only `path[]` and crop metadata.
+
+### 5.1 Derivable Lifecycle Values
+
+From `path[]`:
+
+```text
+first_seen_timestamp = path[0].timestamp
+last_seen_timestamp = path[-1].timestamp
+hit_count = len(path)
+age = current_timestamp - path[0].timestamp
+gap_since_seen = current_timestamp - path[-1].timestamp
+```
+
+These are derivable if the current timestamp is available.
+
+### 5.2 Not Derivable From Locked State
+
+The following are not exactly derivable:
+
+- `miss_count` measured in frames with no matched observation.
+- Number of consecutive missed frames if empty frames do not append points.
+- `TENTATIVE`, `ACTIVE`, and `CLOSED` as explicit states.
+- `closed_timestamp` for closed tracks if the track remains in state without new path points.
+- `last_unmatched_frame_index` used for recent-unmatched plausibility logic.
+- Pending-birth counters for detections that have not yet become tracks.
+
+Some of these can be approximated from timestamp gaps, but that changes semantics.
+
+### 5.3 Lifecycle Designs Compatible With Locked State
+
+To avoid contract extension, lifecycle must be represented implicitly:
+
+- A track is considered **confirmed/active** if `len(path) >= min_hits`.
+- A track is considered **stale for matching** if `current_timestamp - path[-1].timestamp > max_match_gap_sec`.
+- A stale track can remain in `TrackingState.tracks` for downstream event/history purposes but is excluded from future matching.
+- A track is effectively **closed** when it is too stale to match, without storing a closed state.
+
+This is contract-compatible but not behaviour-identical to the current explicit miss-count lifecycle.
+
+## 6. New Track Creation
+
+Input:
+
+```text
+TrackingState(t) + unmatched observations at t
+```
+
+Output:
+
+```text
+TrackingState(t+1) with new Track objects appended
+```
+
+### 6.1 Immediate Creation
+
+Contract-compatible logic:
+
+```text
+for each unmatched observation:
+    create Track(
+        track_id = deterministic_next_id(state),
+        path = [{timestamp: current_timestamp, center: observation.center}],
+        best_crop = {frame_id: observation_batch.frame_id, bbox: observation.bbox},
+        best_crop_confidence = observation.confidence,
+    )
+```
+
+Advantages:
+
+- Requires no hidden pending-birth memory.
+- Fully expressible through locked `TrackingState`.
+- Deterministic.
+- Simple to test.
+
+Disadvantages:
+
+- More false short-lived tracks may be created than the current pending-birth design.
+
+### 6.2 Confirmation Period / Pending Births
+
+The current tracker delays creation through `pending_births`. That requires storing unmatched detections that are not yet tracks.
+
+Can this be represented in locked `TrackingState.tracks`? Only by creating tentative tracks immediately and interpreting tracks with `len(path) < min_hits` as unconfirmed. That is not identical to hidden pending births because tentative tracks become visible in output state.
+
+A hidden `pending_births` list would violate the locked contract unless added to `TrackingState`.
+
+Recommendation under locked IO: use immediate creation plus implicit confirmation by path length. Downstream modules can ignore short paths if their contracts allow, or Track can exclude too-young tracks from matching policy decisions only through derived `len(path)`.
+
+## 7. Mathematical State Transition Model
+
+Assume `ObservationBatch.timestamp` is confirmed. If it is not confirmed, Track cannot append valid `Points` and the transition is technically incomplete.
+
+Let:
+
+```text
+S_t = { tracks: [T_1, ..., T_n] }
+O_t = { frame_id, timestamp, observations: [O_1, ..., O_m] }
+```
+
+Each track:
+
+```text
+T_i = { track_id, path, best_crop, best_crop_confidence }
+```
+
+Each observation:
+
+```text
+O_j = { detection_id, bbox, center, embedding, confidence }
+```
+
+### 7.1 Candidate Generation
+
+For each track `T_i`, if `T_i.path` is empty, it is invalid and should be rejected by contract validation.
+
+Latest point:
+
+```text
+p_last = T_i.path[-1]
+```
+
+Velocity:
+
+```text
+if len(path) >= 2 and path[-1].timestamp > path[-2].timestamp:
+    v = (path[-1].center - path[-2].center) / (path[-1].timestamp - path[-2].timestamp)
+else:
+    v = (0, 0)
+```
+
+Delta time:
+
+```text
+dt = O_t.timestamp - p_last.timestamp
+```
+
+Prediction:
+
+```text
+predicted = p_last.center + v * dt
+```
+
+Motion cost:
+
+```text
+cost_motion = distance(predicted, O_j.center)
+```
+
+Gate:
+
+```text
+allowed = dt >= 0 and cost_motion <= base_motion_gate + max_speed_px_per_sec * dt
+```
+
+Candidate:
+
+```text
+C_ij = (track_index=i, observation_index=j, cost=cost_motion)
+```
+
+### 7.2 Assignment
+
+Sort candidates deterministically:
+
+```text
+(cost, track_id, observation.detection_id)
+```
+
+Greedily choose candidates where neither the track nor the observation has already been used.
+
+This preserves the deterministic spirit of the current matcher without requiring hidden runtime fields.
+
+### 7.3 State Update
+
+For every matched pair `(T_i, O_j)`:
+
+```text
+T_i.path.append({timestamp: O_t.timestamp, center: O_j.center})
+
+if O_j.confidence > T_i.best_crop_confidence:
+    T_i.best_crop = {frame_id: O_t.frame_id, bbox: O_j.bbox}
+    T_i.best_crop_confidence = O_j.confidence
+```
+
+For every unmatched observation `O_j`:
+
+```text
+create new Track with one path point and best_crop from O_j
+```
+
+For unmatched tracks:
+
+```text
+leave path and best_crop unchanged
+```
+
+For stale tracks:
+
+```text
+keep in TrackingState.tracks but exclude from future matching when timestamp gap exceeds policy
+```
+
+No assignment map is returned.
+
+## 8. Can Track Operate Correctly Without Extending TrackingState?
+
+Answer depends on the definition of "correctly".
+
+### 8.1 Yes: A Clean V2 Motion-Based Tracker Is Possible
+
+Using only locked state and a confirmed observation timestamp, Track can perform:
+
+- identity continuity by `track_id`;
+- path maintenance;
+- latest-center distance matching;
+- velocity-derived motion prediction from `path[-2:]`;
+- motion gating;
+- deterministic assignment;
+- immediate new-track creation;
+- best-crop reference updates;
+- implicit lifecycle from path length and timestamp gaps.
+
+### 8.2 No: The Existing Behaviour Cannot Be Fully Reconstructed
+
+The current behaviour cannot be exactly reconstructed because locked state does not contain:
+
+- previous embedding or appearance memory;
+- explicit smoothed velocity unless replaying full path is guaranteed;
+- miss counters;
+- pending births;
+- explicit tentative/active/closed lifecycle state;
+- frame index;
+- last unmatched frame index;
+- closed timestamp.
+
+The largest proven limitation is embedding continuity. Previous embeddings cannot be reconstructed from path and crop metadata.
+
+## 9. Proposed Track V2 Folder Structure
+
+```text
+track/
+  __init__.py
+      Public export for Track and config.
+
+  track.py
+      Public stateless Track callable implementing
+      Track(tracking_state, observation_batch) -> tracking_state.
+
+  matching.py
+      Candidate generation and deterministic one-to-one observation-track assignment.
+      Uses only contract fields plus config.
+
+  motion.py
+      Path-derived velocity, prediction, and distance helpers.
+
+  lifecycle.py
+      Contract-compatible lifecycle policy:
+      match eligibility from path length and timestamp gap;
+      new track creation;
+      stale-track exclusion rules.
+
+  models.py
+      Internal dataclasses/types for calculation only.
+      These must not add persistent state outside TrackingState.
+
+  config.py
+      Thresholds such as base motion gate, max speed, min hits, max stale gap,
+      and best-crop update policy.
+
+  tests/
+      Deterministic state-transition tests.
+```
+
+External contracts remain dict-compatible `TrackingState`, `Track`, `ObservationBatch`, `Observation`, `Points`, and `BestCrop`. Internal dataclasses may normalize these shapes during a call, but they must not become hidden persistent analytics state.
+
+## 10. Proposed Internal Algorithm Flow
+
+```text
+Track.__call__(tracking_state, observation_batch)
+  |
+  v
+Validate locked contract fields
+  |
+  | require tracking_state.tracks
+  | require observation_batch.frame_id
+  | require observation_batch.timestamp, or fail pending contract decision
+  | require observation fields
+  v
+Normalize points, centers, bboxes, and confidences for calculation
+  |
+  v
+Select match-eligible tracks
+  |
+  | path non-empty
+  | not stale by timestamp gap
+  | optionally len(path) >= min_hits for confirmed-only matching,
+  | or include tentative one-point tracks for continuity
+  v
+Build motion candidates
+  |
+  | derive velocity from path
+  | predict center
+  | compute distance
+  | apply motion gate
+  v
+Assign candidates deterministically
+  |
+  v
+Update matched tracks
+  |
+  | append new path point
+  | update best_crop when confidence improves
+  v
+Create tracks for unmatched observations
+  |
+  | deterministic track_id
+  | one path point
+  | best_crop from observation bbox and frame_id
+  v
+Leave unmatched existing tracks in state
+  |
+  | no hidden miss counter
+  | future matching eligibility is derived from timestamp gap
+  v
+Return updated TrackingState only
+```
+
+## 11. Responsibility Map Under Locked IO
+
+### KEEP
+
+- Motion prediction concept.
+- Distance calculation.
+- Motion gating.
+- Deterministic candidate assignment.
+- Best-crop selection by confidence.
+- Track creation and path updates.
+- Threshold-driven behaviour through config.
+
+### KEEP ONLY IF CONTRACT IS EXTENDED
+
+- Historical embedding similarity.
+- Exact smoothed velocity state.
+- Exact miss-count lifecycle.
+- Hidden pending-birth confirmation.
+- Explicit tentative/active/closed states.
+
+### MOVE OUTSIDE TRACK
+
+- Video reading.
+- Frame iteration.
+- Detection.
+- Embedding generation.
+- Observation creation.
+- Event detection.
+- Demographics.
+- Output assembly.
+- Visualization.
+- Persistence.
+
+### DELETE FROM PUBLIC V2 TRACK API
+
+- `TrackV2.update(observations_by_ts)` as the V2 entry point.
+- Multiple timestamp updates inside one Track call.
+- `(tracks, assignment_map)` return shape.
+- Debug output return shape.
+- Hidden instance-owned analytics state.
+- Random UUID generation.
+
+## 12. Testing Strategy
+
+Primary tests must be deterministic transition tests:
+
+```text
+TrackingState(t) + ObservationBatch(t) = Expected TrackingState(t+1)
+```
+
+Required cases:
+
+1. **Empty state + first observation**
+   - Creates one track with one path point and best crop from the observation.
+
+2. **Existing track + same person movement**
+   - Appends a path point to the existing track.
+
+3. **Multiple tracks + multiple observations**
+   - Produces deterministic one-to-one assignment.
+
+4. **Crossing trajectories**
+   - Verifies motion prediction behaviour and documents where appearance matching would be needed if motion is ambiguous.
+
+5. **Impossible movement rejection**
+   - Observation outside motion gate creates a new track instead of updating the old one.
+
+6. **New person creation**
+   - Unmatched observation becomes a deterministic new track.
+
+7. **Missing observation**
+   - Existing tracks remain unchanged; stale eligibility is derived later from timestamp gap.
+
+8. **Timestamp gaps**
+   - Large gaps make old tracks ineligible or widen gate according to policy.
+
+9. **Deterministic repeated execution**
+   - Running the same transition from equal input state produces equal output state.
+
+10. **Same input state produces identical output**
+    - Confirms no hidden state in the Track callable.
+
+Video tests can remain as integration regression tests only. They must not be the primary proof of Track correctness.
+
+## 13. Decisions Requiring Founder Approval
+
+1. The brief's `ObservationBatch` omits `timestamp`, while `Points` requires `timestamp`. Should `ObservationBatch.timestamp` be restored/confirmed as part of the locked contract?
+2. Is a motion-only V2 tracker acceptable for the first strict-contract implementation?
+3. If appearance continuity is required, may `TrackingState` be extended with per-track embedding memory?
+4. Should V2 preserve exact current smoothed-velocity behaviour, or derive velocity from `path[-2:]`?
+5. Should new tracks be created immediately, with confirmation represented by `len(path)`, or may `TrackingState` be extended with pending births?
+6. Should lifecycle be implicit from path length and timestamp gap, or may explicit lifecycle state be added to the contract?
+7. Should stale/closed tracks remain forever in `TrackingState.tracks`, or should another module/orchestrator prune them?
+8. What deterministic `track_id` format should be required?
+9. Should one-point tentative tracks be eligible for matching on the next frame?
+10. Should best crop update strictly on higher confidence, or should crop quality use additional criteria later?
+
+## 14. Recommended Architecture Decision
+
+Implement the first V2 Track as a strict locked-contract, deterministic, motion-based state transition after confirming `ObservationBatch.timestamp`.
+
+Do not add embeddings, miss counters, pending births, or explicit lifecycle fields unless founder approval accepts the contract extension. The investigation proves that historical embedding matching and exact current lifecycle behaviour cannot be reconstructed from the locked state alone, but a clean V2 tracker can still operate with path-derived motion, immediate track creation, best-crop updates, and implicit stale handling.
