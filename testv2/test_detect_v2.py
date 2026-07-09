@@ -12,6 +12,14 @@ if str(ROOT) not in sys.path:
 
 from detection import Detect
 from embed import Embed
+from observe import Observe
+
+
+def assert_has_fields(contract_name, payload, fields):
+    assert payload is not None, f"{contract_name} must exist"
+    for field in fields:
+        assert field in payload, f"{contract_name}.{field} must exist"
+
 
 with Image.open(ROOT / "data" / "samples" / "1000040807.jpg") as image_file:
     image = np.ascontiguousarray(
@@ -29,6 +37,7 @@ detection_batch = detect(frame)
 
 print(detection_batch)
 
+assert_has_fields("DetectionBatch", detection_batch, ("frame_id", "detections"))
 assert set(detection_batch.keys()) == {"frame_id", "timestamp", "frame", "detections"}
 assert detection_batch["frame_id"] == frame["frame_id"]
 assert detection_batch["timestamp"] == frame["timestamp"]
@@ -48,6 +57,7 @@ embedding_batch = embed(detection_batch)
 
 print(embedding_batch)
 
+assert_has_fields("EmbeddingBatch", embedding_batch, ("frame_id", "embeddings"))
 assert set(embedding_batch.keys()) == {"frame_id", "timestamp", "embeddings"}
 assert embedding_batch["frame_id"] == detection_batch["frame_id"]
 assert embedding_batch["timestamp"] == detection_batch["timestamp"]
@@ -66,3 +76,74 @@ for detection, embedding in zip(detection_batch["detections"], embedding_batch["
     assert len(vector["values"]) == vector["shape"][0]
     assert len(vector["values"]) > 0
     assert all(isinstance(value, float) for value in vector["values"])
+
+observe = Observe()
+observation_batch = observe(detection_batch, embedding_batch)
+
+print(observation_batch)
+
+assert_has_fields(
+    "ObservationBatch",
+    observation_batch,
+    ("frame_id", "timestamp", "observations"),
+)
+assert set(observation_batch.keys()) == {"frame_id", "timestamp", "observations"}
+assert observation_batch["frame_id"] == detection_batch["frame_id"]
+assert observation_batch["timestamp"] == detection_batch["timestamp"]
+assert isinstance(observation_batch["observations"], list)
+assert len(observation_batch["observations"]) == len(embedding_batch["embeddings"])
+assert len(observation_batch["observations"]) == len(detection_batch["detections"])
+
+detections_by_id = {
+    detection["detection_id"]: detection
+    for detection in detection_batch["detections"]
+}
+embeddings_by_id = {
+    embedding["detection_id"]: embedding
+    for embedding in embedding_batch["embeddings"]
+}
+observations_by_id = {}
+
+for observation in observation_batch["observations"]:
+    assert_has_fields(
+        "Observation",
+        observation,
+        ("detection_id", "bbox", "center", "embedding", "confidence"),
+    )
+    assert set(observation.keys()) == {
+        "detection_id",
+        "bbox",
+        "center",
+        "embedding",
+        "confidence",
+    }
+    detection_id = observation["detection_id"]
+    assert detection_id not in observations_by_id
+    observations_by_id[detection_id] = observation
+
+    detection = detections_by_id[detection_id]
+    embedding = embeddings_by_id[detection_id]
+    bbox = detection["bbox"]
+
+    assert observation["bbox"] == bbox
+    assert observation["embedding"] == embedding["vector"]
+    assert observation["confidence"] == detection["confidence"]
+    assert set(observation["center"].keys()) == {"x", "y"}
+    assert observation["center"]["x"] == (bbox["x1"] + bbox["x2"]) / 2
+    assert observation["center"]["y"] == (bbox["y1"] + bbox["y2"]) / 2
+
+for detection in detection_batch["detections"]:
+    matches = [
+        observation
+        for observation in observation_batch["observations"]
+        if observation["detection_id"] == detection["detection_id"]
+    ]
+    assert len(matches) == 1
+
+for embedding in embedding_batch["embeddings"]:
+    matches = [
+        observation
+        for observation in observation_batch["observations"]
+        if observation["detection_id"] == embedding["detection_id"]
+    ]
+    assert len(matches) == 1

@@ -19,7 +19,9 @@ class Observe:
             if field not in embedding_batch:
                 raise ValueError(f"Missing required EmbeddingBatch field: {field}")
 
-        if detection_batch["frame_id"] != embedding_batch["frame_id"]:
+        frame_id = detection_batch["frame_id"]
+        timestamp = detection_batch["timestamp"]
+        if frame_id != embedding_batch["frame_id"]:
             raise ValueError("DetectionBatch.frame_id must match EmbeddingBatch.frame_id")
 
         detections = detection_batch["detections"]
@@ -29,13 +31,6 @@ class Observe:
         if embeddings is None:
             raise ValueError("Missing required EmbeddingBatch embeddings")
 
-        detection_ids = set()
-        for detection in detections:
-            detection_id = detection["detection_id"]
-            if detection_id in detection_ids:
-                raise ValueError(f"Duplicate detection_id in DetectionBatch: {detection_id}")
-            detection_ids.add(detection_id)
-
         embedding_map = {}
         for embedding in embeddings:
             detection_id = embedding["detection_id"]
@@ -43,34 +38,42 @@ class Observe:
                 raise ValueError(f"Duplicate detection_id in EmbeddingBatch: {detection_id}")
             embedding_map[detection_id] = embedding
 
-        extra_embedding_ids = set(embedding_map) - detection_ids
-        if extra_embedding_ids:
-            detection_id = next(iter(extra_embedding_ids))
-            raise ValueError(f"Embedding has no matching detection_id: {detection_id}")
-
-        observations = []
-        for detection in detections:
+        seen_detection_ids = set()
+        observations = [None] * len(detections)
+        for index, detection in enumerate(detections):
             detection_id = detection["detection_id"]
-            if detection_id not in embedding_map:
+            if detection_id in seen_detection_ids:
+                raise ValueError(f"Duplicate detection_id in DetectionBatch: {detection_id}")
+            seen_detection_ids.add(detection_id)
+
+            embedding = embedding_map.pop(detection_id, None)
+            if embedding is None:
                 raise ValueError(f"Missing embedding for detection_id: {detection_id}")
 
             bbox = detection["bbox"]
-            embedding = embedding_map[detection_id]
-            observations.append(
-                {
-                    "detection_id": detection_id,
-                    "bbox": bbox,
-                    "center": {
-                        "x": (bbox["x1"] + bbox["x2"]) / 2,
-                        "y": (bbox["y1"] + bbox["y2"]) / 2,
-                    },
-                    "embedding": embedding["vector"],
-                    "confidence": detection["confidence"],
-                }
-            )
+            confidence = detection["confidence"]
+            x1 = bbox["x1"]
+            y1 = bbox["y1"]
+            x2 = bbox["x2"]
+            y2 = bbox["y2"]
+            vector = embedding["vector"]
+            observations[index] = {
+                "detection_id": detection_id,
+                "bbox": bbox,
+                "center": {
+                    "x": (x1 + x2) / 2,
+                    "y": (y1 + y2) / 2,
+                },
+                "embedding": vector,
+                "confidence": confidence,
+            }
+
+        if embedding_map:
+            detection_id = next(iter(embedding_map))
+            raise ValueError(f"Embedding has no matching detection_id: {detection_id}")
 
         return {
-            "frame_id": detection_batch["frame_id"],
-            "timestamp": detection_batch["timestamp"],
+            "frame_id": frame_id,
+            "timestamp": timestamp,
             "observations": observations,
         }
