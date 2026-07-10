@@ -3,7 +3,7 @@
 from math import isfinite
 
 from track.config import TrackV2Config
-from track.lifecycle import append_observation, create_track, is_expired
+from track.lifecycle import append_observation, create_track
 from track.matching import assign_matches, observation_sort_key, track_sort_key
 from track.models import (
     REQUIRED_BBOX_FIELDS,
@@ -138,7 +138,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
 
-    matches, unmatched_track_indices, unmatched_observation_indices = assign_matches(
+    matches, _unmatched_track_indices, unmatched_observation_indices = assign_matches(
         tracking_state["tracks"], ordered_observations, timestamp, config
     )
 
@@ -148,15 +148,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
             ordered_observations[observation_index],
             frame_id,
             timestamp,
-            config,
         )
-
-    retained_tracks = []
-    matched_track_indices = {track_index for track_index, _observation_index in matches}
-    for track_index, track in enumerate(tracking_state["tracks"]):
-        if track_index in matched_track_indices or not is_expired(track, timestamp, config):
-            retained_tracks.append(track)
-    tracking_state["tracks"] = retained_tracks
 
     for observation_index in sorted(unmatched_observation_indices):
         observation = ordered_observations[observation_index]

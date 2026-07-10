@@ -24,22 +24,37 @@ def parse_args():
     return parser.parse_args()
 
 
-def print_track_summary(tracking_state, frame_count: int) -> None:
+def update_track_summary(track_summary, tracking_state) -> None:
+    for track in tracking_state["tracks"]:
+        track_id = track["track_id"]
+        first_seen = float(track["path"][0]["timestamp"])
+        last_seen = float(track["path"][-1]["timestamp"])
+        summary = track_summary.setdefault(
+            track_id, {"first_seen": first_seen, "last_seen": last_seen}
+        )
+        summary["first_seen"] = min(summary["first_seen"], first_seen)
+        summary["last_seen"] = max(summary["last_seen"], last_seen)
+
+
+def print_track_summary(track_summary, frame_count: int) -> None:
     print("\nSUMMARY")
     print("=======")
     print(f"frames: {frame_count}")
-    print(f"tracks: {len(tracking_state['tracks'])}")
+    print(f"tracks: {len(track_summary)}")
 
-    if not tracking_state["tracks"]:
+    if not track_summary:
         print("- none")
         return
 
-    for track in tracking_state["tracks"]:
-        first_seen = float(track["path"][0]["timestamp"])
-        last_seen = float(track["path"][-1]["timestamp"])
+    for track_id in sorted(
+        track_summary, key=lambda value: int(value) if value.isdecimal() else value
+    ):
+        summary = track_summary[track_id]
+        first_seen = summary["first_seen"]
+        last_seen = summary["last_seen"]
         duration = last_seen - first_seen
         print(
-            f"Track ID: {track['track_id']} | "
+            f"Track ID: {track_id} | "
             f"first_seen={first_seen:.6f}s | "
             f"last_seen={last_seen:.6f}s | "
             f"duration={duration:.6f}s"
@@ -70,6 +85,7 @@ def main():
     observe = Observe()
     config = TrackV2Config()
     tracking_state = {"tracks": []}
+    track_summary = {}
     frame_index = 0
 
     print("V2 TRACK REPLAY")
@@ -97,13 +113,14 @@ def main():
             embedding_batch = embed(detection_batch)
             observation_batch = observe(detection_batch, embedding_batch)
             tracking_state = Track(tracking_state, observation_batch, config)
+            update_track_summary(track_summary, tracking_state)
 
             frame_index += 1
             print(f"\rprocessed frames: {frame_index}", end="", flush=True)
     finally:
         cap.release()
 
-    print_track_summary(tracking_state, frame_index)
+    print_track_summary(track_summary, frame_index)
 
 
 if __name__ == "__main__":

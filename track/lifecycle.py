@@ -1,6 +1,8 @@
-"""Lifecycle helpers derived only from path timestamps."""
+"""Track V2 mutation helpers.
 
-from track.config import TrackV2Config
+These helpers only create tracks, append matched observations, and update best
+crop data. Track V2 does not own lifecycle, pruning, stale, or expiry policy.
+"""
 
 
 def update_best_crop(track, observation, frame_id: str) -> None:
@@ -14,7 +16,7 @@ def update_best_crop(track, observation, frame_id: str) -> None:
         track["best_crop_confidence"] = confidence
 
 
-def append_observation(track, observation, frame_id: str, timestamp: float, config: TrackV2Config) -> None:
+def append_observation(track, observation, frame_id: str, timestamp: float) -> None:
     track["path"].append(
         {
             "timestamp": float(timestamp),
@@ -24,8 +26,6 @@ def append_observation(track, observation, frame_id: str, timestamp: float, conf
             },
         }
     )
-    if config.max_path_length > 0 and len(track["path"]) > config.max_path_length:
-        del track["path"][: len(track["path"]) - config.max_path_length]
     update_best_crop(track, observation, frame_id)
 
 
@@ -48,8 +48,3 @@ def create_track(observation, frame_id: str, timestamp: float, track_id: str) ->
         },
         "best_crop_confidence": float(observation["confidence"]),
     }
-
-
-def is_expired(track, current_timestamp: float, config: TrackV2Config) -> bool:
-    latest_timestamp = float(track["path"][-1]["timestamp"])
-    return float(current_timestamp) - latest_timestamp > config.stale_timeout_sec
