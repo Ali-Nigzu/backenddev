@@ -1,149 +1,134 @@
+"""Deterministic Track V2 matching."""
+
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import List, Sequence, Set, Tuple
 
 from track.config import TrackV2Config
-from track.models import RuntimeTrackV2
-from track.motion import distance, predict_center
+from track.models import vector_values
+from track.motion import motion_gate
 
 
 @dataclass(frozen=True)
 class CandidateMatch:
     track_index: int
     observation_index: int
+    track_id: str
+    detection_id: str
     motion_distance: float
-    embedding_similarity: float
+    normalized_motion: float
+    appearance_similarity: float
+    cost: float
 
 
-def _iter_values(vector) -> List[float]:
-    if vector is None:
-        return []
-    try:
-        return [float(v) for v in vector]
-    except TypeError:
-        return []
+def numeric_track_id(track_id: str) -> int | None:
+    if isinstance(track_id, str) and track_id.isdecimal():
+        return int(track_id)
+    return None
+
+
+def track_sort_key(track) -> tuple:
+    numeric = numeric_track_id(track["track_id"])
+    return (0, numeric, track["track_id"]) if numeric is not None else (1, track["track_id"])
+
+
+def observation_sort_key(index_observation) -> tuple:
+    index, observation = index_observation
+    return (str(observation["detection_id"]), index)
 
 
 def embedding_similarity(a, b) -> float:
-    av = _iter_values(a)
-    bv = _iter_values(b)
-
+    av = [float(v) for v in vector_values(a)]
+    bv = [float(v) for v in vector_values(b)]
     if not av or not bv or len(av) != len(bv):
         return 0.0
 
     dot = sum(x * y for x, y in zip(av, bv))
     norm_a = math.sqrt(sum(x * x for x in av))
     norm_b = math.sqrt(sum(y * y for y in bv))
-
-    if norm_a <= 1e-9 or norm_b <= 1e-9:
+    if norm_a <= 1e-12 or norm_b <= 1e-12:
         return 0.0
-
     return dot / (norm_a * norm_b)
 
 
-def motion_gate(track: RuntimeTrackV2, observation: Dict, config: TrackV2Config) -> Tuple[bool, float]:
-    dt = float(observation["timestamp"]) - float(track.last_seen_timestamp)
-    if dt < 0:
-        return False, float("inf")
-
-    predicted = predict_center(track.current_center, track.velocity, dt)
-    motion_distance = distance(predicted, observation["center"])
-    allowed_distance = config.gate_multiplier * (
-        config.base_motion_gate + config.max_speed_px_per_sec * dt
-    )
-
-    if motion_distance > allowed_distance:
-        return False, motion_distance
-
-    if dt > 1e-9 and (motion_distance / dt) > config.max_speed_px_per_sec:
-        return False, motion_distance
-
-    return True, motion_distance
-
-
 def build_candidates(
-    tracks: Sequence[RuntimeTrackV2],
-    observations: Sequence[Dict],
+    ordered_tracks: Sequence[dict],
+    ordered_observations: Sequence[dict],
+    timestamp: float,
     config: TrackV2Config,
-) -> Tuple[List[CandidateMatch], Set[int]]:
+) -> List[CandidateMatch]:
     candidates: List[CandidateMatch] = []
-    gated_observation_indices: Set[int] = set()
+    total_weight = config.motion_weight + config.appearance_weight
+    motion_weight = config.motion_weight / total_weight if total_weight > 0 else 1.0
+    appearance_weight = config.appearance_weight / total_weight if total_weight > 0 else 0.0
 
-    for track_index, track in enumerate(tracks):
-        for observation_index, observation in enumerate(observations):
-            allowed, motion_distance = motion_gate(track, observation, config)
+    for track_index, track in enumerate(ordered_tracks):
+        for observation_index, observation in enumerate(ordered_observations):
+            allowed, motion_distance, normalized_motion, _dt = motion_gate(
+                track, observation, timestamp, config
+            )
             if not allowed:
                 continue
 
-            gated_observation_indices.add(observation_index)
+            similarity = embedding_similarity(
+                track["best_crop"].get("embedding"), observation.get("embedding")
+            )
+            if similarity < config.min_appearance_similarity:
+                continue
+
+            cost = motion_weight * normalized_motion + appearance_weight * (1.0 - similarity)
+            if cost > config.max_combined_cost:
+                continue
+
             candidates.append(
                 CandidateMatch(
                     track_index=track_index,
                     observation_index=observation_index,
+                    track_id=str(track["track_id"]),
+                    detection_id=str(observation["detection_id"]),
                     motion_distance=motion_distance,
-                    embedding_similarity=embedding_similarity(
-                        track.last_embedding,
-                        observation.get("embedding"),
-                    ),
+                    normalized_motion=normalized_motion,
+                    appearance_similarity=similarity,
+                    cost=cost,
                 )
             )
+    return candidates
 
-    return candidates, gated_observation_indices
 
-
-def _choose_from_ambiguous(
-    best: CandidateMatch,
-    candidates: Iterable[CandidateMatch],
-    config: TrackV2Config,
-) -> CandidateMatch:
-    ambiguous = [
-        candidate for candidate in candidates
-        if (
-            candidate.track_index == best.track_index
-            or candidate.observation_index == best.observation_index
-        )
-        and abs(candidate.motion_distance - best.motion_distance) <= config.motion_ambiguity_delta
-    ]
-
-    if len(ambiguous) <= 1:
-        return best
-
-    strongest = max(ambiguous, key=lambda item: item.embedding_similarity)
-    if strongest.embedding_similarity - best.embedding_similarity >= config.embedding_tie_threshold:
-        return strongest
-
-    return best
+def candidate_sort_key(candidate: CandidateMatch) -> tuple:
+    numeric = numeric_track_id(candidate.track_id)
+    track_key = (0, numeric, candidate.track_id) if numeric is not None else (1, candidate.track_id)
+    return (
+        round(candidate.cost, 12),
+        round(candidate.normalized_motion, 12),
+        round(-candidate.appearance_similarity, 12),
+        track_key,
+        candidate.detection_id,
+        candidate.observation_index,
+    )
 
 
 def assign_matches(
-    tracks: Sequence[RuntimeTrackV2],
-    observations: Sequence[Dict],
+    ordered_tracks: Sequence[dict],
+    ordered_observations: Sequence[dict],
+    timestamp: float,
     config: TrackV2Config,
-) -> Tuple[List[Tuple[int, int]], Set[int], Set[int], Set[int]]:
-    candidates, gated_observation_indices = build_candidates(tracks, observations, config)
-
-    matches: List[Tuple[int, int]] = []
+) -> Tuple[List[Tuple[int, int]], Set[int], Set[int]]:
+    candidates = sorted(
+        build_candidates(ordered_tracks, ordered_observations, timestamp, config),
+        key=candidate_sort_key,
+    )
     used_tracks: Set[int] = set()
     used_observations: Set[int] = set()
-    remaining = list(candidates)
+    matches: List[Tuple[int, int]] = []
 
-    while remaining:
-        remaining.sort(key=lambda item: (item.motion_distance, item.track_index, item.observation_index))
-        best = remaining[0]
-        chosen = _choose_from_ambiguous(best, remaining, config)
+    for candidate in candidates:
+        if candidate.track_index in used_tracks or candidate.observation_index in used_observations:
+            continue
+        used_tracks.add(candidate.track_index)
+        used_observations.add(candidate.observation_index)
+        matches.append((candidate.track_index, candidate.observation_index))
 
-        if chosen.track_index not in used_tracks and chosen.observation_index not in used_observations:
-            matches.append((chosen.track_index, chosen.observation_index))
-            used_tracks.add(chosen.track_index)
-            used_observations.add(chosen.observation_index)
-
-        remaining = [
-            candidate for candidate in remaining
-            if candidate.track_index not in used_tracks
-            and candidate.observation_index not in used_observations
-        ]
-
-    unmatched_tracks = set(range(len(tracks))) - used_tracks
-    unmatched_observations = set(range(len(observations))) - used_observations
-
-    return matches, unmatched_tracks, unmatched_observations, gated_observation_indices
+    unmatched_tracks = set(range(len(ordered_tracks))) - used_tracks
+    unmatched_observations = set(range(len(ordered_observations))) - used_observations
+    return matches, unmatched_tracks, unmatched_observations
