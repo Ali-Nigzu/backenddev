@@ -1,19 +1,19 @@
+"""Deterministic Track V2 tuning parameters."""
+
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class TrackV2Config:
+    """Centralized constants for the stateless Track V2 reducer."""
+
     max_speed_px_per_sec: float = 500.0
-    base_motion_gate: float = 45.0
-    gate_multiplier: float = 1.0
-    tentative_hits_to_activate: int = 2
-    max_misses_active: int = 6
-    max_misses_tentative: int = 1
-    embedding_tie_threshold: float = 0.05
-    motion_ambiguity_delta: float = 8.0
-    velocity_smoothing: float = 0.6
-    closed_track_cooldown_sec: float = 3.0
-    unmatched_detection_buffer_frames: int = 4
-    min_track_lifetime_sec: float = 0.7
-    max_association_gap_frames: int = 3
-    strict_motion_gate_multiplier: float = 1.3
+    base_motion_gate_px: float = 45.0
+    max_reassociation_gap_sec: float = 2.0
+    min_appearance_similarity: float = -1.0
+    motion_weight: float = 0.65
+    appearance_weight: float = 0.35
+    max_combined_cost: float = 1.25
+    stale_timeout_sec: float = 3.0
+    max_path_length: int = 256
+    epsilon: float = 1e-9
