@@ -118,6 +118,57 @@ def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
 
 
+def _latest_timestamp(track) -> float:
+    return float(track["path"][-1]["timestamp"])
+
+
+def _is_recent(track, timestamp: float, window: float, config: TrackV2Config) -> bool:
+    age = timestamp - _latest_timestamp(track)
+    return -config.epsilon <= age <= float(window)
+
+
+def _confirmation_min_path_points(config: TrackV2Config) -> int:
+    return max(
+        1,
+        int(config.active_confirmation_min_path_points),
+        int(config.tentative_confirmation_min_path_points),
+    )
+
+
+def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config) -> tuple[list[int], list[int]]:
+    confirmation_points = _confirmation_min_path_points(config)
+    active_window_config = config.active_recency_window_frames
+    active_window = float(
+        config.active_track_window_frames if active_window_config is None else active_window_config
+    )
+    tentative_window = float(config.tentative_recency_window_frames)
+    active_indices: list[int] = []
+    tentative_indices: list[int] = []
+    for index, track in enumerate(tracks):
+        path_points = len(track["path"])
+        if path_points >= confirmation_points:
+            if _is_recent(track, timestamp, active_window, config):
+                active_indices.append(index)
+        elif _is_recent(track, timestamp, tentative_window, config):
+            tentative_indices.append(index)
+    return active_indices, tentative_indices
+
+
+def _observations_at_indices(observations, indices: set[int]) -> list[dict]:
+    return [observation for index, observation in enumerate(observations) if index in indices]
+
+
+def _map_matches(
+    matches: list[tuple[int, int]],
+    track_indices: list[int],
+    observation_indices: list[int],
+) -> list[tuple[int, int]]:
+    return [
+        (track_indices[track_index], observation_indices[observation_index])
+        for track_index, observation_index in matches
+    ]
+
+
 def Track(tracking_state, observation_batch, config: TrackV2Config | None = None):
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 
@@ -137,20 +188,59 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     ]
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
+    active_track_indices, tentative_track_indices = _partition_track_indices(
+        tracking_state["tracks"], timestamp, config
+    )
+    active_tracks = [tracking_state["tracks"][index] for index in active_track_indices]
 
     matches, _unmatched_track_indices, unmatched_observation_indices = assign_matches(
-        tracking_state["tracks"], ordered_observations, timestamp, config
+        active_tracks, ordered_observations, timestamp, config
+    )
+    state_matches = _map_matches(
+        matches,
+        active_track_indices,
+        list(range(len(ordered_observations))),
     )
 
-    for track_index, observation_index in sorted(matches):
+    remaining_observation_indices = set(unmatched_observation_indices)
+    if remaining_observation_indices:
+        tentative_tracks = [
+            tracking_state["tracks"][index]
+            for index in tentative_track_indices
+        ]
+        remaining_observations = _observations_at_indices(
+            ordered_observations,
+            remaining_observation_indices,
+        )
+        remaining_indices = sorted(remaining_observation_indices)
+        tentative_matches, _unmatched_tentative_indices, unmatched_remaining_indices = assign_matches(
+            tentative_tracks,
+            remaining_observations,
+            timestamp,
+            config,
+        )
+        state_matches.extend(
+            _map_matches(
+                tentative_matches,
+                tentative_track_indices,
+                remaining_indices,
+            )
+        )
+        remaining_observation_indices = {
+            remaining_indices[index]
+            for index in unmatched_remaining_indices
+        }
+
+    for state_track_index, observation_index in sorted(state_matches):
         append_observation(
-            tracking_state["tracks"][track_index],
+            tracking_state["tracks"][state_track_index],
             ordered_observations[observation_index],
             frame_id,
             timestamp,
         )
 
-    for observation_index in sorted(unmatched_observation_indices):
+    allowed_new_tracks = max(0, len(ordered_observations) - len(active_tracks))
+    for observation_index in sorted(remaining_observation_indices)[:allowed_new_tracks]:
         observation = ordered_observations[observation_index]
         tracking_state["tracks"].append(create_track(observation, frame_id, timestamp, str(next_id)))
         next_id += 1
