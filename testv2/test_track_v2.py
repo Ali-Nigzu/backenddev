@@ -41,6 +41,12 @@ def append_point(track, timestamp, x, y):
     track["path"].append({"timestamp": timestamp, "center": {"x": x, "y": y}})
 
 
+def confirmed_track(track_id="1", timestamp=1.0, x=10.0, y=10.0):
+    track = existing_track(track_id, timestamp=timestamp - 1.0, x=x - 1.0, y=y)
+    append_point(track, timestamp, x, y)
+    return track
+
+
 def test_empty_state_creates_deterministic_numeric_ids():
     state = {"tracks": []}
     returned = Track(state, obs_batch(1.0, [obs("b", 20, 20), obs("a", 10, 10)]))
@@ -76,15 +82,15 @@ def test_unmatched_observation_creates_next_max_id_without_filling_gaps():
 def test_no_new_track_when_observations_do_not_exceed_active_tracks():
     state = {
         "tracks": [
-            existing_track("1", timestamp=0.0, x=10.0, y=10.0),
-            existing_track("2", timestamp=0.0, x=100.0, y=100.0),
+            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
+            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
         ]
     }
 
     Track(state, obs_batch(1.0, [obs("far-a", 10000.0, 10000.0), obs("far-b", 20000.0, 20000.0)]))
 
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 2]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
 
 
 def test_track_never_prunes_tracks_with_empty_observations():
@@ -172,26 +178,26 @@ def test_appearance_threshold_does_not_fragment_physically_plausible_continuatio
 def test_many_tracks_one_observation_reuses_most_physically_plausible_track():
     state = {
         "tracks": [
-            existing_track("1", timestamp=0.0, x=10.0, y=10.0),
-            existing_track("2", timestamp=0.0, x=100.0, y=100.0),
-            existing_track("3", timestamp=0.0, x=200.0, y=200.0),
+            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
+            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
+            confirmed_track("3", timestamp=0.0, x=200.0, y=200.0),
         ]
     }
 
     Track(state, obs_batch(1.0, [obs("only", 104.0, 100.0)]))
 
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3"]
-    assert [len(track["path"]) for track in state["tracks"]] == [1, 2, 1]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 3, 2]
     assert state["tracks"][1]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
 
 
 def test_one_track_multiple_observations_extends_existing_before_births():
-    state = {"tracks": [existing_track("5", timestamp=0.0, x=50.0, y=50.0)]}
+    state = {"tracks": [confirmed_track("5", timestamp=0.0, x=50.0, y=50.0)]}
 
     Track(state, obs_batch(1.0, [obs("new-object", 500.0, 500.0), obs("same", 55.0, 50.0)]))
 
     assert [track["track_id"] for track in state["tracks"]] == ["5", "6"]
-    assert len(state["tracks"][0]["path"]) == 2
+    assert len(state["tracks"][0]["path"]) == 3
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 55.0, "y": 50.0}
     assert state["tracks"][1]["path"][0]["center"] == {"x": 500.0, "y": 500.0}
 
@@ -206,8 +212,8 @@ def test_stale_track_does_not_long_term_reidentify_returning_object():
 
 
 def test_motion_dominates_when_appearance_conflicts_with_clear_spatial_match():
-    track_1 = existing_track("1", timestamp=0.0, x=10.0, y=10.0)
-    track_2 = existing_track("2", timestamp=0.0, x=100.0, y=100.0)
+    track_1 = confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)
+    track_2 = confirmed_track("2", timestamp=0.0, x=100.0, y=100.0)
     track_2["best_crop"]["embedding"] = obs("seed-2", 100.0, 100.0, emb=[0.0, 1.0])[
         "embedding"
     ]
@@ -215,7 +221,7 @@ def test_motion_dominates_when_appearance_conflicts_with_clear_spatial_match():
 
     Track(state, obs_batch(1.0, [obs("near-1", 12.0, 10.0, emb=[0.0, 1.0])]))
 
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 2]
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
 
 
@@ -230,3 +236,126 @@ def test_recent_path_velocity_is_smoothed_to_resist_detector_jitter():
     assert [track["track_id"] for track in state["tracks"]] == ["1"]
     assert len(state["tracks"][0]["path"]) == 5
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}
+
+
+def test_confirmed_active_track_takes_huge_jump_without_birth():
+    state = {"tracks": [confirmed_track("7", timestamp=0.0, x=10.0, y=10.0)]}
+
+    Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["7"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
+
+
+def test_five_confirmed_active_tracks_three_observations_zero_births():
+    state = {
+        "tracks": [
+            confirmed_track(str(index), timestamp=0.0, x=float(index * 10), y=0.0)
+            for index in range(1, 6)
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("a", 10.0, 0.0), obs("b", 20.0, 0.0), obs("c", 30.0, 0.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3", "4", "5"]
+    assert sum(len(track["path"]) == 3 for track in state["tracks"]) == 3
+
+
+def test_five_confirmed_active_tracks_five_observations_zero_births():
+    state = {
+        "tracks": [
+            confirmed_track(str(index), timestamp=0.0, x=float(index * 10), y=0.0)
+            for index in range(1, 6)
+        ]
+    }
+
+    Track(
+        state,
+        obs_batch(
+            1.0,
+            [obs(str(index), float(index * 10), 0.0) for index in range(1, 6)],
+        ),
+    )
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3", "4", "5"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 3, 3, 3, 3]
+
+
+def test_five_confirmed_active_tracks_seven_observations_creates_two_births():
+    state = {
+        "tracks": [
+            confirmed_track(str(index), timestamp=0.0, x=float(index * 10), y=0.0)
+            for index in range(1, 6)
+        ]
+    }
+
+    Track(
+        state,
+        obs_batch(
+            1.0,
+            [obs(str(index), float(index * 10), 0.0) for index in range(1, 8)],
+        ),
+    )
+
+    assert [track["track_id"] for track in state["tracks"]] == [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+    ]
+    assert [len(track["path"]) for track in state["tracks"][:5]] == [3, 3, 3, 3, 3]
+    assert [len(track["path"]) for track in state["tracks"][5:]] == [1, 1]
+
+
+def test_confirmed_track_continues_with_poor_detection_confidence():
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+
+    Track(state, obs_batch(1.0, [obs("poor", 11.0, 10.0, confidence=0.01)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+
+
+def test_confirmed_track_receives_first_claim_over_tentative_track():
+    confirmed = confirmed_track("1", timestamp=0.0, x=100.0, y=100.0)
+    tentative = existing_track("2", timestamp=0.0, x=101.0, y=100.0)
+    state = {"tracks": [confirmed, tentative]}
+
+    Track(state, obs_batch(1.0, [obs("could-fit-both", 101.0, 100.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 101.0, "y": 100.0}
+
+
+def test_only_tentative_track_can_continue_and_mature():
+    state = {"tracks": []}
+
+    Track(state, obs_batch(0.0, [obs("first", 10.0, 10.0)]))
+    Track(state, obs_batch(1.0, [obs("second", 11.0, 10.0)]))
+    Track(state, obs_batch(2.0, [obs("third", 12.0, 10.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+
+
+def test_public_contract_shapes_do_not_gain_tracking_status_fields():
+    state = {"tracks": []}
+
+    returned = Track(state, obs_batch(0.0, [obs("first", 10.0, 10.0)]))
+
+    assert returned is state
+    assert set(state.keys()) == {"tracks"}
+    assert set(state["tracks"][0].keys()) == {
+        "track_id",
+        "path",
+        "best_crop",
+        "best_crop_confidence",
+    }
+    assert set(state["tracks"][0]["path"][0].keys()) == {"timestamp", "center"}
+    assert set(state["tracks"][0]["best_crop"].keys()) == {"frame_id", "bbox", "embedding"}
