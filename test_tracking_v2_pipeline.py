@@ -50,8 +50,24 @@ def point_key(point: dict) -> tuple[float, float]:
     return (round(float(center["x"]), 6), round(float(center["y"]), 6))
 
 
-def current_frame_assignments(tracking_state, observation_batch) -> list[tuple[dict, dict]]:
-    """Pair tracks updated on this frame with their current observations."""
+def confirmed_active_track_ids(tracking_state, observation_batch, config) -> set[str]:
+    """Return track IDs classified as confirmed active before this frame update."""
+
+    from track.tracker import _partition_track_indices
+
+    timestamp = float(observation_batch["timestamp"])
+    active_indices, _tentative_indices = _partition_track_indices(
+        tracking_state["tracks"], timestamp, config
+    )
+    return {
+        str(tracking_state["tracks"][index]["track_id"]) for index in active_indices
+    }
+
+
+def current_frame_assignments(
+    tracking_state, observation_batch, active_track_ids: set[str]
+) -> list[tuple[dict, dict]]:
+    """Pair confirmed active tracks updated on this frame with their observations."""
 
     timestamp = float(observation_batch["timestamp"])
     observations_by_center = {}
@@ -60,6 +76,9 @@ def current_frame_assignments(tracking_state, observation_batch) -> list[tuple[d
 
     assignments = []
     for track in tracking_state["tracks"]:
+        if str(track["track_id"]) not in active_track_ids:
+            continue
+
         latest_point = track["path"][-1]
         if float(latest_point["timestamp"]) != timestamp:
             continue
@@ -73,11 +92,15 @@ def current_frame_assignments(tracking_state, observation_batch) -> list[tuple[d
     return assignments
 
 
-def draw_tracking_state(frame, tracking_state, observation_batch) -> None:
+def draw_tracking_state(
+    frame, tracking_state, observation_batch, active_track_ids: set[str]
+) -> None:
     import cv2
 
     height, width = frame.shape[:2]
-    for track, observation in current_frame_assignments(tracking_state, observation_batch):
+    for track, observation in current_frame_assignments(
+        tracking_state, observation_batch, active_track_ids
+    ):
         bbox = observation["bbox"]
         x1 = max(0, min(width - 1, int(round(float(bbox["x1"])))))
         y1 = max(0, min(height - 1, int(round(float(bbox["y1"])))))
@@ -204,9 +227,14 @@ def main():
             detection_batch = detect(frame)
             embedding_batch = embed(detection_batch)
             observation_batch = observe(detection_batch, embedding_batch)
+            active_track_ids = confirmed_active_track_ids(
+                tracking_state, observation_batch, config
+            )
             tracking_state = Track(tracking_state, observation_batch, config)
             update_track_summary(track_summary, tracking_state)
-            draw_tracking_state(bgr_frame, tracking_state, observation_batch)
+            draw_tracking_state(
+                bgr_frame, tracking_state, observation_batch, active_track_ids
+            )
             writer.write(bgr_frame)
 
             frame_index += 1
