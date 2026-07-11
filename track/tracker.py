@@ -118,6 +118,15 @@ def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
 
 
+def _active_track_indices(tracks, timestamp: float, config: TrackV2Config) -> list[int]:
+    active_window = float(config.active_track_window_frames)
+    return [
+        index
+        for index, track in enumerate(tracks)
+        if -config.epsilon <= timestamp - float(track["path"][-1]["timestamp"]) <= active_window
+    ]
+
+
 def Track(tracking_state, observation_batch, config: TrackV2Config | None = None):
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 
@@ -137,20 +146,24 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     ]
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
+    active_track_indices = _active_track_indices(tracking_state["tracks"], timestamp, config)
+    active_tracks = [tracking_state["tracks"][index] for index in active_track_indices]
 
     matches, _unmatched_track_indices, unmatched_observation_indices = assign_matches(
-        tracking_state["tracks"], ordered_observations, timestamp, config
+        active_tracks, ordered_observations, timestamp, config
     )
 
     for track_index, observation_index in sorted(matches):
+        state_track_index = active_track_indices[track_index]
         append_observation(
-            tracking_state["tracks"][track_index],
+            tracking_state["tracks"][state_track_index],
             ordered_observations[observation_index],
             frame_id,
             timestamp,
         )
 
-    for observation_index in sorted(unmatched_observation_indices):
+    allowed_new_tracks = max(0, len(ordered_observations) - len(active_tracks))
+    for observation_index in sorted(unmatched_observation_indices)[:allowed_new_tracks]:
         observation = ordered_observations[observation_index]
         tracking_state["tracks"].append(create_track(observation, frame_id, timestamp, str(next_id)))
         next_id += 1

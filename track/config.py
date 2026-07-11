@@ -7,6 +7,9 @@ from dataclasses import dataclass
 class TrackV2Config:
     """Centralized constants that only affect assignment/matching behaviour."""
 
+    # Tracks whose latest path timestamp is within this many timestamp units of
+    # the current batch are active and must be considered before any new birth.
+    active_track_window_frames: int = 3
     max_speed_px_per_sec: float = 500.0
     base_motion_gate_px: float = 45.0
     max_reassociation_gap_sec: float = 2.0

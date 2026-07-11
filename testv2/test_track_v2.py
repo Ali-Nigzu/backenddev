@@ -68,9 +68,23 @@ def test_unmatched_observation_creates_next_max_id_without_filling_gaps():
     state = {"tracks": []}
     Track(state, obs_batch(0.0, [obs("a", 10, 10)]))
     state["tracks"][0]["track_id"] = "77"
-    Track(state, obs_batch(1.0, [obs("far", 10000, 10000)]))
+    Track(state, obs_batch(4.0, [obs("far", 10000, 10000)]))
 
     assert [track["track_id"] for track in state["tracks"]] == ["77", "78"]
+
+
+def test_no_new_track_when_observations_do_not_exceed_active_tracks():
+    state = {
+        "tracks": [
+            existing_track("1", timestamp=0.0, x=10.0, y=10.0),
+            existing_track("2", timestamp=0.0, x=100.0, y=100.0),
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("far-a", 10000.0, 10000.0), obs("far-b", 20000.0, 20000.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 2]
 
 
 def test_track_never_prunes_tracks_with_empty_observations():

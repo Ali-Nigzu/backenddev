@@ -6,7 +6,7 @@ from typing import List, Sequence, Set, Tuple
 
 from track.config import TrackV2Config
 from track.models import vector_values
-from track.motion import motion_gate
+from track.motion import distance, motion_gate
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class CandidateMatch:
     detection_id: str
     motion_distance: float
     normalized_motion: float
+    physically_plausible: bool
     appearance_similarity: float | None
     appearance_tiebreak_cost: float
 
@@ -73,7 +74,9 @@ def build_candidates(
                 track, observation, timestamp, config
             )
             if not allowed:
-                continue
+                motion_distance = distance(track["path"][-1]["center"], observation["center"])
+                base_distance = max(config.base_motion_gate_px, config.epsilon)
+                normalized_motion = motion_distance / base_distance
 
             similarity = appearance_evidence(
                 track["best_crop"].get("embedding"), observation.get("embedding")
@@ -89,6 +92,7 @@ def build_candidates(
                     detection_id=str(observation["detection_id"]),
                     motion_distance=motion_distance,
                     normalized_motion=normalized_motion,
+                    physically_plausible=allowed,
                     appearance_similarity=similarity,
                     appearance_tiebreak_cost=appearance_tiebreak_cost,
                 )
@@ -100,6 +104,7 @@ def candidate_sort_key(candidate: CandidateMatch) -> tuple:
     numeric = numeric_track_id(candidate.track_id)
     track_key = (0, numeric, candidate.track_id) if numeric is not None else (1, candidate.track_id)
     return (
+        not candidate.physically_plausible,
         round(candidate.normalized_motion, 12),
         round(candidate.motion_distance, 12),
         round(candidate.appearance_tiebreak_cost, 12),
@@ -119,6 +124,7 @@ def _better_assignment(
         ordered = sorted(matches, key=candidate_sort_key)
         return (
             -len(ordered),
+            sum(0 if match.physically_plausible else 1 for match in ordered),
             round(sum(match.normalized_motion for match in ordered), 12),
             round(sum(match.motion_distance for match in ordered), 12),
             round(sum(match.appearance_tiebreak_cost for match in ordered), 12),
