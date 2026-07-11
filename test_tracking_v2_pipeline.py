@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 DEFAULT_VIDEO_PATH = "videoplayback.mp4"
+DEFAULT_OUTPUT_NAME = "tracking_replay.mp4"
 
 
 def parse_args():
@@ -21,7 +22,86 @@ def parse_args():
         default=DEFAULT_VIDEO_PATH,
         help="Input video path",
     )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Annotated replay output path",
+    )
     return parser.parse_args()
+
+
+def track_color(track_id: str) -> tuple[int, int, int]:
+    """Return a deterministic BGR color for a track ID."""
+
+    value = 0
+    for character in str(track_id):
+        value = (value * 131 + ord(character)) % 0xFFFFFF
+
+    # Keep colors bright enough to stand out against video frames.
+    return (
+        80 + (value & 0x7F),
+        80 + ((value >> 7) & 0x7F),
+        80 + ((value >> 14) & 0x7F),
+    )
+
+
+def point_key(point: dict) -> tuple[float, float]:
+    center = point["center"] if "center" in point else point
+    return (round(float(center["x"]), 6), round(float(center["y"]), 6))
+
+
+def current_frame_assignments(tracking_state, observation_batch) -> list[tuple[dict, dict]]:
+    """Pair tracks updated on this frame with their current observations."""
+
+    timestamp = float(observation_batch["timestamp"])
+    observations_by_center = {}
+    for observation in observation_batch["observations"]:
+        observations_by_center.setdefault(point_key(observation["center"]), []).append(observation)
+
+    assignments = []
+    for track in tracking_state["tracks"]:
+        latest_point = track["path"][-1]
+        if float(latest_point["timestamp"]) != timestamp:
+            continue
+
+        candidates = observations_by_center.get(point_key(latest_point), [])
+        if not candidates:
+            continue
+
+        assignments.append((track, candidates.pop(0)))
+
+    return assignments
+
+
+def draw_tracking_state(frame, tracking_state, observation_batch) -> None:
+    import cv2
+
+    height, width = frame.shape[:2]
+    for track, observation in current_frame_assignments(tracking_state, observation_batch):
+        bbox = observation["bbox"]
+        x1 = max(0, min(width - 1, int(round(float(bbox["x1"])))))
+        y1 = max(0, min(height - 1, int(round(float(bbox["y1"])))))
+        x2 = max(0, min(width - 1, int(round(float(bbox["x2"])))))
+        y2 = max(0, min(height - 1, int(round(float(bbox["y2"])))))
+        color = track_color(str(track["track_id"]))
+        label = f"Track {track['track_id']} {float(observation['confidence']):.2f}"
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        text_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        text_width, text_height = text_size
+        label_y1 = max(0, y1 - text_height - baseline - 4)
+        label_y2 = label_y1 + text_height + baseline + 4
+        cv2.rectangle(frame, (x1, label_y1), (x1 + text_width + 6, label_y2), color, -1)
+        cv2.putText(
+            frame,
+            label,
+            (x1 + 3, label_y2 - baseline - 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
 
 
 def update_track_summary(track_summary, tracking_state) -> None:
@@ -64,6 +144,7 @@ def print_track_summary(track_summary, frame_count: int) -> None:
 def main():
     args = parse_args()
     video_path = Path(args.input)
+    output_path = Path(args.output) if args.output else Path(__file__).with_name(DEFAULT_OUTPUT_NAME)
 
     import cv2
 
@@ -79,6 +160,17 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0 or fps > 240:
         fps = 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        cap.release()
+        raise ValueError(f"Cannot open replay output: {output_path}")
 
     detect = Detect()
     embed = Embed()
@@ -114,13 +206,20 @@ def main():
             observation_batch = observe(detection_batch, embedding_batch)
             tracking_state = Track(tracking_state, observation_batch, config)
             update_track_summary(track_summary, tracking_state)
+            draw_tracking_state(bgr_frame, tracking_state, observation_batch)
+            writer.write(bgr_frame)
 
             frame_index += 1
             print(f"\rprocessed frames: {frame_index}", end="", flush=True)
     finally:
         cap.release()
+        writer.release()
 
     print_track_summary(track_summary, frame_index)
+    print("\nReplay complete")
+    print(f"\nFrames processed: {frame_index}")
+    print(f"Tracks created: {len(track_summary)}")
+    print(f"Annotated replay: {output_path}")
 
 
 if __name__ == "__main__":
