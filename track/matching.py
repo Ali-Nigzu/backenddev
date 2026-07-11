@@ -17,8 +17,8 @@ class CandidateMatch:
     detection_id: str
     motion_distance: float
     normalized_motion: float
-    appearance_similarity: float
-    cost: float
+    appearance_similarity: float | None
+    appearance_tiebreak_cost: float
 
 
 def numeric_track_id(track_id: str) -> int | None:
@@ -51,6 +51,14 @@ def embedding_similarity(a, b) -> float:
     return dot / (norm_a * norm_b)
 
 
+def appearance_evidence(a, b) -> float | None:
+    av = list(vector_values(a))
+    bv = list(vector_values(b))
+    if not av or not bv or len(av) != len(bv):
+        return None
+    return embedding_similarity(av, bv)
+
+
 def build_candidates(
     ordered_tracks: Sequence[dict],
     ordered_observations: Sequence[dict],
@@ -58,9 +66,6 @@ def build_candidates(
     config: TrackV2Config,
 ) -> List[CandidateMatch]:
     candidates: List[CandidateMatch] = []
-    total_weight = config.motion_weight + config.appearance_weight
-    motion_weight = config.motion_weight / total_weight if total_weight > 0 else 1.0
-    appearance_weight = config.appearance_weight / total_weight if total_weight > 0 else 0.0
 
     for track_index, track in enumerate(ordered_tracks):
         for observation_index, observation in enumerate(ordered_observations):
@@ -70,15 +75,11 @@ def build_candidates(
             if not allowed:
                 continue
 
-            similarity = embedding_similarity(
+            similarity = appearance_evidence(
                 track["best_crop"].get("embedding"), observation.get("embedding")
             )
-            if similarity < config.min_appearance_similarity:
-                continue
 
-            cost = motion_weight * normalized_motion + appearance_weight * (1.0 - similarity)
-            if cost > config.max_combined_cost:
-                continue
+            appearance_tiebreak_cost = 1.0 - similarity if similarity is not None else 1.0
 
             candidates.append(
                 CandidateMatch(
@@ -89,7 +90,7 @@ def build_candidates(
                     motion_distance=motion_distance,
                     normalized_motion=normalized_motion,
                     appearance_similarity=similarity,
-                    cost=cost,
+                    appearance_tiebreak_cost=appearance_tiebreak_cost,
                 )
             )
     return candidates
@@ -99,13 +100,75 @@ def candidate_sort_key(candidate: CandidateMatch) -> tuple:
     numeric = numeric_track_id(candidate.track_id)
     track_key = (0, numeric, candidate.track_id) if numeric is not None else (1, candidate.track_id)
     return (
-        round(candidate.cost, 12),
         round(candidate.normalized_motion, 12),
-        round(-candidate.appearance_similarity, 12),
+        round(candidate.motion_distance, 12),
+        round(candidate.appearance_tiebreak_cost, 12),
         track_key,
         candidate.detection_id,
         candidate.observation_index,
     )
+
+
+def _better_assignment(
+    candidate_matches: List[CandidateMatch], best_matches: List[CandidateMatch] | None
+) -> bool:
+    if best_matches is None:
+        return True
+
+    def score(matches: List[CandidateMatch]) -> tuple:
+        ordered = sorted(matches, key=candidate_sort_key)
+        return (
+            -len(ordered),
+            round(sum(match.normalized_motion for match in ordered), 12),
+            round(sum(match.motion_distance for match in ordered), 12),
+            round(sum(match.appearance_tiebreak_cost for match in ordered), 12),
+            tuple(candidate_sort_key(match) for match in ordered),
+        )
+
+    return score(candidate_matches) < score(best_matches)
+
+
+def _maximum_continuity_assignment(candidates: List[CandidateMatch]) -> List[CandidateMatch]:
+    by_observation: dict[int, List[CandidateMatch]] = {}
+    for candidate in candidates:
+        by_observation.setdefault(candidate.observation_index, []).append(candidate)
+
+    ordered_observation_indices = sorted(by_observation)
+    for observation_index in ordered_observation_indices:
+        by_observation[observation_index].sort(key=candidate_sort_key)
+
+    best_matches: List[CandidateMatch] | None = None
+
+    def search(
+        observation_position: int,
+        used_tracks: Set[int],
+        selected_matches: List[CandidateMatch],
+    ) -> None:
+        nonlocal best_matches
+
+        remaining = len(ordered_observation_indices) - observation_position
+        if best_matches is not None and len(selected_matches) + remaining < len(best_matches):
+            return
+
+        if observation_position >= len(ordered_observation_indices):
+            if _better_assignment(selected_matches, best_matches):
+                best_matches = list(selected_matches)
+            return
+
+        observation_index = ordered_observation_indices[observation_position]
+        for candidate in by_observation[observation_index]:
+            if candidate.track_index in used_tracks:
+                continue
+            used_tracks.add(candidate.track_index)
+            selected_matches.append(candidate)
+            search(observation_position + 1, used_tracks, selected_matches)
+            selected_matches.pop()
+            used_tracks.remove(candidate.track_index)
+
+        search(observation_position + 1, used_tracks, selected_matches)
+
+    search(0, set(), [])
+    return best_matches or []
 
 
 def assign_matches(
@@ -114,20 +177,14 @@ def assign_matches(
     timestamp: float,
     config: TrackV2Config,
 ) -> Tuple[List[Tuple[int, int]], Set[int], Set[int]]:
-    candidates = sorted(
-        build_candidates(ordered_tracks, ordered_observations, timestamp, config),
-        key=candidate_sort_key,
-    )
-    used_tracks: Set[int] = set()
-    used_observations: Set[int] = set()
-    matches: List[Tuple[int, int]] = []
-
-    for candidate in candidates:
-        if candidate.track_index in used_tracks or candidate.observation_index in used_observations:
-            continue
-        used_tracks.add(candidate.track_index)
-        used_observations.add(candidate.observation_index)
-        matches.append((candidate.track_index, candidate.observation_index))
+    candidates = build_candidates(ordered_tracks, ordered_observations, timestamp, config)
+    selected_candidates = _maximum_continuity_assignment(candidates)
+    used_tracks = {candidate.track_index for candidate in selected_candidates}
+    used_observations = {candidate.observation_index for candidate in selected_candidates}
+    matches = [
+        (candidate.track_index, candidate.observation_index)
+        for candidate in sorted(selected_candidates, key=candidate_sort_key)
+    ]
 
     unmatched_tracks = set(range(len(ordered_tracks))) - used_tracks
     unmatched_observations = set(range(len(ordered_observations))) - used_observations

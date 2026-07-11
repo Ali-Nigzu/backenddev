@@ -22,17 +22,39 @@ def derive_velocity(path, config: TrackV2Config) -> dict:
     if len(path) < 2:
         return {"x": 0.0, "y": 0.0}
 
-    previous = path[-2]
-    latest = path[-1]
-    dt = float(latest["timestamp"]) - float(previous["timestamp"])
-    if dt <= config.epsilon:
+    segment_velocities = []
+    recent_path = path[-5:]
+    for previous, latest in zip(recent_path, recent_path[1:]):
+        dt = float(latest["timestamp"]) - float(previous["timestamp"])
+        if dt <= config.epsilon:
+            continue
+
+        prev_x, prev_y = _xy(previous["center"])
+        latest_x, latest_y = _xy(latest["center"])
+        vx = (latest_x - prev_x) / dt
+        vy = (latest_y - prev_y) / dt
+        speed = math.sqrt(vx * vx + vy * vy)
+        if speed > config.max_speed_px_per_sec and speed > config.epsilon:
+            scale = config.max_speed_px_per_sec / speed
+            vx *= scale
+            vy *= scale
+        segment_velocities.append((vx, vy))
+
+    if not segment_velocities:
         return {"x": 0.0, "y": 0.0}
 
-    prev_x, prev_y = _xy(previous["center"])
-    latest_x, latest_y = _xy(latest["center"])
+    weighted_x = 0.0
+    weighted_y = 0.0
+    total_weight = 0.0
+    for index, (vx, vy) in enumerate(segment_velocities, start=1):
+        weight = float(index)
+        weighted_x += vx * weight
+        weighted_y += vy * weight
+        total_weight += weight
+
     return {
-        "x": (latest_x - prev_x) / dt,
-        "y": (latest_y - prev_y) / dt,
+        "x": weighted_x / total_weight,
+        "y": weighted_y / total_weight,
     }
 
 
@@ -60,15 +82,16 @@ def motion_gate(track, observation, timestamp: float, config: TrackV2Config):
 
     safe_dt = max(dt, 0.0)
     predicted = predict_center(track, timestamp, config)
-    motion_distance = distance(predicted, observation["center"])
+    predicted_distance = distance(predicted, observation["center"])
+    latest_distance = distance(track["path"][-1]["center"], observation["center"])
+    jitter_allowance = config.base_motion_gate_px
+    motion_distance = min(predicted_distance, latest_distance + jitter_allowance)
     allowed_distance = config.base_motion_gate_px + config.max_speed_px_per_sec * safe_dt
     if allowed_distance <= config.epsilon:
         return False, motion_distance, float("inf"), dt
 
     normalized_motion = motion_distance / allowed_distance
     if motion_distance > allowed_distance:
-        return False, motion_distance, normalized_motion, dt
-    if safe_dt > config.epsilon and motion_distance / safe_dt > config.max_speed_px_per_sec:
         return False, motion_distance, normalized_motion, dt
 
     return True, motion_distance, normalized_motion, dt

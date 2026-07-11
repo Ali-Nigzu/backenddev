@@ -37,6 +37,10 @@ def existing_track(track_id="1", timestamp=0.0, x=10.0, y=10.0):
     }
 
 
+def append_point(track, timestamp, x, y):
+    track["path"].append({"timestamp": timestamp, "center": {"x": x, "y": y}})
+
+
 def test_empty_state_creates_deterministic_numeric_ids():
     state = {"tracks": []}
     returned = Track(state, obs_batch(1.0, [obs("b", 20, 20), obs("a", 10, 10)]))
@@ -129,3 +133,86 @@ def test_new_track_id_uses_existing_max_id():
     Track(state, obs_batch(100.0, [obs("new", 10000, 10000)]))
 
     assert [track["track_id"] for track in state["tracks"]] == ["156", "157"]
+
+
+def test_one_track_one_observation_prefers_continuity_despite_embedding_disagreement():
+    state = {"tracks": [existing_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+
+    Track(state, obs_batch(1.0, [obs("next", 14.0, 10.0, emb=[-1.0, 0.0])]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 2
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 14.0, "y": 10.0}
+
+
+def test_appearance_threshold_does_not_fragment_physically_plausible_continuation():
+    state = {"tracks": [existing_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+    config = TrackV2Config(min_appearance_similarity=0.99)
+
+    Track(state, obs_batch(1.0, [obs("next", 14.0, 10.0, emb=[-1.0, 0.0])]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 2
+
+
+def test_many_tracks_one_observation_reuses_most_physically_plausible_track():
+    state = {
+        "tracks": [
+            existing_track("1", timestamp=0.0, x=10.0, y=10.0),
+            existing_track("2", timestamp=0.0, x=100.0, y=100.0),
+            existing_track("3", timestamp=0.0, x=200.0, y=200.0),
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("only", 104.0, 100.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3"]
+    assert [len(track["path"]) for track in state["tracks"]] == [1, 2, 1]
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
+
+
+def test_one_track_multiple_observations_extends_existing_before_births():
+    state = {"tracks": [existing_track("5", timestamp=0.0, x=50.0, y=50.0)]}
+
+    Track(state, obs_batch(1.0, [obs("new-object", 500.0, 500.0), obs("same", 55.0, 50.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["5", "6"]
+    assert len(state["tracks"][0]["path"]) == 2
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 55.0, "y": 50.0}
+    assert state["tracks"][1]["path"][0]["center"] == {"x": 500.0, "y": 500.0}
+
+
+def test_stale_track_does_not_long_term_reidentify_returning_object():
+    state = {"tracks": [existing_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+
+    Track(state, obs_batch(5.0, [obs("returning", 12.0, 10.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [1, 1]
+
+
+def test_motion_dominates_when_appearance_conflicts_with_clear_spatial_match():
+    track_1 = existing_track("1", timestamp=0.0, x=10.0, y=10.0)
+    track_2 = existing_track("2", timestamp=0.0, x=100.0, y=100.0)
+    track_2["best_crop"]["embedding"] = obs("seed-2", 100.0, 100.0, emb=[0.0, 1.0])[
+        "embedding"
+    ]
+    state = {"tracks": [track_1, track_2]}
+
+    Track(state, obs_batch(1.0, [obs("near-1", 12.0, 10.0, emb=[0.0, 1.0])]))
+
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+
+
+def test_recent_path_velocity_is_smoothed_to_resist_detector_jitter():
+    state = {"tracks": [existing_track("1", timestamp=0.0, x=0.0, y=0.0)]}
+    append_point(state["tracks"][0], 1.0, 10.0, 0.0)
+    append_point(state["tracks"][0], 2.0, 20.0, 0.0)
+    append_point(state["tracks"][0], 3.0, 24.0, 0.0)
+
+    Track(state, obs_batch(4.0, [obs("next", 40.0, 0.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 5
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}
