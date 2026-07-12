@@ -22,11 +22,17 @@ def derive_velocity(path, config: TrackV2Config) -> dict:
     if len(path) < 2:
         return {"x": 0.0, "y": 0.0}
 
-    segment_velocities = []
-    recent_path = path[-5:]
-    for previous, latest in zip(recent_path, recent_path[1:]):
+    weighted_x = 0.0
+    weighted_y = 0.0
+    total_weight = 0.0
+    segment_count = 0
+    recent_start = max(0, len(path) - 5)
+    previous = path[recent_start]
+    for latest_index in range(recent_start + 1, len(path)):
+        latest = path[latest_index]
         dt = float(latest["timestamp"]) - float(previous["timestamp"])
         if dt <= config.epsilon:
+            previous = latest
             continue
 
         prev_x, prev_y = _xy(previous["center"])
@@ -38,19 +44,16 @@ def derive_velocity(path, config: TrackV2Config) -> dict:
             scale = config.max_speed_px_per_sec / speed
             vx *= scale
             vy *= scale
-        segment_velocities.append((vx, vy))
 
-    if not segment_velocities:
-        return {"x": 0.0, "y": 0.0}
-
-    weighted_x = 0.0
-    weighted_y = 0.0
-    total_weight = 0.0
-    for index, (vx, vy) in enumerate(segment_velocities, start=1):
-        weight = float(index)
+        segment_count += 1
+        weight = float(segment_count)
         weighted_x += vx * weight
         weighted_y += vy * weight
         total_weight += weight
+        previous = latest
+
+    if segment_count == 0:
+        return {"x": 0.0, "y": 0.0}
 
     return {
         "x": weighted_x / total_weight,
