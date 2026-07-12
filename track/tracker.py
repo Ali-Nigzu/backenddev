@@ -141,10 +141,7 @@ def _confirmation_min_path_points(config: TrackV2Config) -> int:
 
 def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config) -> tuple[list[int], list[int]]:
     confirmation_points = _confirmation_min_path_points(config)
-    active_window_config = config.active_recency_window_frames
-    active_window = float(
-        config.active_track_window_frames if active_window_config is None else active_window_config
-    )
+    active_window = float(config.max_reassociation_gap_sec)
     tentative_window = float(config.tentative_recency_window_frames)
     active_indices: list[int] = []
     tentative_indices: list[int] = []

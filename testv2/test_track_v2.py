@@ -359,3 +359,66 @@ def test_public_contract_shapes_do_not_gain_tracking_status_fields():
     }
     assert set(state["tracks"][0]["path"][0].keys()) == {"timestamp", "center"}
     assert set(state["tracks"][0]["best_crop"].keys()) == {"frame_id", "bbox", "embedding"}
+
+
+def test_continuous_tracking_within_reassociation_gap_keeps_same_id():
+    config = TrackV2Config(max_reassociation_gap_sec=0.5)
+    state = {"tracks": []}
+
+    for index, timestamp in enumerate([0.0, 0.25, 0.5, 0.75, 1.0]):
+        Track(state, obs_batch(timestamp, [obs(f"a-{index}", 10.0 + index, 10.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 5
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 14.0, "y": 10.0}
+
+
+def test_gap_within_reassociation_gap_keeps_confirmed_identity():
+    config = TrackV2Config(max_reassociation_gap_sec=0.5)
+    state = {"tracks": []}
+
+    Track(state, obs_batch(0.0, [obs("a-0", 10.0, 10.0)]), config)
+    Track(state, obs_batch(0.25, [obs("a-1", 11.0, 10.0)]), config)
+    Track(state, obs_batch(0.5, []), config)
+    Track(state, obs_batch(0.6, []), config)
+    Track(state, obs_batch(0.7, [obs("a-2", 12.0, 10.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+
+
+def test_gap_beyond_reassociation_gap_creates_new_id_for_confirmed_track():
+    config = TrackV2Config(
+        max_reassociation_gap_sec=0.5,
+        active_recency_window_frames=10,
+        active_track_window_frames=10,
+    )
+    state = {"tracks": []}
+
+    Track(state, obs_batch(0.0, [obs("a-0", 10.0, 10.0)]), config)
+    Track(state, obs_batch(0.25, [obs("a-1", 11.0, 10.0)]), config)
+    Track(state, obs_batch(0.6, []), config)
+    Track(state, obs_batch(0.8, []), config)
+    Track(state, obs_batch(1.0, [obs("b-0", 12.0, 10.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 11.0, "y": 10.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+
+
+def test_stale_confirmed_track_cannot_suppress_new_birth():
+    config = TrackV2Config(
+        max_reassociation_gap_sec=0.5,
+        active_recency_window_frames=10,
+        active_track_window_frames=10,
+    )
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+
+    Track(state, obs_batch(1.0, [obs("new-person", 20.0, 20.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 10.0, "y": 10.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 20.0, "y": 20.0}
