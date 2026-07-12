@@ -110,8 +110,12 @@ def _validate_observation_batch(batch) -> None:
 
 
 def _next_numeric_track_id(tracks) -> int:
-    numeric_ids = [int(track["track_id"]) for track in tracks if str(track["track_id"]).isdecimal()]
-    return max(numeric_ids, default=0) + 1
+    max_numeric_id = 0
+    for track in tracks:
+        track_id = str(track["track_id"])
+        if track_id.isdecimal():
+            max_numeric_id = max(max_numeric_id, int(track_id))
+    return max_numeric_id + 1
 
 
 def _reorder_state_tracks(state) -> None:
@@ -154,14 +158,14 @@ def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config) ->
     return active_indices, tentative_indices
 
 
-def _observations_at_indices(observations, indices: set[int]) -> list[dict]:
-    return [observation for index, observation in enumerate(observations) if index in indices]
+def _observations_at_indices(observations, indices) -> list[dict]:
+    return [observations[index] for index in indices]
 
 
 def _map_matches(
     matches: list[tuple[int, int]],
     track_indices: list[int],
-    observation_indices: list[int],
+    observation_indices,
 ) -> list[tuple[int, int]]:
     return [
         (track_indices[track_index], observation_indices[observation_index])
@@ -199,7 +203,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     state_matches = _map_matches(
         matches,
         active_track_indices,
-        list(range(len(ordered_observations))),
+        range(len(ordered_observations)),
     )
 
     remaining_observation_indices = set(unmatched_observation_indices)
@@ -208,11 +212,11 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
             tracking_state["tracks"][index]
             for index in tentative_track_indices
         ]
+        remaining_indices = sorted(remaining_observation_indices)
         remaining_observations = _observations_at_indices(
             ordered_observations,
-            remaining_observation_indices,
+            remaining_indices,
         )
-        remaining_indices = sorted(remaining_observation_indices)
         tentative_matches, _unmatched_tentative_indices, unmatched_remaining_indices = assign_matches(
             tentative_tracks,
             remaining_observations,

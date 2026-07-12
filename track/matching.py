@@ -38,9 +38,9 @@ def observation_sort_key(index_observation) -> tuple:
     return (str(observation["detection_id"]), index)
 
 
-def embedding_similarity(a, b) -> float:
-    av = [float(v) for v in vector_values(a)]
-    bv = [float(v) for v in vector_values(b)]
+def _embedding_similarity_values(a, b) -> float:
+    av = [float(v) for v in a]
+    bv = [float(v) for v in b]
     if not av or not bv or len(av) != len(bv):
         return 0.0
 
@@ -52,12 +52,16 @@ def embedding_similarity(a, b) -> float:
     return dot / (norm_a * norm_b)
 
 
+def embedding_similarity(a, b) -> float:
+    return _embedding_similarity_values(vector_values(a), vector_values(b))
+
+
 def appearance_evidence(a, b) -> float | None:
     av = list(vector_values(a))
     bv = list(vector_values(b))
     if not av or not bv or len(av) != len(bv):
         return None
-    return embedding_similarity(av, bv)
+    return _embedding_similarity_values(av, bv)
 
 
 def build_candidates(
@@ -114,21 +118,37 @@ def candidate_sort_key(candidate: CandidateMatch) -> tuple:
     )
 
 
+def _cached_candidate_sort_key(candidate: CandidateMatch, cache: dict[CandidateMatch, tuple]) -> tuple:
+    key = cache.get(candidate)
+    if key is None:
+        key = candidate_sort_key(candidate)
+        cache[candidate] = key
+    return key
+
+
 def _better_assignment(
-    candidate_matches: List[CandidateMatch], best_matches: List[CandidateMatch] | None
+    candidate_matches: List[CandidateMatch],
+    best_matches: List[CandidateMatch] | None,
+    sort_key_cache: dict[CandidateMatch, tuple] | None = None,
 ) -> bool:
     if best_matches is None:
         return True
 
+    if sort_key_cache is None:
+        sort_key_cache = {}
+
     def score(matches: List[CandidateMatch]) -> tuple:
-        ordered = sorted(matches, key=candidate_sort_key)
+        ordered = sorted(
+            matches,
+            key=lambda match: _cached_candidate_sort_key(match, sort_key_cache),
+        )
         return (
             -len(ordered),
             sum(0 if match.physically_plausible else 1 for match in ordered),
             round(sum(match.normalized_motion for match in ordered), 12),
             round(sum(match.motion_distance for match in ordered), 12),
             round(sum(match.appearance_tiebreak_cost for match in ordered), 12),
-            tuple(candidate_sort_key(match) for match in ordered),
+            tuple(_cached_candidate_sort_key(match, sort_key_cache) for match in ordered),
         )
 
     return score(candidate_matches) < score(best_matches)
@@ -136,12 +156,15 @@ def _better_assignment(
 
 def _maximum_continuity_assignment(candidates: List[CandidateMatch]) -> List[CandidateMatch]:
     by_observation: dict[int, List[CandidateMatch]] = {}
+    sort_key_cache: dict[CandidateMatch, tuple] = {}
     for candidate in candidates:
         by_observation.setdefault(candidate.observation_index, []).append(candidate)
 
     ordered_observation_indices = sorted(by_observation)
     for observation_index in ordered_observation_indices:
-        by_observation[observation_index].sort(key=candidate_sort_key)
+        by_observation[observation_index].sort(
+            key=lambda candidate: _cached_candidate_sort_key(candidate, sort_key_cache)
+        )
 
     best_matches: List[CandidateMatch] | None = None
 
@@ -157,7 +180,7 @@ def _maximum_continuity_assignment(candidates: List[CandidateMatch]) -> List[Can
             return
 
         if observation_position >= len(ordered_observation_indices):
-            if _better_assignment(selected_matches, best_matches):
+            if _better_assignment(selected_matches, best_matches, sort_key_cache):
                 best_matches = list(selected_matches)
             return
 
