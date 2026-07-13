@@ -28,4 +28,9 @@ class TrackV2Config:
     motion_weight: float = 0.65
     appearance_weight: float = 0.35
     max_combined_cost: float = 1.25
+    # Disabled by default to preserve existing continuity-first behaviour. When
+    # set, candidates that already fail physical plausibility and exceed this
+    # normalized motion value are removed before assignment so extreme forced
+    # continuations can become new tentative tracks instead.
+    forced_continuity_break_normalized_motion: float | None = None
     epsilon: float = 1e-9

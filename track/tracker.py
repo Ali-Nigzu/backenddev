@@ -194,7 +194,12 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     )
     active_tracks = [tracking_state["tracks"][index] for index in active_track_indices]
 
-    matches, _unmatched_track_indices, unmatched_observation_indices = assign_matches(
+    (
+        matches,
+        _unmatched_track_indices,
+        unmatched_observation_indices,
+        active_forced_rejected_observation_indices,
+    ) = assign_matches(
         active_tracks, ordered_observations, timestamp, config
     )
     state_matches = _map_matches(
@@ -214,7 +219,12 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
             ordered_observations,
             remaining_indices,
         )
-        tentative_matches, _unmatched_tentative_indices, unmatched_remaining_indices = assign_matches(
+        (
+            tentative_matches,
+            _unmatched_tentative_indices,
+            unmatched_remaining_indices,
+            _tentative_forced_rejected_observation_indices,
+        ) = assign_matches(
             tentative_tracks,
             remaining_observations,
             timestamp,
@@ -240,8 +250,18 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
             timestamp,
         )
 
-    allowed_new_tracks = max(0, len(ordered_observations) - len(active_tracks))
-    for observation_index in sorted(remaining_observation_indices)[:allowed_new_tracks]:
+    forced_birth_observation_indices = (
+        active_forced_rejected_observation_indices & remaining_observation_indices
+    )
+    base_allowed_new_tracks = max(0, len(ordered_observations) - len(active_tracks))
+    birth_observation_indices = sorted(forced_birth_observation_indices)
+    remaining_birth_candidates = sorted(
+        remaining_observation_indices - forced_birth_observation_indices
+    )
+    birth_observation_indices.extend(
+        remaining_birth_candidates[:base_allowed_new_tracks]
+    )
+    for observation_index in birth_observation_indices:
         observation = ordered_observations[observation_index]
         tracking_state["tracks"].append(create_track(observation, frame_id, timestamp, str(next_id)))
         next_id += 1

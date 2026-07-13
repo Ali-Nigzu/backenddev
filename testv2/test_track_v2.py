@@ -248,6 +248,80 @@ def test_confirmed_active_track_takes_huge_jump_without_birth():
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
 
 
+def test_forced_continuity_break_rejects_extreme_jump_and_creates_tentative_track():
+    state = {"tracks": [confirmed_track("7", timestamp=0.0, x=10.0, y=10.0)]}
+    config = TrackV2Config(forced_continuity_break_normalized_motion=8.0)
+
+    Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["7", "8"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 10.0, "y": 10.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
+
+
+def test_forced_continuity_break_preserves_normal_walking_continuity():
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+    config = TrackV2Config(forced_continuity_break_normalized_motion=0.1)
+
+    Track(state, obs_batch(1.0, [obs("walk", 14.0, 10.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 14.0, "y": 10.0}
+
+
+def test_forced_continuity_break_preserves_brief_occlusion_continuity():
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+    config = TrackV2Config(
+        max_reassociation_gap_sec=2.0,
+        forced_continuity_break_normalized_motion=0.1,
+    )
+
+    Track(state, obs_batch(1.0, []), config)
+    Track(state, obs_batch(1.5, [obs("return", 12.0, 10.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+
+
+def test_forced_continuity_break_ignores_appearance_disagreement_for_plausible_motion():
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+    config = TrackV2Config(forced_continuity_break_normalized_motion=0.1)
+
+    Track(state, obs_batch(1.0, [obs("appearance", 12.0, 10.0, emb=[-1.0, 0.0])]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+
+
+def test_forced_continuity_break_multi_person_scene_is_deterministic():
+    config = TrackV2Config(forced_continuity_break_normalized_motion=8.0)
+    initial_state = {
+        "tracks": [
+            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
+            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
+        ]
+    }
+    batch = obs_batch(
+        1.0,
+        [
+            obs("far", 2000.0, 2000.0),
+            obs("near-2", 104.0, 100.0),
+        ],
+    )
+    state_a = deepcopy(initial_state)
+    state_b = deepcopy(initial_state)
+
+    assert Track(state_a, deepcopy(batch), config) == Track(state_b, deepcopy(batch), config)
+    assert [track["track_id"] for track in state_a["tracks"]] == ["1", "2", "3"]
+    assert [len(track["path"]) for track in state_a["tracks"]] == [2, 3, 1]
+    assert state_a["tracks"][1]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
+    assert state_a["tracks"][2]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
+
+
 def test_five_confirmed_active_tracks_three_observations_zero_births():
     state = {
         "tracks": [
