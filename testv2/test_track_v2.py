@@ -79,15 +79,20 @@ def test_unmatched_observation_creates_next_max_id_without_filling_gaps():
     assert [track["track_id"] for track in state["tracks"]] == ["77", "78"]
 
 
-def test_no_new_track_when_observations_do_not_exceed_active_tracks():
+def test_no_new_track_when_observations_do_not_exceed_active_tracks_with_escape_valve_disabled():
     state = {
         "tracks": [
             confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
             confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
         ]
     }
+    config = TrackV2Config(forced_continuity_break_normalized_motion=None)
 
-    Track(state, obs_batch(1.0, [obs("far-a", 10000.0, 10000.0), obs("far-b", 20000.0, 20000.0)]))
+    Track(
+        state,
+        obs_batch(1.0, [obs("far-a", 10000.0, 10000.0), obs("far-b", 20000.0, 20000.0)]),
+        config,
+    )
 
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
     assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
@@ -238,21 +243,21 @@ def test_recent_path_velocity_is_smoothed_to_resist_detector_jitter():
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}
 
 
-def test_confirmed_active_track_takes_huge_jump_without_birth():
+def test_confirmed_active_track_takes_huge_jump_without_birth_when_escape_valve_disabled():
     state = {"tracks": [confirmed_track("7", timestamp=0.0, x=10.0, y=10.0)]}
+    config = TrackV2Config(forced_continuity_break_normalized_motion=None)
 
-    Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]))
+    Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]), config)
 
     assert [track["track_id"] for track in state["tracks"]] == ["7"]
     assert len(state["tracks"][0]["path"]) == 3
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
 
 
-def test_forced_continuity_break_rejects_extreme_jump_and_creates_tentative_track():
+def test_default_forced_continuity_break_rejects_extreme_jump_and_creates_tentative_track():
     state = {"tracks": [confirmed_track("7", timestamp=0.0, x=10.0, y=10.0)]}
-    config = TrackV2Config(forced_continuity_break_normalized_motion=8.0)
 
-    Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]), config)
+    Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]))
 
     assert [track["track_id"] for track in state["tracks"]] == ["7", "8"]
     assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
