@@ -216,22 +216,19 @@ def assign_matches(
     config: TrackV2Config,
 ) -> Tuple[List[Tuple[int, int]], Set[int], Set[int], Set[int]]:
     candidates = build_candidates(ordered_tracks, ordered_observations, timestamp, config)
-    rejected_observations = {
-        candidate.observation_index
-        for candidate in candidates
-        if _forced_continuity_rejects(candidate, config)
-    }
-    candidates = [
-        candidate
-        for candidate in candidates
-        if not _forced_continuity_rejects(candidate, config)
-    ]
     selected_candidates = _maximum_continuity_assignment(candidates)
-    used_tracks = {candidate.track_index for candidate in selected_candidates}
-    used_observations = {candidate.observation_index for candidate in selected_candidates}
+    accepted_candidates: List[CandidateMatch] = []
+    rejected_observations: Set[int] = set()
+    for candidate in selected_candidates:
+        if _forced_continuity_rejects(candidate, config):
+            rejected_observations.add(candidate.observation_index)
+        else:
+            accepted_candidates.append(candidate)
+    used_tracks = {candidate.track_index for candidate in accepted_candidates}
+    used_observations = {candidate.observation_index for candidate in accepted_candidates}
     matches = [
         (candidate.track_index, candidate.observation_index)
-        for candidate in sorted(selected_candidates, key=candidate_sort_key)
+        for candidate in sorted(accepted_candidates, key=candidate_sort_key)
     ]
 
     unmatched_tracks = set(range(len(ordered_tracks))) - used_tracks

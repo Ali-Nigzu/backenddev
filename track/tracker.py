@@ -198,7 +198,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         matches,
         _unmatched_track_indices,
         unmatched_observation_indices,
-        active_forced_rejected_observation_indices,
+        forced_rejected_observation_indices,
     ) = assign_matches(
         active_tracks, ordered_observations, timestamp, config
     )
@@ -223,7 +223,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
             tentative_matches,
             _unmatched_tentative_indices,
             unmatched_remaining_indices,
-            _tentative_forced_rejected_observation_indices,
+            tentative_forced_rejected_observation_indices,
         ) = assign_matches(
             tentative_tracks,
             remaining_observations,
@@ -241,6 +241,10 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
             remaining_indices[index]
             for index in unmatched_remaining_indices
         }
+        forced_rejected_observation_indices.update(
+            remaining_indices[index]
+            for index in tentative_forced_rejected_observation_indices
+        )
 
     for state_track_index, observation_index in sorted(state_matches):
         append_observation(
@@ -251,7 +255,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         )
 
     forced_birth_observation_indices = (
-        active_forced_rejected_observation_indices & remaining_observation_indices
+        forced_rejected_observation_indices & remaining_observation_indices
     )
     base_allowed_new_tracks = max(0, len(ordered_observations) - len(active_tracks))
     birth_observation_indices = sorted(forced_birth_observation_indices)

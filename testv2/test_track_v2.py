@@ -322,9 +322,37 @@ def test_forced_continuity_break_multi_person_scene_is_deterministic():
 
     assert Track(state_a, deepcopy(batch), config) == Track(state_b, deepcopy(batch), config)
     assert [track["track_id"] for track in state_a["tracks"]] == ["1", "2", "3"]
-    assert [len(track["path"]) for track in state_a["tracks"]] == [2, 3, 1]
-    assert state_a["tracks"][1]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
+    assert [len(track["path"]) for track in state_a["tracks"]] == [3, 2, 1]
+    assert state_a["tracks"][0]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
     assert state_a["tracks"][2]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
+
+
+def test_forced_continuity_break_does_not_reoptimize_remaining_selected_matches():
+    config = TrackV2Config(forced_continuity_break_normalized_motion=15.0)
+    state = {
+        "tracks": [
+            confirmed_track("1", timestamp=1.0, x=0.0, y=0.0),
+            confirmed_track("2", timestamp=1.0, x=100.0, y=0.0),
+        ]
+    }
+
+    Track(
+        state,
+        obs_batch(
+            2.0,
+            [
+                obs("far-new", 800.0, 0.0),
+                obs("near-2", 102.0, 0.0),
+            ],
+        ),
+        config,
+    )
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 2, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 102.0, "y": 0.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 100.0, "y": 0.0}
+    assert state["tracks"][2]["path"][-1]["center"] == {"x": 800.0, "y": 0.0}
 
 
 def test_five_confirmed_active_tracks_three_observations_zero_births():
