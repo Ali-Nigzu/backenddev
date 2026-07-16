@@ -79,7 +79,7 @@ def test_unmatched_observation_creates_next_max_id_without_filling_gaps():
     assert [track["track_id"] for track in state["tracks"]] == ["77", "78"]
 
 
-def test_no_new_track_when_observations_do_not_exceed_active_tracks_with_escape_valve_disabled():
+def test_impossible_observations_birth_even_when_observations_do_not_exceed_active_tracks():
     state = {
         "tracks": [
             confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
@@ -94,8 +94,8 @@ def test_no_new_track_when_observations_do_not_exceed_active_tracks_with_escape_
         config,
     )
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3", "4"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 2, 1, 1]
 
 
 def test_track_never_prunes_tracks_with_empty_observations():
@@ -243,15 +243,16 @@ def test_recent_path_velocity_is_smoothed_to_resist_detector_jitter():
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}
 
 
-def test_confirmed_active_track_takes_huge_jump_without_birth_when_escape_valve_disabled():
+def test_confirmed_active_track_rejects_huge_jump_even_when_escape_valve_disabled():
     state = {"tracks": [confirmed_track("7", timestamp=0.0, x=10.0, y=10.0)]}
     config = TrackV2Config(forced_continuity_break_normalized_motion=None)
 
     Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]), config)
 
-    assert [track["track_id"] for track in state["tracks"]] == ["7"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
+    assert [track["track_id"] for track in state["tracks"]] == ["7", "8"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 10.0, "y": 10.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
 
 
 def test_default_forced_continuity_break_rejects_extreme_jump_and_creates_tentative_track():
@@ -322,8 +323,8 @@ def test_forced_continuity_break_multi_person_scene_is_deterministic():
 
     assert Track(state_a, deepcopy(batch), config) == Track(state_b, deepcopy(batch), config)
     assert [track["track_id"] for track in state_a["tracks"]] == ["1", "2", "3"]
-    assert [len(track["path"]) for track in state_a["tracks"]] == [3, 2, 1]
-    assert state_a["tracks"][0]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
+    assert [len(track["path"]) for track in state_a["tracks"]] == [2, 3, 1]
+    assert state_a["tracks"][1]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
     assert state_a["tracks"][2]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
 
 
@@ -349,9 +350,9 @@ def test_forced_continuity_break_does_not_reoptimize_remaining_selected_matches(
     )
 
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 2, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 102.0, "y": 0.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 100.0, "y": 0.0}
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 3, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 0.0, "y": 0.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 102.0, "y": 0.0}
     assert state["tracks"][2]["path"][-1]["center"] == {"x": 800.0, "y": 0.0}
 
 
@@ -529,3 +530,106 @@ def test_stale_confirmed_track_cannot_suppress_new_birth():
     assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 10.0, "y": 10.0}
     assert state["tracks"][1]["path"][-1]["center"] == {"x": 20.0, "y": 20.0}
+
+
+def test_diagnostics_explain_eligible_match_and_birth():
+    diagnostics = []
+    config = TrackV2Config(debug_diagnostics=diagnostics)
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+
+    Track(state, obs_batch(1.0, [obs("near", 12.0, 10.0), obs("teleport", 5000.0, 5000.0)]), config)
+
+    by_id = {item["observation_id"]: item for item in diagnostics}
+    assert by_id["near"]["final_assignment"]["track_id"] == "1"
+    assert by_id["near"]["candidate_tracks"][0]["eligible"] is True
+    assert by_id["near"]["candidate_tracks"][0]["classification"] in {"strong", "normal", "weak"}
+    assert by_id["teleport"]["final_assignment"] == "birth"
+    assert by_id["teleport"]["candidate_tracks"][0]["eligible"] is False
+
+
+def test_observation_specific_eligibility_births_unexplained_new_person_with_active_tracks():
+    state = {
+        "tracks": [
+            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
+            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("near-1", 12.0, 10.0), obs("new", 900.0, 900.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 2, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+    assert state["tracks"][2]["path"][-1]["center"] == {"x": 900.0, "y": 900.0}
+
+
+def test_configurable_hard_speed_limit_controls_eligibility():
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)]}
+    strict = TrackV2Config(hard_speed_limit_px_per_sec=5.0)
+
+    Track(state, obs_batch(1.0, [obs("too-fast", 20.0, 0.0)]), strict)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+
+
+def test_deterministic_replay_many_runs_with_eligibility():
+    initial_state = {
+        "tracks": [
+            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
+            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
+        ]
+    }
+    batch = obs_batch(1.0, [obs("b", 101.0, 100.0), obs("a", 11.0, 10.0)])
+
+    outputs = []
+    for _ in range(100):
+        state = deepcopy(initial_state)
+        outputs.append(deepcopy(Track(state, deepcopy(batch))))
+
+    assert all(output == outputs[0] for output in outputs)
+
+
+def test_partition_track_indices_compatibility_uses_lifecycle_windows():
+    from track.tracker import _partition_track_indices
+
+    config = TrackV2Config(
+        confirmation_min_path_points=3,
+        active_confirmation_min_path_points=3,
+        tentative_confirmation_min_path_points=3,
+        confirmed_reassociation_window_sec=2.0,
+        max_reassociation_gap_sec=2.0,
+        tentative_track_window_sec=0.5,
+    )
+    confirmed = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
+    append_point(confirmed, 0.1, 1.0, 0.0)
+    append_point(confirmed, 0.2, 2.0, 0.0)
+    tentative_recent = existing_track("2", timestamp=0.8, x=10.0, y=0.0)
+    tentative_stale = existing_track("3", timestamp=0.0, x=20.0, y=0.0)
+
+    active_indices, tentative_indices = _partition_track_indices(
+        [confirmed, tentative_recent, tentative_stale], 1.0, config
+    )
+
+    assert active_indices == [0]
+    assert tentative_indices == [1]
+
+
+def test_tentative_tracks_use_stricter_observation_specific_gates():
+    config = TrackV2Config(
+        confirmed_prediction_gate_px=200.0,
+        tentative_prediction_gate_px=20.0,
+        confirmed_latest_position_gate_px=200.0,
+        tentative_latest_position_gate_px=20.0,
+        confirmed_max_speed_px_per_sec=500.0,
+        tentative_max_speed_px_per_sec=25.0,
+    )
+    confirmed = confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)
+    tentative = existing_track("2", timestamp=0.0, x=100.0, y=0.0)
+    state = {"tracks": [confirmed, tentative]}
+
+    Track(state, obs_batch(1.0, [obs("could-fit-confirmed-only", 40.0, 0.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}

@@ -109,6 +109,66 @@ def _validate_observation_batch(batch) -> None:
         _require_finite_number(observation["confidence"], f"{name}.confidence")
 
 
+def _validate_config(config: TrackV2Config) -> None:
+    numeric_fields = (
+        "confirmation_min_path_points",
+        "tentative_track_window_sec",
+        "confirmed_reassociation_window_sec",
+        "confirmed_prediction_gate_px",
+        "tentative_prediction_gate_px",
+        "confirmed_latest_position_gate_px",
+        "tentative_latest_position_gate_px",
+        "confirmed_max_speed_px_per_sec",
+        "tentative_max_speed_px_per_sec",
+        "tentative_recency_window_frames",
+        "max_reassociation_gap_sec",
+        "max_speed_px_per_sec",
+        "base_motion_gate_px",
+        "strong_motion_threshold",
+        "normal_motion_threshold",
+        "weak_motion_threshold",
+        "epsilon",
+    )
+    for field in numeric_fields:
+        value = _require_finite_number(getattr(config, field), f"TrackV2Config.{field}")
+        if value < 0:
+            raise ValueError(f"TrackV2Config.{field} must be non-negative")
+
+    positive_fields = (
+        "confirmation_min_path_points",
+        "max_speed_px_per_sec",
+        "base_motion_gate_px",
+        "epsilon",
+    )
+    for field in positive_fields:
+        if float(getattr(config, field)) <= 0:
+            raise ValueError(f"TrackV2Config.{field} must be positive")
+
+    optional_non_negative_fields = (
+        "confirmed_track_window_sec",
+        "max_believable_speed_px_per_sec",
+        "hard_speed_limit_px_per_sec",
+        "prediction_gate_px",
+        "prediction_gate_growth_px_per_sec",
+        "latest_position_gate_px",
+        "latest_position_gate_growth_px_per_sec",
+        "jitter_tolerance_px",
+        "forced_continuity_break_normalized_motion",
+    )
+    for field in optional_non_negative_fields:
+        value = getattr(config, field)
+        if value is None:
+            continue
+        number = _require_finite_number(value, f"TrackV2Config.{field}")
+        if number < 0:
+            raise ValueError(f"TrackV2Config.{field} must be non-negative")
+
+    if float(config.strong_motion_threshold) > float(config.normal_motion_threshold):
+        raise ValueError("TrackV2Config.strong_motion_threshold must be <= normal_motion_threshold")
+    if float(config.normal_motion_threshold) > float(config.weak_motion_threshold):
+        raise ValueError("TrackV2Config.normal_motion_threshold must be <= weak_motion_threshold")
+
+
 def _next_numeric_track_id(tracks) -> int:
     max_numeric_id = 0
     for track in tracks:
@@ -122,8 +182,30 @@ def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
 
 
+def _confirmation_min_path_points(config: TrackV2Config) -> int:
+    return max(
+        1,
+        int(config.confirmation_min_path_points),
+        int(config.active_confirmation_min_path_points),
+        int(config.tentative_confirmation_min_path_points),
+    )
+
+
 def _latest_timestamp(track) -> float:
     return float(track["path"][-1]["timestamp"])
+
+
+def _is_confirmed_track(track, config: TrackV2Config) -> bool:
+    return len(track["path"]) >= _confirmation_min_path_points(config)
+
+
+def _track_window(track, config: TrackV2Config) -> float:
+    if _is_confirmed_track(track, config):
+        compatibility_window = float(config.max_reassociation_gap_sec)
+        if config.confirmed_track_window_sec is not None:
+            return min(float(config.confirmed_track_window_sec), compatibility_window)
+        return min(float(config.confirmed_reassociation_window_sec), compatibility_window)
+    return float(config.tentative_track_window_sec or config.tentative_recency_window_frames)
 
 
 def _is_recent(track, timestamp: float, window: float, config: TrackV2Config) -> bool:
@@ -131,32 +213,20 @@ def _is_recent(track, timestamp: float, window: float, config: TrackV2Config) ->
     return -config.epsilon <= age <= float(window)
 
 
-def _confirmation_min_path_points(config: TrackV2Config) -> int:
-    return max(
-        1,
-        int(config.active_confirmation_min_path_points),
-        int(config.tentative_confirmation_min_path_points),
-    )
-
-
 def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config) -> tuple[list[int], list[int]]:
-    confirmation_points = _confirmation_min_path_points(config)
-    active_window = float(config.max_reassociation_gap_sec)
-    tentative_window = float(config.tentative_recency_window_frames)
+    """Compatibility helper returning lifecycle-qualified confirmed and tentative indices."""
+
     active_indices: list[int] = []
     tentative_indices: list[int] = []
     for index, track in enumerate(tracks):
-        path_points = len(track["path"])
-        if path_points >= confirmation_points:
-            if _is_recent(track, timestamp, active_window, config):
-                active_indices.append(index)
-        elif _is_recent(track, timestamp, tentative_window, config):
+        window = _track_window(track, config)
+        if not _is_recent(track, timestamp, window, config):
+            continue
+        if _is_confirmed_track(track, config):
+            active_indices.append(index)
+        else:
             tentative_indices.append(index)
     return active_indices, tentative_indices
-
-
-def _observations_at_indices(observations, indices) -> list[dict]:
-    return [observations[index] for index in indices]
 
 
 def _map_matches(
@@ -174,6 +244,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 
     config = config or TrackV2Config()
+    _validate_config(config)
     _validate_tracking_state(tracking_state)
     _validate_observation_batch(observation_batch)
 
@@ -189,62 +260,24 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     ]
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
-    active_track_indices, tentative_track_indices = _partition_track_indices(
-        tracking_state["tracks"], timestamp, config
-    )
-    active_tracks = [tracking_state["tracks"][index] for index in active_track_indices]
+    track_indices = list(range(len(tracking_state["tracks"])))
+    diagnostics = [] if (config.debug_diagnostics is not None or config.debug_callback is not None) else None
 
     (
         matches,
         _unmatched_track_indices,
         unmatched_observation_indices,
-        forced_rejected_observation_indices,
+        _rejected_observation_indices,
     ) = assign_matches(
-        active_tracks, ordered_observations, timestamp, config
+        tracking_state["tracks"], ordered_observations, timestamp, config, diagnostics
     )
     state_matches = _map_matches(
         matches,
-        active_track_indices,
+        track_indices,
         range(len(ordered_observations)),
     )
 
     remaining_observation_indices = set(unmatched_observation_indices)
-    if remaining_observation_indices:
-        tentative_tracks = [
-            tracking_state["tracks"][index]
-            for index in tentative_track_indices
-        ]
-        remaining_indices = sorted(remaining_observation_indices)
-        remaining_observations = _observations_at_indices(
-            ordered_observations,
-            remaining_indices,
-        )
-        (
-            tentative_matches,
-            _unmatched_tentative_indices,
-            unmatched_remaining_indices,
-            tentative_forced_rejected_observation_indices,
-        ) = assign_matches(
-            tentative_tracks,
-            remaining_observations,
-            timestamp,
-            config,
-        )
-        state_matches.extend(
-            _map_matches(
-                tentative_matches,
-                tentative_track_indices,
-                remaining_indices,
-            )
-        )
-        remaining_observation_indices = {
-            remaining_indices[index]
-            for index in unmatched_remaining_indices
-        }
-        forced_rejected_observation_indices.update(
-            remaining_indices[index]
-            for index in tentative_forced_rejected_observation_indices
-        )
 
     for state_track_index, observation_index in sorted(state_matches):
         append_observation(
@@ -254,21 +287,16 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
             timestamp,
         )
 
-    forced_birth_observation_indices = (
-        forced_rejected_observation_indices & remaining_observation_indices
-    )
-    base_allowed_new_tracks = max(0, len(ordered_observations) - len(active_tracks))
-    birth_observation_indices = sorted(forced_birth_observation_indices)
-    remaining_birth_candidates = sorted(
-        remaining_observation_indices - forced_birth_observation_indices
-    )
-    birth_observation_indices.extend(
-        remaining_birth_candidates[:base_allowed_new_tracks]
-    )
+    birth_observation_indices = sorted(remaining_observation_indices)
     for observation_index in birth_observation_indices:
         observation = ordered_observations[observation_index]
         tracking_state["tracks"].append(create_track(observation, frame_id, timestamp, str(next_id)))
         next_id += 1
+
+    if config.debug_diagnostics is not None:
+        config.debug_diagnostics.extend(diagnostics or [])
+    if config.debug_callback is not None:
+        config.debug_callback(diagnostics or [])
 
     _reorder_state_tracks(tracking_state)
     return tracking_state
