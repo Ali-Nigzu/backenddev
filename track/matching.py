@@ -130,8 +130,6 @@ def _classify_motion(score: float, confirmed: bool, config: TrackV2Config) -> st
     if score <= float(config.weak_motion_threshold):
         if confirmed and config.allow_weak_confirmed_matching:
             return WEAK
-        if not confirmed and config.allow_weak_tentative_matching:
-            return WEAK
     return IMPOSSIBLE
 
 
@@ -165,14 +163,6 @@ def evaluate_track_observation(
             "metrics": base_metrics,
         }
 
-    if not confirmed and not config.allow_tentative_matching:
-        return {
-            "eligible": False,
-            "classification": IMPOSSIBLE,
-            "reason": "tentative_matching_disabled",
-            "metrics": base_metrics,
-        }
-
     allowed_window = _track_window(track, config)
     if gap > allowed_window:
         return {
@@ -188,7 +178,14 @@ def evaluate_track_observation(
     safe_gap = max(gap, config.epsilon)
     required_speed = latest_distance / safe_gap
 
-    hard_speed_limit = float(_config_value(config, "hard_speed_limit_px_per_sec", "max_speed_px_per_sec"))
+    state_speed_limit = (
+        float(config.confirmed_max_speed_px_per_sec)
+        if confirmed
+        else float(config.tentative_max_speed_px_per_sec)
+    )
+    hard_speed_limit = state_speed_limit
+    if config.hard_speed_limit_px_per_sec is not None:
+        hard_speed_limit = min(hard_speed_limit, float(config.hard_speed_limit_px_per_sec))
     if required_speed > hard_speed_limit:
         return {
             "eligible": False,
@@ -203,14 +200,26 @@ def evaluate_track_observation(
             },
         }
 
-    max_believable_speed = float(
-        _config_value(config, "max_believable_speed_px_per_sec", "max_speed_px_per_sec")
+    max_believable_speed = state_speed_limit
+    if config.max_believable_speed_px_per_sec is not None:
+        max_believable_speed = min(max_believable_speed, float(config.max_believable_speed_px_per_sec))
+    prediction_gate_px = (
+        float(config.confirmed_prediction_gate_px)
+        if confirmed
+        else float(config.tentative_prediction_gate_px)
     )
-    prediction_gate_px = float(_config_value(config, "prediction_gate_px", "base_motion_gate_px"))
+    if config.prediction_gate_px is not None:
+        prediction_gate_px = min(prediction_gate_px, float(config.prediction_gate_px))
     prediction_growth = float(
         _config_value(config, "prediction_gate_growth_px_per_sec", "max_speed_px_per_sec")
     )
-    latest_gate_px = float(_config_value(config, "latest_position_gate_px", "base_motion_gate_px"))
+    latest_gate_px = (
+        float(config.confirmed_latest_position_gate_px)
+        if confirmed
+        else float(config.tentative_latest_position_gate_px)
+    )
+    if config.latest_position_gate_px is not None:
+        latest_gate_px = min(latest_gate_px, float(config.latest_position_gate_px))
     latest_growth = float(
         _config_value(config, "latest_position_gate_growth_px_per_sec", "max_speed_px_per_sec")
     )
@@ -223,7 +232,8 @@ def evaluate_track_observation(
     prediction_ratio = predicted_distance / max(prediction_gate, config.epsilon)
     latest_ratio = latest_distance / max(latest_gate, config.epsilon)
     speed_ratio = required_speed / max(max_believable_speed, config.epsilon)
-    motion_score = min(prediction_ratio, latest_ratio, speed_ratio)
+    spatial_score = min(prediction_ratio, latest_ratio)
+    motion_score = max(spatial_score, speed_ratio)
 
     position_allowed = prediction_ratio <= float(config.weak_motion_threshold) or latest_ratio <= float(
         config.weak_motion_threshold
@@ -257,6 +267,7 @@ def evaluate_track_observation(
             "prediction_ratio": prediction_ratio,
             "latest_ratio": latest_ratio,
             "speed_ratio": speed_ratio,
+            "spatial_score": spatial_score,
         },
     }
 

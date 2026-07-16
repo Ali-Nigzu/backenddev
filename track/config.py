@@ -15,12 +15,20 @@ class TrackV2Config:
 
     # Lifecycle / maturity.
     confirmation_min_path_points: int = 2
-    tentative_track_window_sec: float = 3.0
+    tentative_track_window_sec: float = 1.0
     confirmed_track_window_sec: float | None = None
     confirmed_reassociation_window_sec: float = 2.0
-    allow_tentative_matching: bool = True
     allow_weak_confirmed_matching: bool = True
-    allow_weak_tentative_matching: bool = False
+
+    # Lifecycle-specific motion limits. Tentative tracks deliberately use
+    # stricter defaults while still competing observation-by-observation when
+    # they are believable explanations.
+    confirmed_prediction_gate_px: float = 100.0
+    tentative_prediction_gate_px: float = 40.0
+    confirmed_latest_position_gate_px: float = 150.0
+    tentative_latest_position_gate_px: float = 50.0
+    confirmed_max_speed_px_per_sec: float = 500.0
+    tentative_max_speed_px_per_sec: float = 250.0
 
     # Backwards-compatible lifecycle names.
     active_confirmation_min_path_points: int = 2

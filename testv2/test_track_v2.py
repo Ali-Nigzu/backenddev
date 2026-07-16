@@ -588,3 +588,48 @@ def test_deterministic_replay_many_runs_with_eligibility():
         outputs.append(deepcopy(Track(state, deepcopy(batch))))
 
     assert all(output == outputs[0] for output in outputs)
+
+
+def test_partition_track_indices_compatibility_uses_lifecycle_windows():
+    from track.tracker import _partition_track_indices
+
+    config = TrackV2Config(
+        confirmation_min_path_points=3,
+        active_confirmation_min_path_points=3,
+        tentative_confirmation_min_path_points=3,
+        confirmed_reassociation_window_sec=2.0,
+        max_reassociation_gap_sec=2.0,
+        tentative_track_window_sec=0.5,
+    )
+    confirmed = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
+    append_point(confirmed, 0.1, 1.0, 0.0)
+    append_point(confirmed, 0.2, 2.0, 0.0)
+    tentative_recent = existing_track("2", timestamp=0.8, x=10.0, y=0.0)
+    tentative_stale = existing_track("3", timestamp=0.0, x=20.0, y=0.0)
+
+    active_indices, tentative_indices = _partition_track_indices(
+        [confirmed, tentative_recent, tentative_stale], 1.0, config
+    )
+
+    assert active_indices == [0]
+    assert tentative_indices == [1]
+
+
+def test_tentative_tracks_use_stricter_observation_specific_gates():
+    config = TrackV2Config(
+        confirmed_prediction_gate_px=200.0,
+        tentative_prediction_gate_px=20.0,
+        confirmed_latest_position_gate_px=200.0,
+        tentative_latest_position_gate_px=20.0,
+        confirmed_max_speed_px_per_sec=500.0,
+        tentative_max_speed_px_per_sec=25.0,
+    )
+    confirmed = confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)
+    tentative = existing_track("2", timestamp=0.0, x=100.0, y=0.0)
+    state = {"tracks": [confirmed, tentative]}
+
+    Track(state, obs_batch(1.0, [obs("could-fit-confirmed-only", 40.0, 0.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}

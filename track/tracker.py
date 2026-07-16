@@ -114,6 +114,12 @@ def _validate_config(config: TrackV2Config) -> None:
         "confirmation_min_path_points",
         "tentative_track_window_sec",
         "confirmed_reassociation_window_sec",
+        "confirmed_prediction_gate_px",
+        "tentative_prediction_gate_px",
+        "confirmed_latest_position_gate_px",
+        "tentative_latest_position_gate_px",
+        "confirmed_max_speed_px_per_sec",
+        "tentative_max_speed_px_per_sec",
         "tentative_recency_window_frames",
         "max_reassociation_gap_sec",
         "max_speed_px_per_sec",
@@ -174,6 +180,53 @@ def _next_numeric_track_id(tracks) -> int:
 
 def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
+
+
+def _confirmation_min_path_points(config: TrackV2Config) -> int:
+    return max(
+        1,
+        int(config.confirmation_min_path_points),
+        int(config.active_confirmation_min_path_points),
+        int(config.tentative_confirmation_min_path_points),
+    )
+
+
+def _latest_timestamp(track) -> float:
+    return float(track["path"][-1]["timestamp"])
+
+
+def _is_confirmed_track(track, config: TrackV2Config) -> bool:
+    return len(track["path"]) >= _confirmation_min_path_points(config)
+
+
+def _track_window(track, config: TrackV2Config) -> float:
+    if _is_confirmed_track(track, config):
+        compatibility_window = float(config.max_reassociation_gap_sec)
+        if config.confirmed_track_window_sec is not None:
+            return min(float(config.confirmed_track_window_sec), compatibility_window)
+        return min(float(config.confirmed_reassociation_window_sec), compatibility_window)
+    return float(config.tentative_track_window_sec or config.tentative_recency_window_frames)
+
+
+def _is_recent(track, timestamp: float, window: float, config: TrackV2Config) -> bool:
+    age = timestamp - _latest_timestamp(track)
+    return -config.epsilon <= age <= float(window)
+
+
+def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config) -> tuple[list[int], list[int]]:
+    """Compatibility helper returning lifecycle-qualified confirmed and tentative indices."""
+
+    active_indices: list[int] = []
+    tentative_indices: list[int] = []
+    for index, track in enumerate(tracks):
+        window = _track_window(track, config)
+        if not _is_recent(track, timestamp, window, config):
+            continue
+        if _is_confirmed_track(track, config):
+            active_indices.append(index)
+        else:
+            tentative_indices.append(index)
+    return active_indices, tentative_indices
 
 
 def _map_matches(
