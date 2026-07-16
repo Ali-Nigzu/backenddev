@@ -28,4 +28,11 @@ class TrackV2Config:
     motion_weight: float = 0.65
     appearance_weight: float = 0.35
     max_combined_cost: float = 1.25
+    # Escape valve for extreme forced-continuity matches. Candidates must first
+    # fail physical plausibility, then meet/exceed this normalized-motion value
+    # before assignment will reject them. Lower values break more implausible
+    # continuations; higher values are weaker. Useful experimentation range:
+    # 2-4 catches more bad jumps, 6-10 is conservative, 12+ is very weak, and
+    # None disables the valve entirely.
+    forced_continuity_break_normalized_motion: float | None = 8.0
     epsilon: float = 1e-9

@@ -200,21 +200,37 @@ def _maximum_continuity_assignment(candidates: List[CandidateMatch]) -> List[Can
     return best_matches or []
 
 
+def _forced_continuity_rejects(candidate: CandidateMatch, config: TrackV2Config) -> bool:
+    threshold = config.forced_continuity_break_normalized_motion
+    if threshold is None:
+        return False
+    if candidate.physically_plausible:
+        return False
+    return candidate.normalized_motion >= float(threshold)
+
+
 def assign_matches(
     ordered_tracks: Sequence[dict],
     ordered_observations: Sequence[dict],
     timestamp: float,
     config: TrackV2Config,
-) -> Tuple[List[Tuple[int, int]], Set[int], Set[int]]:
+) -> Tuple[List[Tuple[int, int]], Set[int], Set[int], Set[int]]:
     candidates = build_candidates(ordered_tracks, ordered_observations, timestamp, config)
     selected_candidates = _maximum_continuity_assignment(candidates)
-    used_tracks = {candidate.track_index for candidate in selected_candidates}
-    used_observations = {candidate.observation_index for candidate in selected_candidates}
+    accepted_candidates: List[CandidateMatch] = []
+    rejected_observations: Set[int] = set()
+    for candidate in selected_candidates:
+        if _forced_continuity_rejects(candidate, config):
+            rejected_observations.add(candidate.observation_index)
+        else:
+            accepted_candidates.append(candidate)
+    used_tracks = {candidate.track_index for candidate in accepted_candidates}
+    used_observations = {candidate.observation_index for candidate in accepted_candidates}
     matches = [
         (candidate.track_index, candidate.observation_index)
-        for candidate in sorted(selected_candidates, key=candidate_sort_key)
+        for candidate in sorted(accepted_candidates, key=candidate_sort_key)
     ]
 
     unmatched_tracks = set(range(len(ordered_tracks))) - used_tracks
     unmatched_observations = set(range(len(ordered_observations))) - used_observations
-    return matches, unmatched_tracks, unmatched_observations
+    return matches, unmatched_tracks, unmatched_observations, rejected_observations
