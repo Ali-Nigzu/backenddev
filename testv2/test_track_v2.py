@@ -633,3 +633,72 @@ def test_tentative_tracks_use_stricter_observation_specific_gates():
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
     assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}
+
+
+def test_nearby_confirmed_tracks_do_not_steal_clear_owner_observation():
+    state = {
+        "tracks": [
+            confirmed_track("1", timestamp=0.0, x=10.0, y=0.0),
+            confirmed_track("2", timestamp=0.0, x=20.0, y=0.0),
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("near-owner-2", 21.0, 0.0)]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 3]
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 21.0, "y": 0.0}
+
+
+def test_confirmed_ownership_survives_small_localisation_jitter_between_people():
+    state = {
+        "tracks": [
+            confirmed_track("1", timestamp=0.0, x=100.0, y=100.0),
+            confirmed_track("2", timestamp=0.0, x=106.0, y=100.0),
+        ]
+    }
+
+    Track(
+        state,
+        obs_batch(
+            1.0,
+            [
+                obs("right-person", 105.5, 100.0),
+                obs("left-person", 100.5, 100.0),
+            ],
+        ),
+    )
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 100.5, "y": 100.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 105.5, "y": 100.0}
+
+
+def test_short_occlusion_with_nearby_confirmed_tracks_preserves_original_owner():
+    config = TrackV2Config(detector_miss_tolerance_sec=2.0)
+    state = {
+        "tracks": [
+            confirmed_track("1", timestamp=0.0, x=50.0, y=50.0),
+            confirmed_track("2", timestamp=0.0, x=80.0, y=50.0),
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("right-visible", 81.0, 50.0)]), config)
+    Track(state, obs_batch(1.5, [obs("left-return", 51.0, 50.0), obs("right-next", 82.0, 50.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 4]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 51.0, "y": 50.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 82.0, "y": 50.0}
+
+
+def test_far_observation_births_instead_of_forcing_continuity():
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)]}
+    config = TrackV2Config(max_physical_speed_px_per_sec=100.0)
+
+    Track(state, obs_batch(1.0, [obs("too-far", 1000.0, 0.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 1000.0, "y": 0.0}

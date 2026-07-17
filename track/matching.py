@@ -34,6 +34,8 @@ class CandidateMatch:
     required_speed: float = 0.0
     motion_score: float = 0.0
     track_state: str = "confirmed"
+    ownership_role: str = "tentative_continuation"
+    continuity_cost: float = 0.0
 
 
 def numeric_track_id(track_id: str) -> int | None:
@@ -84,6 +86,8 @@ def _config_value(config: TrackV2Config, primary: str, fallback: str):
 
 
 def _confirmation_min_path_points(config: TrackV2Config) -> int:
+    if config.confirmation_hits is not None:
+        return max(1, int(config.confirmation_hits))
     return max(
         1,
         int(config.confirmation_min_path_points),
@@ -98,10 +102,14 @@ def _is_confirmed(track, config: TrackV2Config) -> bool:
 
 def _track_window(track, config: TrackV2Config) -> float:
     if _is_confirmed(track, config):
+        if config.detector_miss_tolerance_sec is not None:
+            return float(config.detector_miss_tolerance_sec)
         compatibility_window = float(config.max_reassociation_gap_sec)
         if config.confirmed_track_window_sec is not None:
             return min(float(config.confirmed_track_window_sec), compatibility_window)
         return min(float(config.confirmed_reassociation_window_sec), compatibility_window)
+    if config.tentative_tolerance_sec is not None:
+        return float(config.tentative_tolerance_sec)
     return float(config.tentative_track_window_sec or config.tentative_recency_window_frames)
 
 
@@ -131,6 +139,24 @@ def _classify_motion(score: float, confirmed: bool, config: TrackV2Config) -> st
         if confirmed and config.allow_weak_confirmed_matching:
             return WEAK
     return IMPOSSIBLE
+
+
+def _ownership_role(confirmed: bool, gap: float, classification: str, config: TrackV2Config) -> str:
+    if not confirmed:
+        return "tentative_continuation"
+    if gap <= config.epsilon:
+        return "protected_continuation"
+    # A confirmed track that has not been observed for a short period is still an
+    # incumbent owner, but is less protected than one updated on the immediately
+    # previous visible opportunity.
+    reassociation_window = (
+        float(config.detector_miss_tolerance_sec)
+        if config.detector_miss_tolerance_sec is not None
+        else float(config.confirmed_reassociation_window_sec)
+    )
+    if gap <= reassociation_window:
+        return "protected_continuation" if classification != WEAK else "reassociation_continuation"
+    return "reassociation_continuation"
 
 
 def evaluate_track_observation(
@@ -183,6 +209,8 @@ def evaluate_track_observation(
         if confirmed
         else float(config.tentative_max_speed_px_per_sec)
     )
+    if config.max_physical_speed_px_per_sec is not None:
+        state_speed_limit = min(state_speed_limit, float(config.max_physical_speed_px_per_sec))
     hard_speed_limit = state_speed_limit
     if config.hard_speed_limit_px_per_sec is not None:
         hard_speed_limit = min(hard_speed_limit, float(config.hard_speed_limit_px_per_sec))
@@ -323,6 +351,13 @@ def build_candidates(
                     required_speed=float(metrics["required_speed"]),
                     motion_score=float(metrics["motion_score"]),
                     track_state=str(metrics["track_state"]),
+                    ownership_role=_ownership_role(
+                        str(metrics["track_state"]) == "confirmed",
+                        float(metrics["timestamp_gap"]),
+                        evaluation["classification"],
+                        config,
+                    ),
+                    continuity_cost=float(metrics["motion_score"]),
                 )
             )
         observation_diagnostics.append(
@@ -356,6 +391,54 @@ def candidate_sort_key(candidate: CandidateMatch) -> tuple:
     )
 
 
+def _role_priority(candidate: CandidateMatch) -> int:
+    if candidate.ownership_role == "protected_continuation":
+        return 0
+    if candidate.ownership_role == "reassociation_continuation":
+        return 1
+    if candidate.ownership_role == "tentative_continuation":
+        return 2
+    return 3
+
+
+def _track_claim_key(candidate: CandidateMatch) -> tuple:
+    """Rank candidates from one track's continuity-preservation perspective."""
+
+    return (
+        _role_priority(candidate),
+        _CLASS_PENALTY.get(candidate.classification, 99),
+        round(candidate.continuity_cost, 12),
+        round(candidate.normalized_motion, 12),
+        round(candidate.predicted_distance, 12),
+        round(candidate.latest_distance, 12),
+        round(candidate.appearance_tiebreak_cost, 12),
+        candidate.detection_id,
+        candidate.observation_index,
+    )
+
+
+def _is_defensible_first_claim(
+    candidate: CandidateMatch,
+    by_observation: dict[int, List[CandidateMatch]],
+    config: TrackV2Config,
+) -> bool:
+    """Return whether a protected owner should claim this observation early.
+
+    A confirmed incumbent should beat small instantaneous improvements, but it
+    should not steal an observation that is plainly explained by another track.
+    The only tunable tolerances are the behavioural continuity controls.
+    """
+
+    peers = by_observation.get(candidate.observation_index, ())
+    if not peers:
+        return True
+    best_peer_cost = min(peer.continuity_cost for peer in peers)
+    allowed_cost = best_peer_cost * (1.0 + float(config.takeover_margin)) + float(
+        config.continuity_strength
+    )
+    return candidate.continuity_cost <= allowed_cost
+
+
 def _cached_candidate_sort_key(candidate: CandidateMatch, cache: dict[CandidateMatch, tuple]) -> tuple:
     key = cache.get(candidate)
     if key is None:
@@ -378,6 +461,9 @@ def _better_assignment(
     def score(matches: List[CandidateMatch]) -> tuple:
         ordered = sorted(matches, key=lambda match: _cached_candidate_sort_key(match, sort_key_cache))
         return (
+            sum(1 for match in ordered if match.ownership_role != "protected_continuation"),
+            -sum(1 for match in ordered if match.ownership_role == "protected_continuation"),
+            -sum(1 for match in ordered if match.ownership_role == "reassociation_continuation"),
             -len(ordered),
             sum(_CLASS_PENALTY.get(match.classification, 99) for match in ordered),
             sum(0 if match.track_state == "confirmed" else 1 for match in ordered),
@@ -391,7 +477,52 @@ def _better_assignment(
     return score(candidate_matches) < score(best_matches)
 
 
-def _maximum_continuity_assignment(candidates: List[CandidateMatch]) -> List[CandidateMatch]:
+def _maximum_continuity_assignment(candidates: List[CandidateMatch], config: TrackV2Config) -> List[CandidateMatch]:
+    # Continuity-first stage: confirmed incumbents get deterministic first claim
+    # over their best physically plausible observation. This intentionally avoids
+    # allowing tiny frame-local cost improvements to reshuffle ownership between
+    # nearby confirmed tracks.
+    by_track: dict[int, List[CandidateMatch]] = {}
+    by_observation: dict[int, List[CandidateMatch]] = {}
+    for candidate in candidates:
+        by_track.setdefault(candidate.track_index, []).append(candidate)
+        by_observation.setdefault(candidate.observation_index, []).append(candidate)
+
+    selected: List[CandidateMatch] = []
+    used_tracks: Set[int] = set()
+    used_observations: Set[int] = set()
+
+    def claim_tracks(roles: set[str]) -> None:
+        for track_index in sorted(by_track):
+            if track_index in used_tracks:
+                continue
+            track_candidates = [
+                candidate
+                for candidate in by_track[track_index]
+                if candidate.ownership_role in roles and candidate.observation_index not in used_observations
+                and _is_defensible_first_claim(candidate, by_observation, config)
+            ]
+            if not track_candidates:
+                continue
+            track_candidates.sort(key=_track_claim_key)
+            candidate = track_candidates[0]
+            selected.append(candidate)
+            used_tracks.add(candidate.track_index)
+            used_observations.add(candidate.observation_index)
+
+    claim_tracks({"protected_continuation"})
+    claim_tracks({"reassociation_continuation"})
+
+    remaining_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.track_index not in used_tracks and candidate.observation_index not in used_observations
+    ]
+    selected.extend(_optimal_remaining_assignment(remaining_candidates))
+    return selected
+
+
+def _optimal_remaining_assignment(candidates: List[CandidateMatch]) -> List[CandidateMatch]:
     by_observation: dict[int, List[CandidateMatch]] = {}
     sort_key_cache: dict[CandidateMatch, tuple] = {}
     for candidate in candidates:
@@ -461,7 +592,7 @@ def assign_matches(
     diagnostics: list | None = None,
 ) -> Tuple[List[Tuple[int, int]], Set[int], Set[int], Set[int]]:
     candidates = build_candidates(ordered_tracks, ordered_observations, timestamp, config, diagnostics)
-    selected_candidates = _maximum_continuity_assignment(candidates)
+    selected_candidates = _maximum_continuity_assignment(candidates, config)
     _record_assignments(diagnostics, selected_candidates)
 
     used_tracks = {candidate.track_index for candidate in selected_candidates}

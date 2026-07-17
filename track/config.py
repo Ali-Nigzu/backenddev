@@ -15,7 +15,10 @@ class TrackV2Config:
 
     # Lifecycle / maturity.
     confirmation_min_path_points: int = 2
+    confirmation_hits: int | None = None
+    detector_miss_tolerance_sec: float | None = None
     tentative_track_window_sec: float = 1.0
+    tentative_tolerance_sec: float | None = None
     confirmed_track_window_sec: float | None = None
     confirmed_reassociation_window_sec: float = 2.0
     allow_weak_confirmed_matching: bool = True
@@ -40,6 +43,7 @@ class TrackV2Config:
 
     # Motion / spatial plausibility.
     max_believable_speed_px_per_sec: float | None = None
+    max_physical_speed_px_per_sec: float | None = None
     hard_speed_limit_px_per_sec: float | None = None
     prediction_gate_px: float | None = None
     prediction_gate_growth_px_per_sec: float | None = None
@@ -67,6 +71,13 @@ class TrackV2Config:
     # Deprecated compatibility valve. The eligibility model excludes impossible
     # candidates before assignment, so this should not be needed for normal use.
     forced_continuity_break_normalized_motion: float | None = 8.0
+
+    # Behavioural continuity controls. Continuity strength is a same-scale
+    # additive allowance on normalized motion for incumbent preservation;
+    # takeover_margin is a relative margin challengers must beat before an
+    # incumbent's deterministic first claim is considered clearly worse.
+    continuity_strength: float = 0.005
+    takeover_margin: float = 0.50
 
     # Optional diagnostics. If debug_diagnostics is a list, per-observation
     # diagnostics are appended. If debug_callback is callable, it receives the

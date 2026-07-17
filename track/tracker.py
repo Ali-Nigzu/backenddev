@@ -127,6 +127,8 @@ def _validate_config(config: TrackV2Config) -> None:
         "strong_motion_threshold",
         "normal_motion_threshold",
         "weak_motion_threshold",
+        "continuity_strength",
+        "takeover_margin",
         "epsilon",
     )
     for field in numeric_fields:
@@ -145,8 +147,12 @@ def _validate_config(config: TrackV2Config) -> None:
             raise ValueError(f"TrackV2Config.{field} must be positive")
 
     optional_non_negative_fields = (
+        "confirmation_hits",
+        "detector_miss_tolerance_sec",
+        "tentative_tolerance_sec",
         "confirmed_track_window_sec",
         "max_believable_speed_px_per_sec",
+        "max_physical_speed_px_per_sec",
         "hard_speed_limit_px_per_sec",
         "prediction_gate_px",
         "prediction_gate_growth_px_per_sec",
@@ -183,6 +189,8 @@ def _reorder_state_tracks(state) -> None:
 
 
 def _confirmation_min_path_points(config: TrackV2Config) -> int:
+    if config.confirmation_hits is not None:
+        return max(1, int(config.confirmation_hits))
     return max(
         1,
         int(config.confirmation_min_path_points),
@@ -201,10 +209,14 @@ def _is_confirmed_track(track, config: TrackV2Config) -> bool:
 
 def _track_window(track, config: TrackV2Config) -> float:
     if _is_confirmed_track(track, config):
+        if config.detector_miss_tolerance_sec is not None:
+            return float(config.detector_miss_tolerance_sec)
         compatibility_window = float(config.max_reassociation_gap_sec)
         if config.confirmed_track_window_sec is not None:
             return min(float(config.confirmed_track_window_sec), compatibility_window)
         return min(float(config.confirmed_reassociation_window_sec), compatibility_window)
+    if config.tentative_tolerance_sec is not None:
+        return float(config.tentative_tolerance_sec)
     return float(config.tentative_track_window_sec or config.tentative_recency_window_frames)
 
 
