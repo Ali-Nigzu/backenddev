@@ -170,9 +170,9 @@ def test_one_track_one_observation_prefers_continuity_despite_embedding_disagree
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 14.0, "y": 10.0}
 
 
-def test_appearance_threshold_does_not_fragment_physically_plausible_continuation():
+def test_appearance_tiebreak_does_not_fragment_physically_plausible_continuation():
     state = {"tracks": [existing_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-    config = TrackV2Config(min_appearance_similarity=0.99)
+    config = TrackV2Config(appearance_tiebreak_enabled=True)
 
     Track(state, obs_batch(1.0, [obs("next", 14.0, 10.0, emb=[-1.0, 0.0])]), config)
 
@@ -499,8 +499,6 @@ def test_gap_within_reassociation_gap_keeps_confirmed_identity():
 def test_gap_beyond_reassociation_gap_creates_new_id_for_confirmed_track():
     config = TrackV2Config(
         max_reassociation_gap_sec=0.5,
-        active_recency_window_frames=10,
-        active_track_window_frames=10,
     )
     state = {"tracks": []}
 
@@ -519,8 +517,6 @@ def test_gap_beyond_reassociation_gap_creates_new_id_for_confirmed_track():
 def test_stale_confirmed_track_cannot_suppress_new_birth():
     config = TrackV2Config(
         max_reassociation_gap_sec=0.5,
-        active_recency_window_frames=10,
-        active_track_window_frames=10,
     )
     state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
 
@@ -532,19 +528,15 @@ def test_stale_confirmed_track_cannot_suppress_new_birth():
     assert state["tracks"][1]["path"][-1]["center"] == {"x": 20.0, "y": 20.0}
 
 
-def test_diagnostics_explain_eligible_match_and_birth():
-    diagnostics = []
-    config = TrackV2Config(debug_diagnostics=diagnostics)
+def test_matched_observations_do_not_birth_and_unmatched_observations_do_birth():
     state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
 
-    Track(state, obs_batch(1.0, [obs("near", 12.0, 10.0), obs("teleport", 5000.0, 5000.0)]), config)
+    Track(state, obs_batch(1.0, [obs("near", 12.0, 10.0), obs("teleport", 5000.0, 5000.0)]))
 
-    by_id = {item["observation_id"]: item for item in diagnostics}
-    assert by_id["near"]["final_assignment"]["track_id"] == "1"
-    assert by_id["near"]["candidate_tracks"][0]["eligible"] is True
-    assert by_id["near"]["candidate_tracks"][0]["classification"] in {"strong", "normal", "weak"}
-    assert by_id["teleport"]["final_assignment"] == "birth"
-    assert by_id["teleport"]["candidate_tracks"][0]["eligible"] is False
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 5000.0, "y": 5000.0}
 
 
 def test_observation_specific_eligibility_births_unexplained_new_person_with_active_tracks():
@@ -702,3 +694,53 @@ def test_far_observation_births_instead_of_forcing_continuity():
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
     assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
     assert state["tracks"][1]["path"][-1]["center"] == {"x": 1000.0, "y": 0.0}
+
+
+def test_legacy_config_maps_to_normalized_config_once():
+    from track.normalize import _normalize_config
+
+    config = TrackV2Config(
+        confirmation_min_path_points=3,
+        active_confirmation_min_path_points=4,
+        detector_miss_tolerance_sec=1.25,
+        tentative_tolerance_sec=0.75,
+        prediction_gate_px=30.0,
+        prediction_gate_growth_px_per_sec=80.0,
+        hard_speed_limit_px_per_sec=120.0,
+        jitter_tolerance_px=6.0,
+        continuity_strength=0.2,
+        takeover_margin=0.4,
+    )
+
+    normalized = _normalize_config(config)
+
+    assert normalized.confirmation_hits == 4
+    assert normalized.detector_miss_tolerance_sec == 1.25
+    assert normalized.tentative_tolerance_sec == 0.75
+    assert normalized.motion_tolerance_px == 30.0
+    assert normalized.motion_tolerance_growth_px_per_sec == 80.0
+    assert normalized.max_physical_speed_px_per_sec == 120.0
+    assert normalized.localization_jitter_px == 6.0
+    assert normalized.continuity_strength == 0.2
+    assert normalized.takeover_margin == 0.4
+
+
+def test_normalized_config_is_stable_for_equal_public_config():
+    from track.normalize import _normalize_config
+
+    config = TrackV2Config(detector_miss_tolerance_sec=1.0, motion_tolerance_px=75.0)
+
+    assert _normalize_config(config) == _normalize_config(config)
+
+
+def test_appearance_does_not_rescue_impossible_motion():
+    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)]}
+    state["tracks"][0]["best_crop"]["embedding"] = obs("seed", 0.0, 0.0, emb=[1.0, 0.0])[
+        "embedding"
+    ]
+    config = TrackV2Config(max_physical_speed_px_per_sec=10.0)
+
+    Track(state, obs_batch(1.0, [obs("same-appearance-too-fast", 100.0, 0.0, emb=[1.0, 0.0])]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]

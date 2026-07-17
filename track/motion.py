@@ -1,9 +1,20 @@
-"""Pure motion helpers derived exclusively from Track.path."""
+"""Pure deterministic Track V2 motion maths."""
 
 import math
+from dataclasses import dataclass
 from typing import Tuple
 
-from track.config import TrackV2Config
+from track.normalize import _NormalizedTrackConfig
+
+
+@dataclass(frozen=True)
+class MotionAssessment:
+    eligible: bool
+    motion_score: float
+    distance_prediction: float
+    distance_latest: float
+    speed_required: float
+    rejection_reason: str
 
 
 def _xy(center) -> Tuple[float, float]:
@@ -18,7 +29,7 @@ def distance(a, b) -> float:
     return math.sqrt(dx * dx + dy * dy)
 
 
-def derive_velocity(path, config: TrackV2Config) -> dict:
+def derive_velocity(path, config: _NormalizedTrackConfig) -> dict:
     if len(path) < 2:
         return {"x": 0.0, "y": 0.0}
 
@@ -40,8 +51,8 @@ def derive_velocity(path, config: TrackV2Config) -> dict:
         vx = (latest_x - prev_x) / dt
         vy = (latest_y - prev_y) / dt
         speed = math.sqrt(vx * vx + vy * vy)
-        if speed > config.max_speed_px_per_sec and speed > config.epsilon:
-            scale = config.max_speed_px_per_sec / speed
+        if speed > config.max_physical_speed_px_per_sec and speed > config.epsilon:
+            scale = config.max_physical_speed_px_per_sec / speed
             vx *= scale
             vy *= scale
 
@@ -55,13 +66,10 @@ def derive_velocity(path, config: TrackV2Config) -> dict:
     if segment_count == 0:
         return {"x": 0.0, "y": 0.0}
 
-    return {
-        "x": weighted_x / total_weight,
-        "y": weighted_y / total_weight,
-    }
+    return {"x": weighted_x / total_weight, "y": weighted_y / total_weight}
 
 
-def predict_center(track, timestamp: float, config: TrackV2Config) -> dict:
+def predict_center(track, timestamp: float, config: _NormalizedTrackConfig) -> dict:
     latest = track["path"][-1]
     latest_x, latest_y = _xy(latest["center"])
     dt = float(timestamp) - float(latest["timestamp"])
@@ -75,26 +83,48 @@ def predict_center(track, timestamp: float, config: TrackV2Config) -> dict:
     }
 
 
-def motion_gate(track, observation, timestamp: float, config: TrackV2Config):
-    latest_timestamp = float(track["path"][-1]["timestamp"])
-    dt = float(timestamp) - latest_timestamp
-    if dt < -config.epsilon:
-        return False, float("inf"), float("inf"), float("inf")
-    if dt > config.max_reassociation_gap_sec:
-        return False, float("inf"), float("inf"), dt
+def evaluate_motion(track_facts, observation: dict, config: _NormalizedTrackConfig) -> MotionAssessment:
+    if track_facts.age_seconds < -config.epsilon:
+        return MotionAssessment(False, float("inf"), float("inf"), float("inf"), float("inf"), "negative_time_gap")
+    if not track_facts.eligible:
+        return MotionAssessment(False, float("inf"), float("inf"), float("inf"), float("inf"), "outside_track_window")
 
-    safe_dt = max(dt, 0.0)
-    predicted = predict_center(track, timestamp, config)
-    predicted_distance = distance(predicted, observation["center"])
-    latest_distance = distance(track["path"][-1]["center"], observation["center"])
-    jitter_allowance = config.base_motion_gate_px
-    motion_distance = min(predicted_distance, latest_distance + jitter_allowance)
-    allowed_distance = config.base_motion_gate_px + config.max_speed_px_per_sec * safe_dt
-    if allowed_distance <= config.epsilon:
-        return False, motion_distance, float("inf"), dt
+    distance_prediction = distance(track_facts.predicted_position, observation["center"])
+    distance_latest = distance(track_facts.latest_position, observation["center"])
+    safe_gap = max(track_facts.age_seconds, config.epsilon)
+    speed_required = distance_latest / safe_gap
 
-    normalized_motion = motion_distance / allowed_distance
-    if motion_distance > allowed_distance:
-        return False, motion_distance, normalized_motion, dt
+    if speed_required > config.max_physical_speed_px_per_sec:
+        return MotionAssessment(
+            False,
+            float("inf"),
+            distance_prediction,
+            distance_latest,
+            speed_required,
+            "speed_limit",
+        )
 
-    return True, motion_distance, normalized_motion, dt
+    tolerance = (
+        config.motion_tolerance_px
+        + config.localization_jitter_px
+        + config.motion_tolerance_growth_px_per_sec * track_facts.missing_seconds
+    )
+    normalized_prediction = distance_prediction / max(tolerance, config.epsilon)
+    normalized_latest = distance_latest / max(tolerance, config.epsilon)
+    normalized_speed = speed_required / max(config.max_physical_speed_px_per_sec, config.epsilon)
+    motion_score = max(min(normalized_prediction, normalized_latest), normalized_speed)
+
+    weak_limit = 1.0 + config.takeover_margin
+    if motion_score > 1.0 and not (
+        track_facts.confirmed and config.allow_weak_confirmed_matching and motion_score <= weak_limit
+    ):
+        return MotionAssessment(
+            False,
+            motion_score,
+            distance_prediction,
+            distance_latest,
+            speed_required,
+            "motion_tolerance",
+        )
+
+    return MotionAssessment(True, motion_score, distance_prediction, distance_latest, speed_required, "eligible")
