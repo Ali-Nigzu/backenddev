@@ -1,7 +1,6 @@
 """Deterministic Track V2 matching parameters."""
 
 from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -15,7 +14,10 @@ class TrackV2Config:
 
     # Lifecycle / maturity.
     confirmation_min_path_points: int = 2
+    confirmation_hits: int | None = None
+    detector_miss_tolerance_sec: float | None = None
     tentative_track_window_sec: float = 1.0
+    tentative_tolerance_sec: float | None = None
     confirmed_track_window_sec: float | None = None
     confirmed_reassociation_window_sec: float = 2.0
     allow_weak_confirmed_matching: bool = True
@@ -33,18 +35,20 @@ class TrackV2Config:
     # Backwards-compatible lifecycle names.
     active_confirmation_min_path_points: int = 2
     tentative_confirmation_min_path_points: int = 2
-    active_recency_window_frames: float | None = None
     tentative_recency_window_frames: float = 3.0
-    active_track_window_frames: int = 3
     max_reassociation_gap_sec: float = 2.0
 
     # Motion / spatial plausibility.
+    motion_tolerance_px: float | None = None
+    motion_tolerance_growth_px_per_sec: float | None = None
     max_believable_speed_px_per_sec: float | None = None
+    max_physical_speed_px_per_sec: float | None = None
     hard_speed_limit_px_per_sec: float | None = None
     prediction_gate_px: float | None = None
     prediction_gate_growth_px_per_sec: float | None = None
     latest_position_gate_px: float | None = None
     latest_position_gate_growth_px_per_sec: float | None = None
+    localization_jitter_px: float | None = None
     jitter_tolerance_px: float | None = None
 
     # Backwards-compatible motion names.
@@ -57,21 +61,18 @@ class TrackV2Config:
     normal_motion_threshold: float = 1.0
     weak_motion_threshold: float = 1.75
 
-    # Appearance remains secondary. Older combined-cost fields are retained for
-    # compatibility but assignment remains lexicographic and motion-first.
-    min_appearance_similarity: float = -1.0
-    motion_weight: float = 0.65
-    appearance_weight: float = 0.35
-    max_combined_cost: float = 1.25
+    # Appearance remains secondary and never controls eligibility.
+    appearance_tiebreak_enabled: bool = True
 
     # Deprecated compatibility valve. The eligibility model excludes impossible
     # candidates before assignment, so this should not be needed for normal use.
     forced_continuity_break_normalized_motion: float | None = 8.0
 
-    # Optional diagnostics. If debug_diagnostics is a list, per-observation
-    # diagnostics are appended. If debug_callback is callable, it receives the
-    # full diagnostics list after assignment.
-    debug_diagnostics: Any = None
-    debug_callback: Any = None
+    # Behavioural continuity controls. Continuity strength is a same-scale
+    # additive allowance on normalized motion for incumbent preservation;
+    # takeover_margin is a relative margin challengers must beat before an
+    # incumbent's deterministic first claim is considered clearly worse.
+    continuity_strength: float = 0.005
+    takeover_margin: float = 0.50
 
     epsilon: float = 1e-9
