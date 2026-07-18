@@ -5,7 +5,7 @@ from math import isfinite
 from track.assignment import assign_candidates
 from track.candidate_builder import build_candidates, observation_sort_key, track_sort_key
 from track.config import TrackV2Config
-from track.facts import TENTATIVE, derive_track_facts
+from track.lifecycle import TENTATIVE, classify_track
 from track.lifecycle import append_observation, create_track
 from track.models import (
     REQUIRED_BBOX_FIELDS,
@@ -17,7 +17,7 @@ from track.models import (
     REQUIRED_TRACK_FIELDS,
     REQUIRED_TRACKING_STATE_FIELDS,
 )
-from track.normalize import _normalize_config
+from track.policy import build_policy
 
 
 def _require_mapping(value, name: str) -> None:
@@ -112,75 +112,6 @@ def _validate_observation_batch(batch) -> None:
         _require_finite_number(observation["confidence"], f"{name}.confidence")
 
 
-def _validate_config(config: TrackV2Config) -> None:
-    numeric_fields = (
-        "confirmation_min_path_points",
-        "tentative_track_window_sec",
-        "confirmed_reassociation_window_sec",
-        "confirmed_prediction_gate_px",
-        "tentative_prediction_gate_px",
-        "confirmed_latest_position_gate_px",
-        "tentative_latest_position_gate_px",
-        "confirmed_max_speed_px_per_sec",
-        "tentative_max_speed_px_per_sec",
-        "tentative_recency_window_frames",
-        "max_reassociation_gap_sec",
-        "max_speed_px_per_sec",
-        "base_motion_gate_px",
-        "strong_motion_threshold",
-        "normal_motion_threshold",
-        "weak_motion_threshold",
-        "continuity_strength",
-        "takeover_margin",
-        "epsilon",
-    )
-    for field in numeric_fields:
-        value = _require_finite_number(getattr(config, field), f"TrackV2Config.{field}")
-        if value < 0:
-            raise ValueError(f"TrackV2Config.{field} must be non-negative")
-
-    positive_fields = (
-        "confirmation_min_path_points",
-        "max_speed_px_per_sec",
-        "base_motion_gate_px",
-        "epsilon",
-    )
-    for field in positive_fields:
-        if float(getattr(config, field)) <= 0:
-            raise ValueError(f"TrackV2Config.{field} must be positive")
-
-    optional_non_negative_fields = (
-        "confirmation_hits",
-        "detector_miss_tolerance_sec",
-        "tentative_tolerance_sec",
-        "motion_tolerance_px",
-        "motion_tolerance_growth_px_per_sec",
-        "confirmed_track_window_sec",
-        "max_believable_speed_px_per_sec",
-        "max_physical_speed_px_per_sec",
-        "hard_speed_limit_px_per_sec",
-        "prediction_gate_px",
-        "prediction_gate_growth_px_per_sec",
-        "latest_position_gate_px",
-        "latest_position_gate_growth_px_per_sec",
-        "localization_jitter_px",
-        "jitter_tolerance_px",
-        "forced_continuity_break_normalized_motion",
-    )
-    for field in optional_non_negative_fields:
-        value = getattr(config, field)
-        if value is None:
-            continue
-        number = _require_finite_number(value, f"TrackV2Config.{field}")
-        if number < 0:
-            raise ValueError(f"TrackV2Config.{field} must be non-negative")
-
-    if float(config.strong_motion_threshold) > float(config.normal_motion_threshold):
-        raise ValueError("TrackV2Config.strong_motion_threshold must be <= normal_motion_threshold")
-    if float(config.normal_motion_threshold) > float(config.weak_motion_threshold):
-        raise ValueError("TrackV2Config.normal_motion_threshold must be <= weak_motion_threshold")
-
-
 def _next_numeric_track_id(tracks) -> int:
     max_numeric_id = 0
     for track in tracks:
@@ -197,16 +128,16 @@ def _reorder_state_tracks(state) -> None:
 def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config) -> tuple[list[int], list[int]]:
     """Compatibility helper returning lifecycle-qualified confirmed and tentative indices."""
 
-    normalized_config = _normalize_config(config)
+    normalized_config = build_policy(config)
     active_indices: list[int] = []
     tentative_indices: list[int] = []
     for index, track in enumerate(tracks):
-        facts = derive_track_facts(track, timestamp, normalized_config)
+        facts = classify_track(track, timestamp, normalized_config)
         if not facts.eligible:
             continue
         if facts.confirmed:
             active_indices.append(index)
-        elif facts.ownership_class == TENTATIVE:
+        elif facts.state == TENTATIVE:
             tentative_indices.append(index)
     return active_indices, tentative_indices
 
@@ -226,8 +157,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 
     config = config or TrackV2Config()
-    _validate_config(config)
-    normalized_config = _normalize_config(config)
+    normalized_config = build_policy(config)
     _validate_tracking_state(tracking_state)
     _validate_observation_batch(observation_batch)
 
@@ -245,14 +175,21 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     next_id = _next_numeric_track_id(tracking_state["tracks"])
     track_indices = list(range(len(tracking_state["tracks"])))
 
+    track_statuses = [
+        classify_track(track, timestamp, normalized_config)
+        for track in tracking_state["tracks"]
+    ]
     candidates = build_candidates(
-        tracking_state["tracks"], ordered_observations, timestamp, normalized_config
+        tracking_state["tracks"],
+        ordered_observations,
+        timestamp,
+        normalized_config,
+        track_statuses,
     )
     (
         matches,
         _unmatched_track_indices,
         unmatched_observation_indices,
-        _rejected_observation_indices,
     ) = assign_candidates(
         candidates,
         len(tracking_state["tracks"]),
@@ -282,6 +219,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         next_id += 1
 
     _reorder_state_tracks(tracking_state)
+    _validate_tracking_state(tracking_state)
     return tracking_state
 
 
