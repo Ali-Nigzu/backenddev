@@ -1,13 +1,13 @@
-"""Observation-specific Track V2 candidate generation."""
+"""Observation-specific Track V2 candidate packaging."""
 
 import math
 from dataclasses import dataclass
 from typing import Sequence
 
-from track.facts import PROTECTED, REASSOCIATION, TENTATIVE, derive_track_facts
+from track.lifecycle import CONFIRMED_LIVE, CONFIRMED_MISSING, TENTATIVE, TrackStatus
 from track.models import vector_values
-from track.motion import MotionAssessment, evaluate_motion
-from track.normalize import _NormalizedTrackConfig
+from track.motion import MotionAssessment, assess_motion
+from track.policy import TrackerPolicy
 
 STRONG = "strong"
 NORMAL = "normal"
@@ -70,63 +70,85 @@ def appearance_evidence(a, b) -> float | None:
     return _embedding_similarity_values(av, bv)
 
 
-def _classify_motion(motion: MotionAssessment, facts, config: _NormalizedTrackConfig) -> str:
+def _classify_motion(motion: MotionAssessment, status: TrackStatus, policy: TrackerPolicy) -> str:
     if not motion.eligible:
         return IMPOSSIBLE
     if motion.motion_score <= 1.0:
         return NORMAL
-    if facts.confirmed and config.allow_weak_confirmed_matching:
+    if status.confirmed and policy.allow_weak_confirmed_matching:
         return WEAK
     return IMPOSSIBLE
 
 
-def _ownership_role(facts, classification: str) -> str:
-    if facts.ownership_class == PROTECTED:
+def _ownership_role(status: TrackStatus) -> str:
+    if status.state == CONFIRMED_LIVE:
         return "protected_continuation"
-    if facts.ownership_class == REASSOCIATION:
+    if status.state == CONFIRMED_MISSING:
         return "reassociation_continuation"
-    if facts.ownership_class == TENTATIVE:
+    if status.state == TENTATIVE:
         return "tentative_continuation"
     return "stale"
+
+
+def build_candidate(
+    track_index: int,
+    observation_index: int,
+    track: dict,
+    observation: dict,
+    status: TrackStatus,
+    motion: MotionAssessment,
+    policy: TrackerPolicy,
+) -> CandidateMatch | None:
+    classification = _classify_motion(motion, status, policy)
+    if classification == IMPOSSIBLE:
+        return None
+
+    similarity = None
+    if policy.appearance_tiebreak_enabled:
+        similarity = appearance_evidence(track["best_crop"].get("embedding"), observation.get("embedding"))
+
+    return CandidateMatch(
+        track_index=track_index,
+        observation_index=observation_index,
+        track_id=str(track["track_id"]),
+        detection_id=str(observation["detection_id"]),
+        motion_score=float(motion.motion_score),
+        appearance_score=similarity,
+        ownership_role=_ownership_role(status),
+        classification=classification,
+        distance_prediction=float(motion.distance_prediction),
+        distance_latest=float(motion.distance_latest),
+        speed_required=float(motion.speed_required),
+    )
 
 
 def build_candidates(
     ordered_tracks: Sequence[dict],
     ordered_observations: Sequence[dict],
     timestamp: float,
-    config: _NormalizedTrackConfig,
+    policy: TrackerPolicy,
+    track_statuses: Sequence[TrackStatus],
 ) -> list[CandidateMatch]:
     """Build realistic track explanations independently for each observation."""
 
-    track_facts = [derive_track_facts(track, timestamp, config) for track in ordered_tracks]
-    candidates: list[CandidateMatch] = []
+    if len(track_statuses) != len(ordered_tracks):
+        raise ValueError("track_statuses length must match ordered_tracks length")
 
+    candidates: list[CandidateMatch] = []
     for observation_index, observation in enumerate(ordered_observations):
         for track_index, track in enumerate(ordered_tracks):
-            facts = track_facts[track_index]
-            motion = evaluate_motion(facts, observation, config)
-            classification = _classify_motion(motion, facts, config)
-            if classification == IMPOSSIBLE:
-                continue
-
-            similarity = None
-            if config.appearance_tiebreak_enabled:
-                similarity = appearance_evidence(track["best_crop"].get("embedding"), observation.get("embedding"))
-
-            candidates.append(
-                CandidateMatch(
-                    track_index=track_index,
-                    observation_index=observation_index,
-                    track_id=str(track["track_id"]),
-                    detection_id=str(observation["detection_id"]),
-                    motion_score=float(motion.motion_score),
-                    appearance_score=similarity,
-                    ownership_role=_ownership_role(facts, classification),
-                    classification=classification,
-                    distance_prediction=float(motion.distance_prediction),
-                    distance_latest=float(motion.distance_latest),
-                    speed_required=float(motion.speed_required),
-                )
+            status = track_statuses[track_index]
+            motion = assess_motion(track, status, observation, timestamp, policy)
+            candidate = build_candidate(
+                track_index,
+                observation_index,
+                track,
+                observation,
+                status,
+                motion,
+                policy,
             )
+            if candidate is not None:
+                candidates.append(candidate)
 
     return candidates

@@ -252,3 +252,93 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def _test_observation(detection_id, timestamp, x, y, confidence=0.9, embedding=None):
+    embedding = embedding if embedding is not None else {"values": [1.0, 0.0]}
+    return {
+        "detection_id": str(detection_id),
+        "bbox": {"x1": x - 1.0, "y1": y - 1.0, "x2": x + 1.0, "y2": y + 1.0},
+        "center": {"x": float(x), "y": float(y)},
+        "embedding": embedding,
+        "confidence": float(confidence),
+    }
+
+
+def _test_batch(frame_id, timestamp, observations):
+    return {
+        "frame_id": str(frame_id),
+        "timestamp": float(timestamp),
+        "observations": observations,
+    }
+
+
+def test_track_v2_deterministic_birth_and_continuation():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config()
+    first = _test_batch("f1", 0.0, [_test_observation("b", 0.0, 10.0, 10.0)])
+    second = _test_batch("f2", 1.0, [_test_observation("a", 1.0, 12.0, 10.0)])
+
+    state_a = {"tracks": []}
+    state_b = {"tracks": []}
+    Track(state_a, first, config)
+    Track(state_a, second, config)
+    Track(state_b, first, config)
+    Track(state_b, second, config)
+
+    assert state_a == state_b
+    assert len(state_a["tracks"]) == 1
+    assert state_a["tracks"][0]["track_id"] == "1"
+    assert len(state_a["tracks"][0]["path"]) == 2
+
+
+def test_track_v2_impossible_motion_creates_new_track():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        motion_tolerance_px=5.0,
+        localization_jitter_px=0.0,
+        motion_tolerance_growth_px_per_sec=0.0,
+        max_physical_speed_px_per_sec=50.0,
+    )
+    state = {"tracks": []}
+
+    Track(state, _test_batch("f1", 0.0, [_test_observation("a", 0.0, 0.0, 0.0)]), config)
+    Track(state, _test_batch("f2", 1.0, [_test_observation("b", 1.0, 100.0, 0.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [1, 1]
+
+
+def test_track_v2_appearance_does_not_rescue_impossible_motion():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        motion_tolerance_px=5.0,
+        localization_jitter_px=0.0,
+        motion_tolerance_growth_px_per_sec=0.0,
+        max_physical_speed_px_per_sec=50.0,
+        appearance_tiebreak_enabled=True,
+    )
+    state = {"tracks": []}
+    embedding = {"values": [0.1, 0.9]}
+
+    Track(state, _test_batch("f1", 0.0, [_test_observation("a", 0.0, 0.0, 0.0, embedding=embedding)]), config)
+    Track(state, _test_batch("f2", 1.0, [_test_observation("b", 1.0, 100.0, 0.0, embedding=embedding)]), config)
+
+    assert len(state["tracks"]) == 2
+
+
+def test_track_v2_rejects_future_track_state_loudly():
+    from track import Track, TrackV2Config
+
+    state = {"tracks": []}
+    Track(state, _test_batch("f1", 10.0, [_test_observation("a", 10.0, 0.0, 0.0)]), TrackV2Config())
+
+    try:
+        Track(state, _test_batch("f0", 9.0, [_test_observation("b", 9.0, 0.0, 0.0)]), TrackV2Config())
+    except ValueError as exc:
+        assert "newer than the observation batch" in str(exc)
+    else:
+        raise AssertionError("future track state should fail loudly")

@@ -3,7 +3,7 @@
 from typing import Sequence, Set, Tuple
 
 from track.candidate_builder import CandidateMatch, _CLASS_PENALTY, numeric_track_id
-from track.normalize import _NormalizedTrackConfig
+from track.policy import TrackerPolicy
 
 
 def _role_priority(candidate: CandidateMatch) -> int:
@@ -55,7 +55,7 @@ def _track_claim_key(candidate: CandidateMatch) -> tuple:
 def _is_defensible_first_claim(
     candidate: CandidateMatch,
     by_observation: dict[int, list[CandidateMatch]],
-    config: _NormalizedTrackConfig,
+    config: TrackerPolicy,
 ) -> bool:
     peers = by_observation.get(candidate.observation_index, ())
     if not peers:
@@ -72,7 +72,7 @@ def _claim_role(
     selected: list[CandidateMatch],
     used_tracks: Set[int],
     used_observations: Set[int],
-    config: _NormalizedTrackConfig,
+    config: TrackerPolicy,
 ) -> None:
     for track_index in sorted(by_track):
         if track_index in used_tracks:
@@ -147,12 +147,36 @@ def _optimal_remaining_assignment(candidates: list[CandidateMatch]) -> list[Cand
     return best_matches or []
 
 
+
+def _validate_assignment(
+    matches: list[tuple[int, int]],
+    candidates: Sequence[CandidateMatch],
+    track_count: int,
+    observation_count: int,
+) -> None:
+    candidate_pairs = {(candidate.track_index, candidate.observation_index) for candidate in candidates}
+    seen_tracks: set[int] = set()
+    seen_observations: set[int] = set()
+    for track_index, observation_index in matches:
+        if track_index < 0 or track_index >= track_count:
+            raise ValueError("assignment references nonexistent track")
+        if observation_index < 0 or observation_index >= observation_count:
+            raise ValueError("assignment references nonexistent observation")
+        if (track_index, observation_index) not in candidate_pairs:
+            raise ValueError("assignment references a pair that was not an eligible candidate")
+        if track_index in seen_tracks:
+            raise ValueError("multiple assignments for one track")
+        if observation_index in seen_observations:
+            raise ValueError("multiple assignments for one observation")
+        seen_tracks.add(track_index)
+        seen_observations.add(observation_index)
+
 def assign_candidates(
     candidates: Sequence[CandidateMatch],
     track_count: int,
     observation_count: int,
-    config: _NormalizedTrackConfig,
-) -> Tuple[list[tuple[int, int]], Set[int], Set[int], Set[int]]:
+    config: TrackerPolicy,
+) -> Tuple[list[tuple[int, int]], Set[int], Set[int]]:
     by_track: dict[int, list[CandidateMatch]] = {}
     by_observation: dict[int, list[CandidateMatch]] = {}
     for candidate in candidates:
@@ -182,4 +206,5 @@ def assign_candidates(
 
     unmatched_tracks = set(range(track_count)) - used_tracks
     unmatched_observations = set(range(observation_count)) - used_observations
-    return matches, unmatched_tracks, unmatched_observations, set()
+    _validate_assignment(matches, candidates, track_count, observation_count)
+    return matches, unmatched_tracks, unmatched_observations
