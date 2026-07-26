@@ -7,9 +7,13 @@ from dataclasses import dataclass
 class TrackV2Config:
     """Centralized constants that affect Track V2 eligibility and assignment.
 
-    The public reducer contract is intentionally unchanged. These fields tune the
-    internal observation-specific eligibility model while preserving older field
-    names as compatibility aliases where possible.
+    The public reducer contract is intentionally unchanged. Internally these
+    fields are collapsed by ``track.policy.build_policy`` into one small behaviour
+    policy. The authoritative tuning concepts are: confirmation hits, tentative
+    age, confirmed miss tolerance, position uncertainty, miss uncertainty growth,
+    localization jitter, max speed, weak confirmed motion score, continuity bias,
+    takeover margin, appearance tie-breaking, and birth suppression strength.
+    Remaining historical names are accepted only as compatibility aliases.
     """
 
     # Lifecycle / maturity.

@@ -16,10 +16,10 @@ from track.policy import TrackerPolicy
 
 NORMAL = "normal"
 WEAK = "weak"
-CONTINUITY_FALLBACK = "continuity_fallback"
+SUPPRESSION_COVERAGE = "suppression_coverage"
 IMPOSSIBLE = "impossible"
 
-_CLASS_PENALTY = {NORMAL: 0, WEAK: 1, CONTINUITY_FALLBACK: 2}
+_CLASS_PENALTY = {NORMAL: 0, WEAK: 1, SUPPRESSION_COVERAGE: 2}
 
 PROTECTED_CONTINUATION = "protected_continuation"
 REASSOCIATION_CONTINUATION = "reassociation_continuation"
@@ -117,7 +117,7 @@ def _validate_candidate(candidate: CandidateMatch, track_count: int, observation
         raise ValueError("candidate appearance score must be finite")
     if candidate.classification not in _CLASS_PENALTY:
         raise ValueError("candidate classification must be eligible")
-    if candidate.fallback and candidate.classification != CONTINUITY_FALLBACK:
+    if candidate.fallback and candidate.classification != SUPPRESSION_COVERAGE:
         raise ValueError("fallback candidates must use fallback classification")
     if candidate.ownership_role == STALE_CONTINUATION:
         raise ValueError("stale tracks must not produce candidates")
@@ -166,7 +166,7 @@ def _fallback_motion_score(motion: MotionAssessment, policy: TrackerPolicy) -> f
     return policy.weak_confirmed_max_motion_score + 1_000_000.0
 
 
-def build_continuity_fallback_candidate(
+def build_suppression_coverage_candidate(
     track_index: int,
     observation_index: int,
     track: dict,
@@ -190,7 +190,7 @@ def build_continuity_fallback_candidate(
         motion_score=float(score),
         appearance_score=None,
         ownership_role=_ownership_role(status),
-        classification=CONTINUITY_FALLBACK,
+        classification=SUPPRESSION_COVERAGE,
         distance_prediction=float(distance_prediction),
         distance_latest=float(distance_latest),
         speed_required=float(speed_required),
@@ -237,7 +237,7 @@ def build_candidates(
     return candidates
 
 
-def add_continuity_fallback_candidates(
+def add_suppression_coverage_candidates(
     candidates: list[CandidateMatch],
     ordered_tracks: Sequence[dict],
     ordered_observations: Sequence[dict],
@@ -246,7 +246,12 @@ def add_continuity_fallback_candidates(
     track_statuses: Sequence[TrackStatus],
     active_track_indices: Sequence[int],
 ) -> list[CandidateMatch]:
-    """Add deterministic active-track fallback candidates for hard birth suppression."""
+    """Add deterministic active-track coverage candidates for birth suppression.
+
+    These candidates are deliberately distinct from normal motion candidates. They
+    exist only so assignment can satisfy the configured observation-coverage
+    requirement before births are considered.
+    """
 
     if len(track_statuses) != len(ordered_tracks):
         raise ValueError("track_statuses length must match ordered_tracks length")
@@ -259,7 +264,7 @@ def add_continuity_fallback_candidates(
                 continue
             status = track_statuses[track_index]
             motion = assess_motion(ordered_tracks[track_index], status, observation, timestamp, policy)
-            candidate = build_continuity_fallback_candidate(
+            candidate = build_suppression_coverage_candidate(
                 track_index,
                 observation_index,
                 ordered_tracks[track_index],
@@ -274,3 +279,4 @@ def add_continuity_fallback_candidates(
             _validate_candidate(candidate, len(ordered_tracks), len(ordered_observations))
             augmented.append(candidate)
     return augmented
+

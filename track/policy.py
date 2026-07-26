@@ -31,48 +31,9 @@ class TrackerPolicy:
     appearance_tiebreak_enabled: bool
     alpha_beta_position_gain: float
     alpha_beta_velocity_gain: float
+    velocity_damping: float
     max_history_points: int
     epsilon: float
-
-    @property
-    def detector_miss_tolerance_sec(self) -> float:
-        """Compatibility name for older private callers."""
-        return self.confirmed_max_missed_sec
-
-    @property
-    def tentative_tolerance_sec(self) -> float:
-        """Compatibility name for older private callers."""
-        return self.tentative_max_age_sec
-
-    @property
-    def motion_tolerance_px(self) -> float:
-        """Compatibility name for the base position uncertainty."""
-        return self.base_position_uncertainty_px
-
-    @property
-    def motion_tolerance_growth_px_per_sec(self) -> float:
-        """Compatibility name for miss uncertainty growth."""
-        return self.miss_uncertainty_growth_px_per_sec
-
-    @property
-    def max_physical_speed_px_per_sec(self) -> float:
-        """Compatibility name for hard physical speed."""
-        return self.max_speed_px_per_sec
-
-    @property
-    def weak_match_max_motion_score(self) -> float:
-        """Compatibility name for confirmed weak matching."""
-        return self.weak_confirmed_max_motion_score
-
-    @property
-    def continuity_strength(self) -> float:
-        """Compatibility name for assignment continuity bias."""
-        return self.continuity_bias
-
-    @property
-    def allow_weak_confirmed_matching(self) -> bool:
-        """Compatibility name retained for internal shims."""
-        return self.weak_confirmed_max_motion_score > 1.0
 
 
 def _first_configured(*values: Any) -> Any:
@@ -266,7 +227,8 @@ def build_policy(config: TrackV2Config) -> TrackerPolicy:
         birth_suppression_strength=float(config.birth_suppression_strength),
         appearance_tiebreak_enabled=bool(config.appearance_tiebreak_enabled),
         alpha_beta_position_gain=0.65,
-        alpha_beta_velocity_gain=0.18,
+        alpha_beta_velocity_gain=0.12,
+        velocity_damping=0.70,
         max_history_points=12,
         epsilon=float(config.epsilon),
     )
@@ -310,3 +272,5 @@ def validate_policy(policy: TrackerPolicy) -> None:
         raise ValueError("TrackerPolicy.alpha_beta_position_gain must be in (0, 1]")
     if not 0.0 < policy.alpha_beta_velocity_gain <= 1.0:
         raise ValueError("TrackerPolicy.alpha_beta_velocity_gain must be in (0, 1]")
+    if not 0.0 <= policy.velocity_damping <= 1.0:
+        raise ValueError("TrackerPolicy.velocity_damping must be in [0, 1]")

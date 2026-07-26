@@ -33,7 +33,7 @@ def classify_track(track: dict, timestamp: float, policy: TrackerPolicy) -> Trac
     missing_seconds = max(0.0, age_seconds)
 
     if confirmed:
-        eligible = missing_seconds <= float(policy.detector_miss_tolerance_sec)
+        eligible = missing_seconds <= float(policy.confirmed_max_missed_sec)
         if not eligible:
             state = STALE
         elif missing_seconds <= policy.epsilon:
@@ -41,7 +41,7 @@ def classify_track(track: dict, timestamp: float, policy: TrackerPolicy) -> Trac
         else:
             state = CONFIRMED_MISSING
     else:
-        eligible = missing_seconds <= float(policy.tentative_tolerance_sec)
+        eligible = missing_seconds <= float(policy.tentative_max_age_sec)
         state = TENTATIVE if eligible else STALE
 
     return TrackStatus(

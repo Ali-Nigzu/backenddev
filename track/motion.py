@@ -88,21 +88,23 @@ def estimate_motion(path, policy: TrackerPolicy) -> MotionEstimate:
         predicted_y = y + vy * dt
         residual_x = observed_x - predicted_x
         residual_y = observed_y - predicted_y
+        residual_distance = math.sqrt(residual_x * residual_x + residual_y * residual_y)
 
         x = predicted_x + policy.alpha_beta_position_gain * residual_x
         y = predicted_y + policy.alpha_beta_position_gain * residual_y
-        vx += policy.alpha_beta_velocity_gain * residual_x / dt
-        vy += policy.alpha_beta_velocity_gain * residual_y / dt
+        if residual_distance <= policy.localization_jitter_px:
+            # Fixed CCTV detections often wobble around a standing person. Treat
+            # jitter-sized residuals as measurement noise instead of acceleration.
+            vx *= policy.velocity_damping
+            vy *= policy.velocity_damping
+        else:
+            excess_scale = (residual_distance - policy.localization_jitter_px) / residual_distance
+            vx += policy.alpha_beta_velocity_gain * residual_x * excess_scale / dt
+            vy += policy.alpha_beta_velocity_gain * residual_y * excess_scale / dt
         vx, vy = _clamp_velocity(vx, vy, policy)
         previous_timestamp = timestamp
 
     return MotionEstimate(position=_point(x, y), velocity=_point(vx, vy))
-
-
-def derive_velocity(path, policy: TrackerPolicy) -> dict:
-    """Compatibility helper returning the reconstructed velocity only."""
-
-    return estimate_motion(path, policy).velocity
 
 
 def _predict_from_estimate(
@@ -110,23 +112,14 @@ def _predict_from_estimate(
     latest_timestamp: float,
     timestamp: float,
     policy: TrackerPolicy,
-    velocity: dict | None = None,
 ) -> dict:
     dt = float(timestamp) - latest_timestamp
     if dt <= policy.epsilon:
         return dict(estimate.position)
-
-    chosen_velocity = velocity if velocity is not None else estimate.velocity
     return _point(
-        float(estimate.position["x"]) + float(chosen_velocity["x"]) * dt,
-        float(estimate.position["y"]) + float(chosen_velocity["y"]) * dt,
+        float(estimate.position["x"]) + float(estimate.velocity["x"]) * dt,
+        float(estimate.position["y"]) + float(estimate.velocity["y"]) * dt,
     )
-
-
-def predict_center(track, timestamp: float, policy: TrackerPolicy, velocity: dict | None = None) -> dict:
-    latest_timestamp = float(track["path"][-1]["timestamp"])
-    estimate = estimate_motion(track["path"], policy)
-    return _predict_from_estimate(estimate, latest_timestamp, timestamp, policy, velocity)
 
 
 def _allowed_error(status: TrackStatus, policy: TrackerPolicy) -> float:
@@ -171,7 +164,7 @@ def assess_motion(
     estimate = estimate_motion(track["path"], policy)
     latest_timestamp = float(track["path"][-1]["timestamp"])
     dt = float(timestamp) - latest_timestamp
-    predicted_position = _predict_from_estimate(estimate, latest_timestamp, timestamp, policy, estimate.velocity)
+    predicted_position = _predict_from_estimate(estimate, latest_timestamp, timestamp, policy)
     allowed_error = _allowed_error(status, policy)
 
     if status.age_seconds < -policy.epsilon or dt < -policy.epsilon:
@@ -235,7 +228,3 @@ def assess_motion(
         allowed_error,
     )
 
-
-# Backwards-compatible name for callers that still import the old helper.
-def evaluate_motion(track_facts, observation: dict, config: TrackerPolicy) -> MotionAssessment:
-    raise RuntimeError("evaluate_motion requires the track and precomputed TrackStatus; use assess_motion")

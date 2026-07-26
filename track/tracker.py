@@ -1,16 +1,16 @@
 """Stateless deterministic Track V2 reducer."""
 
-from math import isfinite
+from math import floor, isfinite
 
 from track.assignment import assign_candidates
 from track.candidate_builder import (
-    add_continuity_fallback_candidates,
+    add_suppression_coverage_candidates,
     build_candidates,
     observation_sort_key,
     track_sort_key,
 )
 from track.config import TrackV2Config
-from track.lifecycle import TENTATIVE, classify_track
+from track.lifecycle import classify_track
 from track.lifecycle import append_observation, create_track
 from track.models import (
     REQUIRED_BBOX_FIELDS,
@@ -130,34 +130,6 @@ def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
 
 
-def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config) -> tuple[list[int], list[int]]:
-    """Compatibility helper returning lifecycle-qualified confirmed and tentative indices."""
-
-    normalized_config = build_policy(config)
-    active_indices: list[int] = []
-    tentative_indices: list[int] = []
-    for index, track in enumerate(tracks):
-        facts = classify_track(track, timestamp, normalized_config)
-        if not facts.eligible:
-            continue
-        if facts.confirmed:
-            active_indices.append(index)
-        elif facts.state == TENTATIVE:
-            tentative_indices.append(index)
-    return active_indices, tentative_indices
-
-
-def _map_matches(
-    matches: list[tuple[int, int]],
-    track_indices: list[int],
-    observation_indices,
-) -> list[tuple[int, int]]:
-    return [
-        (track_indices[track_index], observation_indices[observation_index])
-        for track_index, observation_index in matches
-    ]
-
-
 def Track(tracking_state, observation_batch, config: TrackV2Config | None = None):
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 
@@ -178,8 +150,6 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     ]
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
-    track_indices = list(range(len(tracking_state["tracks"])))
-
     track_statuses = [
         classify_track(track, timestamp, normalized_config)
         for track in tracking_state["tracks"]
@@ -188,10 +158,11 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         index for index, status in enumerate(track_statuses) if status.eligible
     ]
     observation_count = len(ordered_observations)
-    if normalized_config.birth_suppression_strength >= 1.0:
-        max_births_allowed = max(0, observation_count - len(active_track_indices))
-    else:
-        max_births_allowed = observation_count
+    explainable_observations = min(len(active_track_indices), observation_count)
+    overflow_observations = max(0, observation_count - len(active_track_indices))
+    suppression = normalized_config.birth_suppression_strength
+    max_suppressed_births = floor(explainable_observations * (1.0 - suppression))
+    max_births_allowed = overflow_observations + max_suppressed_births
 
     candidates = build_candidates(
         tracking_state["tracks"],
@@ -201,7 +172,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         track_statuses,
     )
     if max_births_allowed < observation_count and active_track_indices:
-        candidates = add_continuity_fallback_candidates(
+        candidates = add_suppression_coverage_candidates(
             candidates,
             tracking_state["tracks"],
             ordered_observations,
@@ -221,15 +192,13 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         normalized_config,
         max_births_allowed,
     )
-    state_matches = _map_matches(
-        matches,
-        track_indices,
-        range(len(ordered_observations)),
-    )
+    state_matches = matches
 
     remaining_observation_indices = set(unmatched_observation_indices)
     if len(remaining_observation_indices) > max_births_allowed:
         raise ValueError("birth suppression invariant violated")
+    if suppression >= 1.0 and len(active_track_indices) >= observation_count and remaining_observation_indices:
+        raise ValueError("hard birth suppression invariant violated")
 
     for state_track_index, observation_index in sorted(state_matches):
         append_observation(

@@ -51,16 +51,17 @@ def point_key(point: dict) -> tuple[float, float]:
 
 
 def confirmed_active_track_ids(tracking_state, observation_batch, config) -> set[str]:
-    """Return track IDs classified as confirmed active before this frame update."""
+    """Return track IDs classified as active before this frame update."""
 
-    from track.tracker import _partition_track_indices
+    from track.lifecycle import classify_track
+    from track.policy import build_policy
 
     timestamp = float(observation_batch["timestamp"])
-    active_indices, _tentative_indices = _partition_track_indices(
-        tracking_state["tracks"], timestamp, config
-    )
+    policy = build_policy(config)
     return {
-        str(tracking_state["tracks"][index]["track_id"]) for index in active_indices
+        str(track["track_id"])
+        for track in tracking_state["tracks"]
+        if classify_track(track, timestamp, policy).eligible
     }
 
 
@@ -93,21 +94,37 @@ def current_frame_assignments(
 
 
 def draw_tracking_state(
-    frame, tracking_state, observation_batch, active_track_ids: set[str]
-) -> None:
+    frame,
+    tracking_state,
+    observation_batch,
+    active_track_ids: set[str],
+    previous_track_ids: set[str] | None = None,
+) -> dict:
     import cv2
 
+    previous_track_ids = previous_track_ids or set()
+    timestamp = float(observation_batch["timestamp"])
+    assignments = current_frame_assignments(tracking_state, observation_batch, active_track_ids)
+    matched_track_ids = {str(track["track_id"]) for track, _observation in assignments}
+    birth_track_ids = {
+        str(track["track_id"])
+        for track in tracking_state["tracks"]
+        if str(track["track_id"]) not in previous_track_ids
+        and float(track["path"][-1]["timestamp"]) == timestamp
+    }
+    unmatched_active_ids = set(active_track_ids) - matched_track_ids
+
     height, width = frame.shape[:2]
-    for track, observation in current_frame_assignments(
-        tracking_state, observation_batch, active_track_ids
-    ):
+    for track, observation in assignments:
         bbox = observation["bbox"]
         x1 = max(0, min(width - 1, int(round(float(bbox["x1"])))))
         y1 = max(0, min(height - 1, int(round(float(bbox["y1"])))))
         x2 = max(0, min(width - 1, int(round(float(bbox["x2"])))))
         y2 = max(0, min(height - 1, int(round(float(bbox["y2"])))))
-        color = track_color(str(track["track_id"]))
-        label = f"Track {track['track_id']} {float(observation['confidence']):.2f}"
+        track_id = str(track["track_id"])
+        color = (0, 0, 255) if track_id in birth_track_ids else track_color(track_id)
+        label_prefix = "BIRTH" if track_id in birth_track_ids else "Track"
+        label = f"{label_prefix} {track['track_id']} {float(observation['confidence']):.2f}"
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         text_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
@@ -125,6 +142,32 @@ def draw_tracking_state(
             2,
             cv2.LINE_AA,
         )
+
+    for track in tracking_state["tracks"]:
+        track_id = str(track["track_id"])
+        if track_id not in unmatched_active_ids:
+            continue
+        center = track["path"][-1]["center"]
+        x = max(0, min(width - 1, int(round(float(center["x"])))))
+        y = max(0, min(height - 1, int(round(float(center["y"])))))
+        cv2.circle(frame, (x, y), 8, (160, 160, 160), 2)
+        cv2.putText(frame, f"miss {track_id}", (x + 10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1, cv2.LINE_AA)
+
+    debug = {
+        "active": len(active_track_ids),
+        "observations": len(observation_batch["observations"]),
+        "matched": len(matched_track_ids),
+        "births": len(birth_track_ids),
+        "unmatched_active": len(unmatched_active_ids),
+    }
+    overlay = (
+        f"active={debug['active']} obs={debug['observations']} "
+        f"matched={debug['matched']} births={debug['births']} "
+        f"unmatched_active={debug['unmatched_active']}"
+    )
+    cv2.rectangle(frame, (8, 8), (min(width - 1, 8 + 12 * len(overlay)), 36), (0, 0, 0), -1)
+    cv2.putText(frame, overlay, (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+    return debug
 
 
 def update_track_summary(track_summary, tracking_state) -> None:
@@ -230,11 +273,18 @@ def main():
             active_track_ids = confirmed_active_track_ids(
                 tracking_state, observation_batch, config
             )
+            previous_track_ids = {str(track["track_id"]) for track in tracking_state["tracks"]}
             tracking_state = Track(tracking_state, observation_batch, config)
             update_track_summary(track_summary, tracking_state)
-            draw_tracking_state(
-                bgr_frame, tracking_state, observation_batch, active_track_ids
+            debug = draw_tracking_state(
+                bgr_frame, tracking_state, observation_batch, active_track_ids, previous_track_ids
             )
+            if debug["births"] or debug["unmatched_active"]:
+                print(
+                    f"\nframe {frame_index}: active={debug['active']} obs={debug['observations']} "
+                    f"matched={debug['matched']} births={debug['births']} "
+                    f"unmatched_active={debug['unmatched_active']}"
+                )
             writer.write(bgr_frame)
 
             frame_index += 1
@@ -571,3 +621,217 @@ def test_track_v2_rejects_invalid_birth_suppression_strength():
         assert "birth_suppression_strength" in str(exc)
     else:
         raise AssertionError("invalid birth_suppression_strength should fail loudly")
+
+
+def test_track_v2_hard_suppression_absorbs_when_normal_motion_rejects_all():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=2,
+        detector_miss_tolerance_sec=2.0,
+        motion_tolerance_px=1.0,
+        localization_jitter_px=0.0,
+        motion_tolerance_growth_px_per_sec=0.0,
+        max_physical_speed_px_per_sec=1.0,
+        birth_suppression_strength=1.0,
+    )
+    state, _ = _seed_confirmed_tracks(3, config)
+
+    Track(
+        state,
+        _test_batch(
+            "teleport-but-suppressed",
+            0.2,
+            [
+                _test_observation("a", 0.2, 300.0, 300.0),
+                _test_observation("b", 0.2, 350.0, 300.0),
+                _test_observation("c", 0.2, 400.0, 300.0),
+            ],
+        ),
+        config,
+    )
+
+    assert len(state["tracks"]) == 3
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 3) == 3
+
+
+def test_track_v2_hard_suppression_limits_births_to_overflow_when_motion_rejects_all():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=2,
+        detector_miss_tolerance_sec=2.0,
+        motion_tolerance_px=1.0,
+        localization_jitter_px=0.0,
+        motion_tolerance_growth_px_per_sec=0.0,
+        max_physical_speed_px_per_sec=1.0,
+        birth_suppression_strength=1.0,
+    )
+    state, _ = _seed_confirmed_tracks(2, config)
+
+    Track(
+        state,
+        _test_batch(
+            "one-overflow",
+            0.2,
+            [
+                _test_observation("a", 0.2, 300.0, 300.0),
+                _test_observation("b", 0.2, 350.0, 300.0),
+                _test_observation("c", 0.2, 400.0, 300.0),
+            ],
+        ),
+        config,
+    )
+
+    assert len(state["tracks"]) == 3
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 3) == 2
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 1) == 1
+
+
+def test_track_v2_intermediate_suppression_reduces_explainable_births():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=2,
+        detector_miss_tolerance_sec=2.0,
+        motion_tolerance_px=1.0,
+        localization_jitter_px=0.0,
+        motion_tolerance_growth_px_per_sec=0.0,
+        max_physical_speed_px_per_sec=1.0,
+        birth_suppression_strength=0.5,
+    )
+    state, _ = _seed_confirmed_tracks(4, TrackV2Config(confirmation_hits=2, detector_miss_tolerance_sec=2.0))
+
+    Track(
+        state,
+        _test_batch(
+            "half-suppressed",
+            0.2,
+            [
+                _test_observation("a", 0.2, 300.0, 300.0),
+                _test_observation("b", 0.2, 350.0, 300.0),
+                _test_observation("c", 0.2, 400.0, 300.0),
+                _test_observation("d", 0.2, 450.0, 300.0),
+            ],
+        ),
+        config,
+    )
+
+    assert len(state["tracks"]) == 6
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 3) == 2
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 1) == 2
+
+
+def test_track_v2_moderate_walker_keeps_identity():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        motion_tolerance_px=18.0,
+        localization_jitter_px=8.0,
+        motion_tolerance_growth_px_per_sec=8.0,
+        max_physical_speed_px_per_sec=260.0,
+    )
+    state = {"tracks": []}
+    positions = [(20.0, 20.0), (32.0, 21.0), (45.0, 19.0), (57.0, 22.0), (70.0, 21.0)]
+
+    for index, (x, y) in enumerate(positions):
+        timestamp = index * 0.1
+        Track(state, _test_batch(f"moderate-{index}", timestamp, [_test_observation(index, timestamp, x, y)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == len(positions)
+
+
+def test_track_v2_replay_draw_returns_decision_counts():
+    import pytest
+    cv2 = pytest.importorskip("cv2")
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config()
+    state = {"tracks": []}
+    batch = _test_batch("f0", 0.0, [_test_observation("a", 0.0, 10.0, 10.0)])
+    previous_track_ids = set()
+    active_track_ids = confirmed_active_track_ids(state, batch, config)
+    Track(state, batch, config)
+    frame = cv2.UMat(64, 64, cv2.CV_8UC3).get()
+
+    debug = draw_tracking_state(frame, state, batch, active_track_ids, previous_track_ids)
+
+    assert debug == {"active": 0, "observations": 1, "matched": 0, "births": 1, "unmatched_active": 0}
+
+
+def test_track_v2_nearest_previous_position_dominates_appearance():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=1,
+        motion_tolerance_px=80.0,
+        localization_jitter_px=5.0,
+        max_physical_speed_px_per_sec=1000.0,
+        appearance_tiebreak_enabled=True,
+    )
+    state = {"tracks": []}
+    left_embedding = {"values": [1.0, 0.0]}
+    right_embedding = {"values": [0.0, 1.0]}
+    Track(
+        state,
+        _test_batch(
+            "seed",
+            0.0,
+            [
+                _test_observation("left", 0.0, 100.0, 100.0, embedding=left_embedding),
+                _test_observation("right", 0.0, 200.0, 100.0, embedding=right_embedding),
+            ],
+        ),
+        config,
+    )
+
+    Track(
+        state,
+        _test_batch(
+            "nearest-wins",
+            0.1,
+            [
+                _test_observation("near-left", 0.1, 105.0, 100.0, embedding=right_embedding),
+                _test_observation("near-right", 0.1, 195.0, 100.0, embedding=left_embedding),
+            ],
+        ),
+        config,
+    )
+
+    paths = {track["track_id"]: track["path"][-1]["center"] for track in state["tracks"]}
+    assert paths["1"] == {"x": 105.0, "y": 100.0}
+    assert paths["2"] == {"x": 195.0, "y": 100.0}
+
+
+def test_track_v2_hard_suppression_active_greater_than_observations_no_birth_under_heavy_jitter():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=2,
+        detector_miss_tolerance_sec=2.0,
+        motion_tolerance_px=2.0,
+        localization_jitter_px=0.0,
+        motion_tolerance_growth_px_per_sec=0.0,
+        max_physical_speed_px_per_sec=2.0,
+        birth_suppression_strength=1.0,
+    )
+    state, _ = _seed_confirmed_tracks(5, TrackV2Config(confirmation_hits=2, detector_miss_tolerance_sec=2.0))
+
+    Track(
+        state,
+        _test_batch(
+            "heavy-jitter-partial",
+            0.2,
+            [
+                _test_observation("j0", 0.2, 500.0, 400.0),
+                _test_observation("j1", 0.2, 550.0, 400.0),
+                _test_observation("j2", 0.2, 600.0, 400.0),
+            ],
+        ),
+        config,
+    )
+
+    assert len(state["tracks"]) == 5
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 3) == 3
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 2) == 2
