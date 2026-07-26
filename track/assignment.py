@@ -1,7 +1,8 @@
 """Deterministic continuity-first Track V2 assignment.
 
-Assignment receives only motion-eligible candidates. It owns continuity bias and
-takeover policy, but it never creates eligibility for impossible motion.
+Assignment owns the identity decision: coverage first, deterministic cost second.
+Normal candidates carry motion evidence; suppression coverage candidates carry the
+explicit continuity requirement used before births are allowed.
 """
 
 from typing import Sequence, Tuple
@@ -80,19 +81,48 @@ def _assignment_cost(candidate: CandidateMatch, config: TrackerPolicy) -> tuple:
     )
 
 
-def _optimal_assignment(candidates: Sequence[CandidateMatch], config: TrackerPolicy) -> list[CandidateMatch]:
-    """Select deterministic one-to-one matches without exponential search."""
+def _maximum_coverage_assignment(candidates: Sequence[CandidateMatch], config: TrackerPolicy) -> list[CandidateMatch]:
+    """Select deterministic one-to-one matches with coverage as the first objective.
 
-    selected: list[CandidateMatch] = []
-    used_tracks: set[int] = set()
-    used_observations: set[int] = set()
-    for candidate in sorted(candidates, key=lambda candidate: _assignment_cost(candidate, config)):
-        if candidate.track_index in used_tracks or candidate.observation_index in used_observations:
-            continue
-        selected.append(candidate)
-        used_tracks.add(candidate.track_index)
-        used_observations.add(candidate.observation_index)
-    return selected
+    Birth suppression makes unmatched observations expensive. This solver therefore
+    finds a maximum-cardinality bipartite matching first, using deterministic
+    candidate costs only to choose among equally coverable explanations. The result
+    keeps births as an overflow outcome instead of a side effect of greedy local
+    choices.
+    """
+
+    by_observation: dict[int, list[CandidateMatch]] = {}
+    for candidate in candidates:
+        by_observation.setdefault(candidate.observation_index, []).append(candidate)
+    for observation_candidates in by_observation.values():
+        observation_candidates.sort(key=lambda candidate: _assignment_cost(candidate, config))
+
+    observation_order = sorted(
+        by_observation,
+        key=lambda observation_index: (
+            len(by_observation[observation_index]),
+            min(_assignment_cost(candidate, config) for candidate in by_observation[observation_index]),
+            observation_index,
+        ),
+    )
+    track_to_candidate: dict[int, CandidateMatch] = {}
+
+    def try_assign(observation_index: int, visited_tracks: set[int]) -> bool:
+        for candidate in by_observation[observation_index]:
+            if candidate.track_index in visited_tracks:
+                continue
+            visited_tracks.add(candidate.track_index)
+            incumbent = track_to_candidate.get(candidate.track_index)
+            if incumbent is None or try_assign(incumbent.observation_index, visited_tracks):
+                track_to_candidate[candidate.track_index] = candidate
+                return True
+        return False
+
+    for observation_index in observation_order:
+        try_assign(observation_index, set())
+
+    selected = list(track_to_candidate.values())
+    return sorted(selected, key=lambda candidate: _assignment_cost(candidate, config))
 
 
 def _validate_assignment(
@@ -134,7 +164,19 @@ def assign_candidates(
         raise ValueError("max_births_allowed must be within observation count")
 
     required_matches = observation_count - max_births_allowed
-    selected = _optimal_assignment(candidates, config)
+    selected = _maximum_coverage_assignment(candidates, config)
+    if len(selected) > required_matches:
+        removable = sorted(
+            [candidate for candidate in selected if candidate.fallback],
+            key=lambda candidate: _assignment_cost(candidate, config),
+            reverse=True,
+        )
+        selected_set = set(selected)
+        for candidate in removable:
+            if len(selected_set) <= required_matches:
+                break
+            selected_set.remove(candidate)
+        selected = sorted(selected_set, key=lambda candidate: _assignment_cost(candidate, config))
     if len({candidate.observation_index for candidate in selected}) < required_matches:
         raise ValueError("assignment failed to satisfy birth suppression match requirement")
     used_tracks = {candidate.track_index for candidate in selected}

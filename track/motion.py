@@ -88,11 +88,19 @@ def estimate_motion(path, policy: TrackerPolicy) -> MotionEstimate:
         predicted_y = y + vy * dt
         residual_x = observed_x - predicted_x
         residual_y = observed_y - predicted_y
+        residual_distance = math.sqrt(residual_x * residual_x + residual_y * residual_y)
 
         x = predicted_x + policy.alpha_beta_position_gain * residual_x
         y = predicted_y + policy.alpha_beta_position_gain * residual_y
-        vx += policy.alpha_beta_velocity_gain * residual_x / dt
-        vy += policy.alpha_beta_velocity_gain * residual_y / dt
+        if residual_distance <= policy.localization_jitter_px:
+            # Fixed CCTV detections often wobble around a standing person. Treat
+            # jitter-sized residuals as measurement noise instead of acceleration.
+            vx *= policy.velocity_damping
+            vy *= policy.velocity_damping
+        else:
+            excess_scale = (residual_distance - policy.localization_jitter_px) / residual_distance
+            vx += policy.alpha_beta_velocity_gain * residual_x * excess_scale / dt
+            vy += policy.alpha_beta_velocity_gain * residual_y * excess_scale / dt
         vx, vy = _clamp_velocity(vx, vy, policy)
         previous_timestamp = timestamp
 

@@ -31,6 +31,7 @@ class TrackerPolicy:
     appearance_tiebreak_enabled: bool
     alpha_beta_position_gain: float
     alpha_beta_velocity_gain: float
+    velocity_damping: float
     max_history_points: int
     epsilon: float
 
@@ -266,7 +267,8 @@ def build_policy(config: TrackV2Config) -> TrackerPolicy:
         birth_suppression_strength=float(config.birth_suppression_strength),
         appearance_tiebreak_enabled=bool(config.appearance_tiebreak_enabled),
         alpha_beta_position_gain=0.65,
-        alpha_beta_velocity_gain=0.18,
+        alpha_beta_velocity_gain=0.12,
+        velocity_damping=0.70,
         max_history_points=12,
         epsilon=float(config.epsilon),
     )
@@ -310,3 +312,5 @@ def validate_policy(policy: TrackerPolicy) -> None:
         raise ValueError("TrackerPolicy.alpha_beta_position_gain must be in (0, 1]")
     if not 0.0 < policy.alpha_beta_velocity_gain <= 1.0:
         raise ValueError("TrackerPolicy.alpha_beta_velocity_gain must be in (0, 1]")
+    if not 0.0 <= policy.velocity_damping <= 1.0:
+        raise ValueError("TrackerPolicy.velocity_damping must be in [0, 1]")
