@@ -1,8 +1,9 @@
 """Private Track V2 behaviour policy.
 
-This is the only module that translates the public ``TrackV2Config`` surface,
-including historical aliases, into the small behaviour object consumed by the
-tracker internals.
+This module is the single translation layer from the public, compatibility-heavy
+``TrackV2Config`` surface to the small behaviour-oriented policy consumed by the
+tracker internals. No motion, lifecycle, candidate, or assignment code should
+read public config fields directly.
 """
 
 from dataclasses import dataclass
@@ -14,21 +15,64 @@ from track.config import TrackV2Config
 
 @dataclass(frozen=True)
 class TrackerPolicy:
-    """Single internal source of truth for Track V2 behaviour."""
+    """Authoritative internal Track V2 behaviour settings."""
 
     confirmation_hits: int
-    detector_miss_tolerance_sec: float
-    tentative_tolerance_sec: float
-    motion_tolerance_px: float
-    motion_tolerance_growth_px_per_sec: float
-    max_physical_speed_px_per_sec: float
+    confirmed_max_missed_sec: float
+    tentative_max_age_sec: float
+    base_position_uncertainty_px: float
+    miss_uncertainty_growth_px_per_sec: float
     localization_jitter_px: float
-    continuity_strength: float
+    max_speed_px_per_sec: float
+    weak_confirmed_max_motion_score: float
+    continuity_bias: float
     takeover_margin: float
-    weak_match_max_motion_score: float
-    allow_weak_confirmed_matching: bool
+    birth_suppression_strength: float
     appearance_tiebreak_enabled: bool
+    alpha_beta_position_gain: float
+    alpha_beta_velocity_gain: float
+    max_history_points: int
     epsilon: float
+
+    @property
+    def detector_miss_tolerance_sec(self) -> float:
+        """Compatibility name for older private callers."""
+        return self.confirmed_max_missed_sec
+
+    @property
+    def tentative_tolerance_sec(self) -> float:
+        """Compatibility name for older private callers."""
+        return self.tentative_max_age_sec
+
+    @property
+    def motion_tolerance_px(self) -> float:
+        """Compatibility name for the base position uncertainty."""
+        return self.base_position_uncertainty_px
+
+    @property
+    def motion_tolerance_growth_px_per_sec(self) -> float:
+        """Compatibility name for miss uncertainty growth."""
+        return self.miss_uncertainty_growth_px_per_sec
+
+    @property
+    def max_physical_speed_px_per_sec(self) -> float:
+        """Compatibility name for hard physical speed."""
+        return self.max_speed_px_per_sec
+
+    @property
+    def weak_match_max_motion_score(self) -> float:
+        """Compatibility name for confirmed weak matching."""
+        return self.weak_confirmed_max_motion_score
+
+    @property
+    def continuity_strength(self) -> float:
+        """Compatibility name for assignment continuity bias."""
+        return self.continuity_bias
+
+    @property
+    def allow_weak_confirmed_matching(self) -> bool:
+        """Compatibility name retained for internal shims."""
+        return self.weak_confirmed_max_motion_score > 1.0
 
 
 def _first_configured(*values: Any) -> Any:
@@ -58,7 +102,7 @@ def _optional_non_negative(value: Any, name: str) -> float | None:
 
 
 def validate_public_config(config: TrackV2Config) -> None:
-    """Validate the public config at the API boundary."""
+    """Validate public config values without making them internal owners."""
 
     numeric_fields = (
         "confirmation_min_path_points",
@@ -81,6 +125,7 @@ def validate_public_config(config: TrackV2Config) -> None:
         "weak_motion_threshold",
         "continuity_strength",
         "takeover_margin",
+        "birth_suppression_strength",
         "epsilon",
     )
     for field in numeric_fields:
@@ -136,73 +181,93 @@ def _confirmation_hits(config: TrackV2Config) -> int:
     )
 
 
-def build_policy(config: TrackV2Config) -> TrackerPolicy:
-    """Translate public/legacy config names into one private policy."""
-
-    validate_public_config(config)
-    detector_miss_tolerance_sec = _first_configured(
-        config.detector_miss_tolerance_sec,
-        config.confirmed_track_window_sec,
-    )
-    if detector_miss_tolerance_sec is None:
-        detector_miss_tolerance_sec = min(
-            float(config.confirmed_reassociation_window_sec),
-            float(config.max_reassociation_gap_sec),
-        )
-
-    tentative_tolerance_sec = _first_configured(
-        config.tentative_tolerance_sec,
-        config.tentative_track_window_sec,
-    )
-    if tentative_tolerance_sec is None:
-        tentative_tolerance_sec = config.tentative_recency_window_frames
-
-    motion_tolerance_px = _first_configured(
+def _spatial_uncertainty(config: TrackV2Config) -> float:
+    configured = _first_configured(
         config.motion_tolerance_px,
         config.prediction_gate_px,
         config.latest_position_gate_px,
     )
-    if motion_tolerance_px is None:
-        motion_tolerance_px = max(
-            float(config.confirmed_prediction_gate_px),
-            float(config.confirmed_latest_position_gate_px),
-        )
+    if configured is not None:
+        return float(configured)
+    return max(
+        float(config.confirmed_prediction_gate_px),
+        float(config.confirmed_latest_position_gate_px),
+        float(config.base_motion_gate_px),
+    )
 
-    motion_tolerance_growth_px_per_sec = _first_configured(
+
+def _miss_growth(config: TrackV2Config) -> float:
+    configured = _first_configured(
         config.motion_tolerance_growth_px_per_sec,
         config.prediction_gate_growth_px_per_sec,
         config.latest_position_gate_growth_px_per_sec,
     )
-    if motion_tolerance_growth_px_per_sec is None:
-        motion_tolerance_growth_px_per_sec = config.max_speed_px_per_sec
+    if configured is not None:
+        return float(configured)
+    # CCTV continuity should tolerate short misses, but uncertainty must not grow
+    # as fast as the hard speed limit. Use a modest fraction of the base gate.
+    return max(12.0, float(config.base_motion_gate_px) * 0.5)
 
-    max_physical_speed_px_per_sec = _first_configured(
+
+def build_policy(config: TrackV2Config) -> TrackerPolicy:
+    """Translate public/legacy config names into one private policy."""
+
+    validate_public_config(config)
+    confirmed_max_missed_sec = _first_configured(
+        config.detector_miss_tolerance_sec,
+        config.confirmed_track_window_sec,
+    )
+    if confirmed_max_missed_sec is None:
+        confirmed_max_missed_sec = max(
+            float(config.confirmed_reassociation_window_sec),
+            float(config.max_reassociation_gap_sec),
+        )
+
+    tentative_max_age_sec = _first_configured(
+        config.tentative_tolerance_sec,
+        config.tentative_track_window_sec,
+    )
+    if tentative_max_age_sec is None:
+        tentative_max_age_sec = config.tentative_recency_window_frames
+
+    max_speed_px_per_sec = _first_configured(
         config.max_physical_speed_px_per_sec,
         config.hard_speed_limit_px_per_sec,
+        config.max_believable_speed_px_per_sec,
     )
-    if max_physical_speed_px_per_sec is None:
-        max_physical_speed_px_per_sec = config.confirmed_max_speed_px_per_sec
+    if max_speed_px_per_sec is None:
+        max_speed_px_per_sec = min(
+            float(config.max_speed_px_per_sec),
+            float(config.confirmed_max_speed_px_per_sec),
+        )
 
     localization_jitter_px = _first_configured(
         config.localization_jitter_px,
         config.jitter_tolerance_px,
     )
     if localization_jitter_px is None:
-        localization_jitter_px = config.base_motion_gate_px
+        localization_jitter_px = max(8.0, float(config.base_motion_gate_px) * 0.35)
+
+    weak_score = float(config.weak_motion_threshold)
+    if not bool(config.allow_weak_confirmed_matching):
+        weak_score = 1.0
 
     policy = TrackerPolicy(
         confirmation_hits=_confirmation_hits(config),
-        detector_miss_tolerance_sec=float(detector_miss_tolerance_sec),
-        tentative_tolerance_sec=float(tentative_tolerance_sec),
-        motion_tolerance_px=float(motion_tolerance_px),
-        motion_tolerance_growth_px_per_sec=float(motion_tolerance_growth_px_per_sec),
-        max_physical_speed_px_per_sec=float(max_physical_speed_px_per_sec),
+        confirmed_max_missed_sec=float(confirmed_max_missed_sec),
+        tentative_max_age_sec=float(tentative_max_age_sec),
+        base_position_uncertainty_px=_spatial_uncertainty(config),
+        miss_uncertainty_growth_px_per_sec=_miss_growth(config),
         localization_jitter_px=float(localization_jitter_px),
-        continuity_strength=float(config.continuity_strength),
+        max_speed_px_per_sec=float(max_speed_px_per_sec),
+        weak_confirmed_max_motion_score=max(1.0, weak_score),
+        continuity_bias=float(config.continuity_strength),
         takeover_margin=float(config.takeover_margin),
-        weak_match_max_motion_score=1.0 + float(config.takeover_margin),
-        allow_weak_confirmed_matching=bool(config.allow_weak_confirmed_matching),
+        birth_suppression_strength=float(config.birth_suppression_strength),
         appearance_tiebreak_enabled=bool(config.appearance_tiebreak_enabled),
+        alpha_beta_position_gain=0.65,
+        alpha_beta_velocity_gain=0.18,
+        max_history_points=12,
         epsilon=float(config.epsilon),
     )
     validate_policy(policy)
@@ -214,18 +279,22 @@ def validate_policy(policy: TrackerPolicy) -> None:
 
     positive_fields = (
         "confirmation_hits",
-        "max_physical_speed_px_per_sec",
+        "base_position_uncertainty_px",
+        "max_speed_px_per_sec",
+        "weak_confirmed_max_motion_score",
+        "alpha_beta_position_gain",
+        "alpha_beta_velocity_gain",
+        "max_history_points",
         "epsilon",
     )
     non_negative_fields = (
-        "detector_miss_tolerance_sec",
-        "tentative_tolerance_sec",
-        "motion_tolerance_px",
-        "motion_tolerance_growth_px_per_sec",
+        "confirmed_max_missed_sec",
+        "tentative_max_age_sec",
+        "miss_uncertainty_growth_px_per_sec",
         "localization_jitter_px",
-        "continuity_strength",
+        "continuity_bias",
         "takeover_margin",
-        "weak_match_max_motion_score",
+        "birth_suppression_strength",
     )
     for field in positive_fields:
         value = _finite_number(getattr(policy, field), f"TrackerPolicy.{field}")
@@ -233,5 +302,11 @@ def validate_policy(policy: TrackerPolicy) -> None:
             raise ValueError(f"TrackerPolicy.{field} must be positive")
     for field in non_negative_fields:
         _non_negative(getattr(policy, field), f"TrackerPolicy.{field}")
-    if policy.weak_match_max_motion_score < 1.0:
-        raise ValueError("TrackerPolicy.weak_match_max_motion_score must be >= 1.0")
+    if policy.weak_confirmed_max_motion_score < 1.0:
+        raise ValueError("TrackerPolicy.weak_confirmed_max_motion_score must be >= 1.0")
+    if policy.birth_suppression_strength > 1.0:
+        raise ValueError("TrackerPolicy.birth_suppression_strength must be <= 1.0")
+    if not 0.0 < policy.alpha_beta_position_gain <= 1.0:
+        raise ValueError("TrackerPolicy.alpha_beta_position_gain must be in (0, 1]")
+    if not 0.0 < policy.alpha_beta_velocity_gain <= 1.0:
+        raise ValueError("TrackerPolicy.alpha_beta_velocity_gain must be in (0, 1]")
