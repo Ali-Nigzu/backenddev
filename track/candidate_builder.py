@@ -16,9 +16,10 @@ from track.policy import TrackerPolicy
 
 NORMAL = "normal"
 WEAK = "weak"
+CONTINUITY_FALLBACK = "continuity_fallback"
 IMPOSSIBLE = "impossible"
 
-_CLASS_PENALTY = {NORMAL: 0, WEAK: 1}
+_CLASS_PENALTY = {NORMAL: 0, WEAK: 1, CONTINUITY_FALLBACK: 2}
 
 PROTECTED_CONTINUATION = "protected_continuation"
 REASSOCIATION_CONTINUATION = "reassociation_continuation"
@@ -39,6 +40,7 @@ class CandidateMatch:
     distance_prediction: float
     distance_latest: float
     speed_required: float
+    fallback: bool = False
 
 
 def numeric_track_id(track_id: str) -> int | None:
@@ -115,6 +117,8 @@ def _validate_candidate(candidate: CandidateMatch, track_count: int, observation
         raise ValueError("candidate appearance score must be finite")
     if candidate.classification not in _CLASS_PENALTY:
         raise ValueError("candidate classification must be eligible")
+    if candidate.fallback and candidate.classification != CONTINUITY_FALLBACK:
+        raise ValueError("fallback candidates must use fallback classification")
     if candidate.ownership_role == STALE_CONTINUATION:
         raise ValueError("stale tracks must not produce candidates")
 
@@ -148,6 +152,49 @@ def build_candidate(
         distance_prediction=float(motion.distance_prediction),
         distance_latest=float(motion.distance_latest),
         speed_required=float(motion.speed_required),
+    )
+
+
+def _fallback_motion_score(motion: MotionAssessment, policy: TrackerPolicy) -> float:
+    if math.isfinite(float(motion.motion_score)):
+        return max(float(motion.motion_score), policy.weak_confirmed_max_motion_score + 1.0)
+    if math.isfinite(float(motion.distance_prediction)) and motion.allowed_error > policy.epsilon:
+        return max(
+            motion.distance_prediction / motion.allowed_error,
+            policy.weak_confirmed_max_motion_score + 1.0,
+        )
+    return policy.weak_confirmed_max_motion_score + 1_000_000.0
+
+
+def build_continuity_fallback_candidate(
+    track_index: int,
+    observation_index: int,
+    track: dict,
+    observation: dict,
+    status: TrackStatus,
+    motion: MotionAssessment,
+    policy: TrackerPolicy,
+) -> CandidateMatch | None:
+    if not status.eligible:
+        return None
+
+    score = _fallback_motion_score(motion, policy)
+    distance_prediction = motion.distance_prediction if math.isfinite(float(motion.distance_prediction)) else score
+    distance_latest = motion.distance_latest if math.isfinite(float(motion.distance_latest)) else score
+    speed_required = motion.speed_required if math.isfinite(float(motion.speed_required)) else score
+    return CandidateMatch(
+        track_index=track_index,
+        observation_index=observation_index,
+        track_id=str(track["track_id"]),
+        detection_id=str(observation["detection_id"]),
+        motion_score=float(score),
+        appearance_score=None,
+        ownership_role=_ownership_role(status),
+        classification=CONTINUITY_FALLBACK,
+        distance_prediction=float(distance_prediction),
+        distance_latest=float(distance_latest),
+        speed_required=float(speed_required),
+        fallback=True,
     )
 
 
@@ -188,3 +235,42 @@ def build_candidates(
             candidates.append(candidate)
 
     return candidates
+
+
+def add_continuity_fallback_candidates(
+    candidates: list[CandidateMatch],
+    ordered_tracks: Sequence[dict],
+    ordered_observations: Sequence[dict],
+    timestamp: float,
+    policy: TrackerPolicy,
+    track_statuses: Sequence[TrackStatus],
+    active_track_indices: Sequence[int],
+) -> list[CandidateMatch]:
+    """Add deterministic active-track fallback candidates for hard birth suppression."""
+
+    if len(track_statuses) != len(ordered_tracks):
+        raise ValueError("track_statuses length must match ordered_tracks length")
+
+    augmented = list(candidates)
+    seen_pairs = {(candidate.track_index, candidate.observation_index) for candidate in augmented}
+    for observation_index, observation in enumerate(ordered_observations):
+        for track_index in sorted(active_track_indices):
+            if (track_index, observation_index) in seen_pairs:
+                continue
+            status = track_statuses[track_index]
+            motion = assess_motion(ordered_tracks[track_index], status, observation, timestamp, policy)
+            candidate = build_continuity_fallback_candidate(
+                track_index,
+                observation_index,
+                ordered_tracks[track_index],
+                observation,
+                status,
+                motion,
+                policy,
+            )
+            if candidate is None:
+                continue
+            seen_pairs.add((candidate.track_index, candidate.observation_index))
+            _validate_candidate(candidate, len(ordered_tracks), len(ordered_observations))
+            augmented.append(candidate)
+    return augmented

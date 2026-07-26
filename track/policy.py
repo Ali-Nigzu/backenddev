@@ -27,6 +27,7 @@ class TrackerPolicy:
     weak_confirmed_max_motion_score: float
     continuity_bias: float
     takeover_margin: float
+    birth_suppression_strength: float
     appearance_tiebreak_enabled: bool
     alpha_beta_position_gain: float
     alpha_beta_velocity_gain: float
@@ -124,6 +125,7 @@ def validate_public_config(config: TrackV2Config) -> None:
         "weak_motion_threshold",
         "continuity_strength",
         "takeover_margin",
+        "birth_suppression_strength",
         "epsilon",
     )
     for field in numeric_fields:
@@ -261,6 +263,7 @@ def build_policy(config: TrackV2Config) -> TrackerPolicy:
         weak_confirmed_max_motion_score=max(1.0, weak_score),
         continuity_bias=float(config.continuity_strength),
         takeover_margin=float(config.takeover_margin),
+        birth_suppression_strength=float(config.birth_suppression_strength),
         appearance_tiebreak_enabled=bool(config.appearance_tiebreak_enabled),
         alpha_beta_position_gain=0.65,
         alpha_beta_velocity_gain=0.18,
@@ -291,6 +294,7 @@ def validate_policy(policy: TrackerPolicy) -> None:
         "localization_jitter_px",
         "continuity_bias",
         "takeover_margin",
+        "birth_suppression_strength",
     )
     for field in positive_fields:
         value = _finite_number(getattr(policy, field), f"TrackerPolicy.{field}")
@@ -300,6 +304,8 @@ def validate_policy(policy: TrackerPolicy) -> None:
         _non_negative(getattr(policy, field), f"TrackerPolicy.{field}")
     if policy.weak_confirmed_max_motion_score < 1.0:
         raise ValueError("TrackerPolicy.weak_confirmed_max_motion_score must be >= 1.0")
+    if policy.birth_suppression_strength > 1.0:
+        raise ValueError("TrackerPolicy.birth_suppression_strength must be <= 1.0")
     if not 0.0 < policy.alpha_beta_position_gain <= 1.0:
         raise ValueError("TrackerPolicy.alpha_beta_position_gain must be in (0, 1]")
     if not 0.0 < policy.alpha_beta_velocity_gain <= 1.0:

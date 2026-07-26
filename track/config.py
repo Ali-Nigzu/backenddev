@@ -75,4 +75,9 @@ class TrackV2Config:
     continuity_strength: float = 0.005
     takeover_margin: float = 0.50
 
+    # Birth suppression. At 1.0, births are overflow-only: if lifecycle-active
+    # tracks are greater than or equal to observations, every observation must
+    # be explained by an existing active identity.
+    birth_suppression_strength: float = 1.0
+
     epsilon: float = 1e-9

@@ -4,7 +4,7 @@ Assignment receives only motion-eligible candidates. It owns continuity bias and
 takeover policy, but it never creates eligibility for impossible motion.
 """
 
-from typing import Sequence, Set, Tuple
+from typing import Sequence, Tuple
 
 from track.candidate_builder import (
     CandidateMatch,
@@ -80,64 +80,19 @@ def _assignment_cost(candidate: CandidateMatch, config: TrackerPolicy) -> tuple:
     )
 
 
-def _better_assignment(
-    candidate_matches: list[CandidateMatch],
-    best_matches: list[CandidateMatch] | None,
-    config: TrackerPolicy,
-) -> bool:
-    if best_matches is None:
-        return True
-
-    def score(matches: list[CandidateMatch]) -> tuple:
-        ordered = sorted(matches, key=lambda match: _assignment_cost(match, config))
-        return (
-            -len(ordered),
-            sum(_CLASS_PENALTY.get(match.classification, 99) for match in ordered),
-            round(sum(_continuity_adjusted_motion(match, config) for match in ordered), 12),
-            sum(_role_priority(match) for match in ordered),
-            round(sum(match.motion_score for match in ordered), 12),
-            round(sum(_appearance_cost(match) for match in ordered), 12),
-            tuple(_assignment_cost(match, config) for match in ordered),
-        )
-
-    return score(candidate_matches) < score(best_matches)
-
-
 def _optimal_assignment(candidates: Sequence[CandidateMatch], config: TrackerPolicy) -> list[CandidateMatch]:
-    by_observation: dict[int, list[CandidateMatch]] = {}
-    for candidate in candidates:
-        by_observation.setdefault(candidate.observation_index, []).append(candidate)
+    """Select deterministic one-to-one matches without exponential search."""
 
-    ordered_observation_indices = sorted(by_observation)
-    for observation_index in ordered_observation_indices:
-        by_observation[observation_index].sort(key=lambda candidate: _assignment_cost(candidate, config))
-
-    best_matches: list[CandidateMatch] | None = None
-
-    def search(observation_position: int, used_tracks: Set[int], selected_matches: list[CandidateMatch]) -> None:
-        nonlocal best_matches
-        remaining = len(ordered_observation_indices) - observation_position
-        if best_matches is not None and len(selected_matches) + remaining < len(best_matches):
-            return
-        if observation_position >= len(ordered_observation_indices):
-            if _better_assignment(selected_matches, best_matches, config):
-                best_matches = list(selected_matches)
-            return
-
-        observation_index = ordered_observation_indices[observation_position]
-        for candidate in by_observation[observation_index]:
-            if candidate.track_index in used_tracks:
-                continue
-            used_tracks.add(candidate.track_index)
-            selected_matches.append(candidate)
-            search(observation_position + 1, used_tracks, selected_matches)
-            selected_matches.pop()
-            used_tracks.remove(candidate.track_index)
-
-        search(observation_position + 1, used_tracks, selected_matches)
-
-    search(0, set(), [])
-    return best_matches or []
+    selected: list[CandidateMatch] = []
+    used_tracks: set[int] = set()
+    used_observations: set[int] = set()
+    for candidate in sorted(candidates, key=lambda candidate: _assignment_cost(candidate, config)):
+        if candidate.track_index in used_tracks or candidate.observation_index in used_observations:
+            continue
+        selected.append(candidate)
+        used_tracks.add(candidate.track_index)
+        used_observations.add(candidate.observation_index)
+    return selected
 
 
 def _validate_assignment(
@@ -171,8 +126,17 @@ def assign_candidates(
     track_count: int,
     observation_count: int,
     config: TrackerPolicy,
-) -> Tuple[list[tuple[int, int]], Set[int], Set[int]]:
+    max_births_allowed: int | None = None,
+) -> Tuple[list[tuple[int, int]], set[int], set[int]]:
+    if max_births_allowed is None:
+        max_births_allowed = observation_count
+    if max_births_allowed < 0 or max_births_allowed > observation_count:
+        raise ValueError("max_births_allowed must be within observation count")
+
+    required_matches = observation_count - max_births_allowed
     selected = _optimal_assignment(candidates, config)
+    if len({candidate.observation_index for candidate in selected}) < required_matches:
+        raise ValueError("assignment failed to satisfy birth suppression match requirement")
     used_tracks = {candidate.track_index for candidate in selected}
     used_observations = {candidate.observation_index for candidate in selected}
     matches = [
@@ -186,5 +150,7 @@ def assign_candidates(
         raise ValueError("invalid unmatched track index")
     if not unmatched_observations.issubset(set(range(observation_count))):
         raise ValueError("invalid unmatched observation index")
+    if len(unmatched_observations) > max_births_allowed:
+        raise ValueError("assignment produced more births than birth suppression allows")
     _validate_assignment(matches, candidates, track_count, observation_count)
     return matches, unmatched_tracks, unmatched_observations

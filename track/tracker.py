@@ -3,7 +3,12 @@
 from math import isfinite
 
 from track.assignment import assign_candidates
-from track.candidate_builder import build_candidates, observation_sort_key, track_sort_key
+from track.candidate_builder import (
+    add_continuity_fallback_candidates,
+    build_candidates,
+    observation_sort_key,
+    track_sort_key,
+)
 from track.config import TrackV2Config
 from track.lifecycle import TENTATIVE, classify_track
 from track.lifecycle import append_observation, create_track
@@ -179,6 +184,15 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         classify_track(track, timestamp, normalized_config)
         for track in tracking_state["tracks"]
     ]
+    active_track_indices = [
+        index for index, status in enumerate(track_statuses) if status.eligible
+    ]
+    observation_count = len(ordered_observations)
+    if normalized_config.birth_suppression_strength >= 1.0:
+        max_births_allowed = max(0, observation_count - len(active_track_indices))
+    else:
+        max_births_allowed = observation_count
+
     candidates = build_candidates(
         tracking_state["tracks"],
         ordered_observations,
@@ -186,6 +200,16 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         normalized_config,
         track_statuses,
     )
+    if max_births_allowed < observation_count and active_track_indices:
+        candidates = add_continuity_fallback_candidates(
+            candidates,
+            tracking_state["tracks"],
+            ordered_observations,
+            timestamp,
+            normalized_config,
+            track_statuses,
+            active_track_indices,
+        )
     (
         matches,
         _unmatched_track_indices,
@@ -195,6 +219,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         len(tracking_state["tracks"]),
         len(ordered_observations),
         normalized_config,
+        max_births_allowed,
     )
     state_matches = _map_matches(
         matches,
@@ -203,6 +228,8 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     )
 
     remaining_observation_indices = set(unmatched_observation_indices)
+    if len(remaining_observation_indices) > max_births_allowed:
+        raise ValueError("birth suppression invariant violated")
 
     for state_track_index, observation_index in sorted(state_matches):
         append_observation(

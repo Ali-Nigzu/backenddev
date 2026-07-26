@@ -301,6 +301,7 @@ def test_track_v2_impossible_motion_creates_new_track():
         localization_jitter_px=0.0,
         motion_tolerance_growth_px_per_sec=0.0,
         max_physical_speed_px_per_sec=50.0,
+        birth_suppression_strength=0.0,
     )
     state = {"tracks": []}
 
@@ -320,6 +321,7 @@ def test_track_v2_appearance_does_not_rescue_impossible_motion():
         motion_tolerance_growth_px_per_sec=0.0,
         max_physical_speed_px_per_sec=50.0,
         appearance_tiebreak_enabled=True,
+        birth_suppression_strength=0.0,
     )
     state = {"tracks": []}
     embedding = {"values": [0.1, 0.9]}
@@ -418,7 +420,7 @@ def test_track_v2_slow_walker_survives_localization_wobble():
     assert len(state_a["tracks"][0]["path"]) == len(positions)
 
 
-def test_track_v2_same_timestamp_position_change_creates_new_track():
+def test_track_v2_same_timestamp_position_change_uses_fallback_when_births_suppressed():
     from track import Track, TrackV2Config
 
     config = TrackV2Config(
@@ -431,7 +433,8 @@ def test_track_v2_same_timestamp_position_change_creates_new_track():
     Track(state, _test_batch("f0", 1.0, [_test_observation("a", 1.0, 10.0, 10.0)]), config)
     Track(state, _test_batch("f0b", 1.0, [_test_observation("b", 1.0, 20.0, 10.0)]), config)
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 2
 
 
 def test_track_v2_continuity_beats_microscopic_motion_advantage():
@@ -453,4 +456,118 @@ def test_track_v2_continuity_beats_microscopic_motion_advantage():
     Track(state, _test_batch("f3", 0.3, [_test_observation("d", 0.3, 4.0, 0.0)]), config)
 
     track_one = next(track for track in state["tracks"] if track["track_id"] == "1")
-    assert len(track_one["path"]) == 3
+    assert len(track_one["path"]) == 4
+
+
+def _multi_observations(prefix, timestamp, count, offset_x=0.0, offset_y=0.0):
+    return [
+        _test_observation(
+            f"{prefix}-{index:02d}",
+            timestamp,
+            50.0 + index * 50.0 + offset_x,
+            100.0 + offset_y,
+        )
+        for index in range(count)
+    ]
+
+
+def _seed_confirmed_tracks(count=8, config=None):
+    from track import Track, TrackV2Config
+
+    config = config or TrackV2Config(confirmation_hits=2, detector_miss_tolerance_sec=2.0)
+    state = {"tracks": []}
+    Track(state, _test_batch("seed-0", 0.0, _multi_observations("seed0", 0.0, count)), config)
+    Track(state, _test_batch("seed-1", 0.1, _multi_observations("seed1", 0.1, count, offset_x=1.0)), config)
+    assert len(state["tracks"]) == count
+    return state, config
+
+
+def test_track_v2_birth_suppression_forbids_births_when_active_equals_observations():
+    from track import Track, TrackV2Config
+
+    state, config = _seed_confirmed_tracks(
+        8,
+        TrackV2Config(
+            confirmation_hits=2,
+            detector_miss_tolerance_sec=2.0,
+            motion_tolerance_px=8.0,
+            localization_jitter_px=2.0,
+            max_physical_speed_px_per_sec=30.0,
+        ),
+    )
+
+    Track(state, _test_batch("jitter", 0.2, _multi_observations("jitter", 0.2, 8, offset_x=20.0)), config)
+
+    assert len(state["tracks"]) == 8
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 3) == 8
+
+
+def test_track_v2_birth_suppression_forbids_births_when_active_exceeds_observations():
+    from track import Track
+
+    state, config = _seed_confirmed_tracks(8)
+
+    Track(state, _test_batch("partial", 0.2, _multi_observations("partial", 0.2, 7, offset_x=15.0)), config)
+
+    assert len(state["tracks"]) == 8
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 3) == 7
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 2) == 1
+
+
+def test_track_v2_birth_suppression_allows_only_overflow_births():
+    from track import Track
+
+    state, config = _seed_confirmed_tracks(8)
+
+    observations = _multi_observations("overflow", 0.2, 8, offset_x=2.0)
+    observations.extend(
+        [
+            _test_observation("overflow-new-08", 0.2, 600.0, 300.0),
+            _test_observation("overflow-new-09", 0.2, 650.0, 300.0),
+        ]
+    )
+    Track(state, _test_batch("overflow", 0.2, observations), config)
+
+    assert len(state["tracks"]) == 10
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 1) == 2
+
+
+def test_track_v2_birth_suppression_startup_still_births_when_no_active_tracks():
+    from track import Track, TrackV2Config
+
+    state = {"tracks": []}
+    Track(state, _test_batch("startup", 0.0, _multi_observations("startup", 0.0, 5)), TrackV2Config())
+
+    assert len(state["tracks"]) == 5
+    assert all(len(track["path"]) == 1 for track in state["tracks"])
+
+
+def test_track_v2_birth_suppression_restores_after_temporary_occlusion():
+    from track import Track, TrackV2Config
+
+    state, config = _seed_confirmed_tracks(
+        8,
+        TrackV2Config(confirmation_hits=2, detector_miss_tolerance_sec=2.0, motion_tolerance_px=10.0),
+    )
+
+    Track(state, _test_batch("occluded", 0.2, _multi_observations("occ", 0.2, 6, offset_x=5.0)), config)
+    Track(state, _test_batch("restored", 0.3, _multi_observations("restore", 0.3, 8, offset_x=8.0)), config)
+
+    assert len(state["tracks"]) == 8
+    assert sum(1 for track in state["tracks"] if len(track["path"]) >= 3) == 8
+
+
+def test_track_v2_rejects_invalid_birth_suppression_strength():
+    from track import Track, TrackV2Config
+
+    state = {"tracks": []}
+    try:
+        Track(
+            state,
+            _test_batch("bad", 0.0, [_test_observation("a", 0.0, 0.0, 0.0)]),
+            TrackV2Config(birth_suppression_strength=1.1),
+        )
+    except ValueError as exc:
+        assert "birth_suppression_strength" in str(exc)
+    else:
+        raise AssertionError("invalid birth_suppression_strength should fail loudly")
