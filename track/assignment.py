@@ -51,29 +51,15 @@ def _continuity_adjusted_motion(candidate: CandidateMatch, config: TrackerPolicy
     return candidate.motion_score
 
 
-def candidate_sort_key(candidate: CandidateMatch) -> tuple:
-    return (
-        _role_priority(candidate),
-        _CLASS_PENALTY.get(candidate.classification, 99),
-        round(candidate.motion_score, 12),
-        round(candidate.distance_prediction, 12),
-        round(candidate.distance_latest, 12),
-        round(candidate.speed_required, 12),
-        round(_appearance_cost(candidate), 12),
-        _track_key(candidate.track_id),
-        candidate.detection_id,
-        candidate.observation_index,
-    )
-
-
 def _assignment_cost(candidate: CandidateMatch, config: TrackerPolicy) -> tuple:
     return (
+        round(candidate.distance_latest, 12),
+        _role_priority(candidate),
         _CLASS_PENALTY.get(candidate.classification, 99),
         round(_continuity_adjusted_motion(candidate, config), 12),
         round(candidate.motion_score, 12),
-        _role_priority(candidate),
         round(candidate.distance_prediction, 12),
-        round(candidate.distance_latest, 12),
+        round(candidate.speed_required, 12),
         round(_appearance_cost(candidate), 12),
         _track_key(candidate.track_id),
         candidate.detection_id,

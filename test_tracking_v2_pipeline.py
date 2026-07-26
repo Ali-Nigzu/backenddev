@@ -51,16 +51,17 @@ def point_key(point: dict) -> tuple[float, float]:
 
 
 def confirmed_active_track_ids(tracking_state, observation_batch, config) -> set[str]:
-    """Return track IDs classified as confirmed active before this frame update."""
+    """Return track IDs classified as active before this frame update."""
 
-    from track.tracker import _partition_track_indices
+    from track.lifecycle import classify_track
+    from track.policy import build_policy
 
     timestamp = float(observation_batch["timestamp"])
-    active_indices, _tentative_indices = _partition_track_indices(
-        tracking_state["tracks"], timestamp, config
-    )
+    policy = build_policy(config)
     return {
-        str(tracking_state["tracks"][index]["track_id"]) for index in active_indices
+        str(track["track_id"])
+        for track in tracking_state["tracks"]
+        if classify_track(track, timestamp, policy).eligible
     }
 
 
@@ -757,3 +758,80 @@ def test_track_v2_replay_draw_returns_decision_counts():
     debug = draw_tracking_state(frame, state, batch, active_track_ids, previous_track_ids)
 
     assert debug == {"active": 0, "observations": 1, "matched": 0, "births": 1, "unmatched_active": 0}
+
+
+def test_track_v2_nearest_previous_position_dominates_appearance():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=1,
+        motion_tolerance_px=80.0,
+        localization_jitter_px=5.0,
+        max_physical_speed_px_per_sec=1000.0,
+        appearance_tiebreak_enabled=True,
+    )
+    state = {"tracks": []}
+    left_embedding = {"values": [1.0, 0.0]}
+    right_embedding = {"values": [0.0, 1.0]}
+    Track(
+        state,
+        _test_batch(
+            "seed",
+            0.0,
+            [
+                _test_observation("left", 0.0, 100.0, 100.0, embedding=left_embedding),
+                _test_observation("right", 0.0, 200.0, 100.0, embedding=right_embedding),
+            ],
+        ),
+        config,
+    )
+
+    Track(
+        state,
+        _test_batch(
+            "nearest-wins",
+            0.1,
+            [
+                _test_observation("near-left", 0.1, 105.0, 100.0, embedding=right_embedding),
+                _test_observation("near-right", 0.1, 195.0, 100.0, embedding=left_embedding),
+            ],
+        ),
+        config,
+    )
+
+    paths = {track["track_id"]: track["path"][-1]["center"] for track in state["tracks"]}
+    assert paths["1"] == {"x": 105.0, "y": 100.0}
+    assert paths["2"] == {"x": 195.0, "y": 100.0}
+
+
+def test_track_v2_hard_suppression_active_greater_than_observations_no_birth_under_heavy_jitter():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=2,
+        detector_miss_tolerance_sec=2.0,
+        motion_tolerance_px=2.0,
+        localization_jitter_px=0.0,
+        motion_tolerance_growth_px_per_sec=0.0,
+        max_physical_speed_px_per_sec=2.0,
+        birth_suppression_strength=1.0,
+    )
+    state, _ = _seed_confirmed_tracks(5, TrackV2Config(confirmation_hits=2, detector_miss_tolerance_sec=2.0))
+
+    Track(
+        state,
+        _test_batch(
+            "heavy-jitter-partial",
+            0.2,
+            [
+                _test_observation("j0", 0.2, 500.0, 400.0),
+                _test_observation("j1", 0.2, 550.0, 400.0),
+                _test_observation("j2", 0.2, 600.0, 400.0),
+            ],
+        ),
+        config,
+    )
+
+    assert len(state["tracks"]) == 5
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 3) == 3
+    assert sum(1 for track in state["tracks"] if len(track["path"]) == 2) == 2

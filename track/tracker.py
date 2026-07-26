@@ -10,7 +10,7 @@ from track.candidate_builder import (
     track_sort_key,
 )
 from track.config import TrackV2Config
-from track.lifecycle import TENTATIVE, classify_track
+from track.lifecycle import classify_track
 from track.lifecycle import append_observation, create_track
 from track.models import (
     REQUIRED_BBOX_FIELDS,
@@ -130,34 +130,6 @@ def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
 
 
-def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config) -> tuple[list[int], list[int]]:
-    """Compatibility helper returning lifecycle-qualified confirmed and tentative indices."""
-
-    normalized_config = build_policy(config)
-    active_indices: list[int] = []
-    tentative_indices: list[int] = []
-    for index, track in enumerate(tracks):
-        facts = classify_track(track, timestamp, normalized_config)
-        if not facts.eligible:
-            continue
-        if facts.confirmed:
-            active_indices.append(index)
-        elif facts.state == TENTATIVE:
-            tentative_indices.append(index)
-    return active_indices, tentative_indices
-
-
-def _map_matches(
-    matches: list[tuple[int, int]],
-    track_indices: list[int],
-    observation_indices,
-) -> list[tuple[int, int]]:
-    return [
-        (track_indices[track_index], observation_indices[observation_index])
-        for track_index, observation_index in matches
-    ]
-
-
 def Track(tracking_state, observation_batch, config: TrackV2Config | None = None):
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 
@@ -178,8 +150,6 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     ]
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
-    track_indices = list(range(len(tracking_state["tracks"])))
-
     track_statuses = [
         classify_track(track, timestamp, normalized_config)
         for track in tracking_state["tracks"]
@@ -222,11 +192,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         normalized_config,
         max_births_allowed,
     )
-    state_matches = _map_matches(
-        matches,
-        track_indices,
-        range(len(ordered_observations)),
-    )
+    state_matches = matches
 
     remaining_observation_indices = set(unmatched_observation_indices)
     if len(remaining_observation_indices) > max_births_allowed:

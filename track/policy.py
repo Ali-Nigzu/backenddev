@@ -35,46 +35,6 @@ class TrackerPolicy:
     max_history_points: int
     epsilon: float
 
-    @property
-    def detector_miss_tolerance_sec(self) -> float:
-        """Compatibility name for older private callers."""
-        return self.confirmed_max_missed_sec
-
-    @property
-    def tentative_tolerance_sec(self) -> float:
-        """Compatibility name for older private callers."""
-        return self.tentative_max_age_sec
-
-    @property
-    def motion_tolerance_px(self) -> float:
-        """Compatibility name for the base position uncertainty."""
-        return self.base_position_uncertainty_px
-
-    @property
-    def motion_tolerance_growth_px_per_sec(self) -> float:
-        """Compatibility name for miss uncertainty growth."""
-        return self.miss_uncertainty_growth_px_per_sec
-
-    @property
-    def max_physical_speed_px_per_sec(self) -> float:
-        """Compatibility name for hard physical speed."""
-        return self.max_speed_px_per_sec
-
-    @property
-    def weak_match_max_motion_score(self) -> float:
-        """Compatibility name for confirmed weak matching."""
-        return self.weak_confirmed_max_motion_score
-
-    @property
-    def continuity_strength(self) -> float:
-        """Compatibility name for assignment continuity bias."""
-        return self.continuity_bias
-
-    @property
-    def allow_weak_confirmed_matching(self) -> bool:
-        """Compatibility name retained for internal shims."""
-        return self.weak_confirmed_max_motion_score > 1.0
-
 
 def _first_configured(*values: Any) -> Any:
     for value in values:
