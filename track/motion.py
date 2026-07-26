@@ -1,4 +1,10 @@
-"""Pure deterministic Track V2 motion maths."""
+"""Pure deterministic Track V2 motion maths.
+
+Motion owns prediction, velocity, uncertainty, speed, eligibility, distance, and
+rejection reasons. It does not know about assignment takeover rules or
+appearance. The estimator is an alpha-beta style filter reconstructed from the
+public path history for each assessment; no hidden state is persisted.
+"""
 
 import math
 from dataclasses import dataclass
@@ -18,10 +24,21 @@ class MotionAssessment:
     predicted_position: dict
     velocity: dict
     rejection_reason: str
+    allowed_error: float
+
+
+@dataclass(frozen=True)
+class MotionEstimate:
+    position: dict
+    velocity: dict
 
 
 def _xy(center) -> Tuple[float, float]:
     return float(center["x"]), float(center["y"])
+
+
+def _point(x: float, y: float) -> dict:
+    return {"x": float(x), "y": float(y)}
 
 
 def distance(a, b) -> float:
@@ -32,58 +49,106 @@ def distance(a, b) -> float:
     return math.sqrt(dx * dx + dy * dy)
 
 
-def derive_velocity(path, policy: TrackerPolicy) -> dict:
-    if len(path) < 2:
-        return {"x": 0.0, "y": 0.0}
+def _clamp_velocity(vx: float, vy: float, policy: TrackerPolicy) -> tuple[float, float]:
+    speed = math.sqrt(vx * vx + vy * vy)
+    if speed > policy.max_speed_px_per_sec and speed > policy.epsilon:
+        scale = policy.max_speed_px_per_sec / speed
+        return vx * scale, vy * scale
+    return vx, vy
 
-    weighted_x = 0.0
-    weighted_y = 0.0
-    total_weight = 0.0
-    segment_count = 0
-    recent_start = max(0, len(path) - 5)
-    previous = path[recent_start]
-    for latest_index in range(recent_start + 1, len(path)):
-        latest = path[latest_index]
-        dt = float(latest["timestamp"]) - float(previous["timestamp"])
+
+def estimate_motion(path, policy: TrackerPolicy) -> MotionEstimate:
+    """Reconstruct a smoothed deterministic alpha-beta estimate from path."""
+
+    if not path:
+        raise ValueError("motion estimation requires a non-empty path")
+
+    start = max(0, len(path) - int(policy.max_history_points))
+    first = path[start]
+    x, y = _xy(first["center"])
+    vx = 0.0
+    vy = 0.0
+    previous_timestamp = float(first["timestamp"])
+
+    for point in path[start + 1 :]:
+        timestamp = float(point["timestamp"])
+        dt = timestamp - previous_timestamp
+        observed_x, observed_y = _xy(point["center"])
         if dt <= policy.epsilon:
-            previous = latest
+            # Same-frame duplicate path points are treated as measurement updates
+            # without velocity acceleration.
+            residual_x = observed_x - x
+            residual_y = observed_y - y
+            x += policy.alpha_beta_position_gain * residual_x
+            y += policy.alpha_beta_position_gain * residual_y
+            previous_timestamp = timestamp
             continue
 
-        prev_x, prev_y = _xy(previous["center"])
-        latest_x, latest_y = _xy(latest["center"])
-        vx = (latest_x - prev_x) / dt
-        vy = (latest_y - prev_y) / dt
-        speed = math.sqrt(vx * vx + vy * vy)
-        if speed > policy.max_physical_speed_px_per_sec and speed > policy.epsilon:
-            scale = policy.max_physical_speed_px_per_sec / speed
-            vx *= scale
-            vy *= scale
+        predicted_x = x + vx * dt
+        predicted_y = y + vy * dt
+        residual_x = observed_x - predicted_x
+        residual_y = observed_y - predicted_y
 
-        segment_count += 1
-        weight = float(segment_count)
-        weighted_x += vx * weight
-        weighted_y += vy * weight
-        total_weight += weight
-        previous = latest
+        x = predicted_x + policy.alpha_beta_position_gain * residual_x
+        y = predicted_y + policy.alpha_beta_position_gain * residual_y
+        vx += policy.alpha_beta_velocity_gain * residual_x / dt
+        vy += policy.alpha_beta_velocity_gain * residual_y / dt
+        vx, vy = _clamp_velocity(vx, vy, policy)
+        previous_timestamp = timestamp
 
-    if segment_count == 0:
-        return {"x": 0.0, "y": 0.0}
+    return MotionEstimate(position=_point(x, y), velocity=_point(vx, vy))
 
-    return {"x": weighted_x / total_weight, "y": weighted_y / total_weight}
+
+def derive_velocity(path, policy: TrackerPolicy) -> dict:
+    """Compatibility helper returning the reconstructed velocity only."""
+
+    return estimate_motion(path, policy).velocity
 
 
 def predict_center(track, timestamp: float, policy: TrackerPolicy, velocity: dict | None = None) -> dict:
-    latest = track["path"][-1]
-    latest_x, latest_y = _xy(latest["center"])
-    dt = float(timestamp) - float(latest["timestamp"])
+    latest_timestamp = float(track["path"][-1]["timestamp"])
+    estimate = estimate_motion(track["path"], policy)
+    dt = float(timestamp) - latest_timestamp
     if dt <= policy.epsilon:
-        return {"x": latest_x, "y": latest_y}
+        return dict(estimate.position)
 
-    velocity = velocity if velocity is not None else derive_velocity(track["path"], policy)
-    return {
-        "x": latest_x + float(velocity["x"]) * dt,
-        "y": latest_y + float(velocity["y"]) * dt,
-    }
+    chosen_velocity = velocity if velocity is not None else estimate.velocity
+    return _point(
+        float(estimate.position["x"]) + float(chosen_velocity["x"]) * dt,
+        float(estimate.position["y"]) + float(chosen_velocity["y"]) * dt,
+    )
+
+
+def _allowed_error(status: TrackStatus, policy: TrackerPolicy) -> float:
+    return max(
+        policy.epsilon,
+        policy.base_position_uncertainty_px
+        + policy.localization_jitter_px
+        + policy.miss_uncertainty_growth_px_per_sec * status.missing_seconds,
+    )
+
+
+def _ineligible(
+    reason: str,
+    score: float,
+    predicted_position: dict,
+    velocity: dict,
+    distance_prediction: float = float("inf"),
+    distance_latest: float = float("inf"),
+    speed_required: float = float("inf"),
+    allowed_error: float = 0.0,
+) -> MotionAssessment:
+    return MotionAssessment(
+        False,
+        score,
+        distance_prediction,
+        distance_latest,
+        speed_required,
+        predicted_position,
+        velocity,
+        reason,
+        allowed_error,
+    )
 
 
 def assess_motion(
@@ -93,58 +158,72 @@ def assess_motion(
     timestamp: float,
     policy: TrackerPolicy,
 ) -> MotionAssessment:
-    velocity = derive_velocity(track["path"], policy)
-    predicted_position = predict_center(track, timestamp, policy, velocity)
+    estimate = estimate_motion(track["path"], policy)
+    latest_timestamp = float(track["path"][-1]["timestamp"])
+    dt = float(timestamp) - latest_timestamp
+    predicted_position = predict_center(track, timestamp, policy, estimate.velocity)
+    allowed_error = _allowed_error(status, policy)
 
-    if status.age_seconds < -policy.epsilon:
-        return MotionAssessment(False, float("inf"), float("inf"), float("inf"), float("inf"), predicted_position, velocity, "negative_time_gap")
+    if status.age_seconds < -policy.epsilon or dt < -policy.epsilon:
+        return _ineligible("negative_time_gap", float("inf"), predicted_position, estimate.velocity, allowed_error=allowed_error)
     if not status.eligible:
-        return MotionAssessment(False, float("inf"), float("inf"), float("inf"), float("inf"), predicted_position, velocity, "outside_track_window")
+        return _ineligible("outside_track_window", float("inf"), predicted_position, estimate.velocity, allowed_error=allowed_error)
 
     distance_prediction = distance(predicted_position, observation["center"])
     distance_latest = distance(status.latest_position, observation["center"])
-    safe_gap = max(status.age_seconds, policy.epsilon)
-    speed_required = distance_latest / safe_gap
 
-    if speed_required > policy.max_physical_speed_px_per_sec:
-        return MotionAssessment(
-            False,
-            float("inf"),
-            distance_prediction,
-            distance_latest,
-            speed_required,
-            predicted_position,
-            velocity,
-            "speed_limit",
-        )
+    if dt <= policy.epsilon:
+        speed_required = 0.0 if distance_latest <= policy.localization_jitter_px else float("inf")
+        if speed_required == float("inf"):
+            return _ineligible(
+                "same_timestamp_position_change",
+                float("inf"),
+                predicted_position,
+                estimate.velocity,
+                distance_prediction,
+                distance_latest,
+                speed_required,
+                allowed_error,
+            )
+    else:
+        speed_required = distance_latest / dt
+        if speed_required > policy.max_speed_px_per_sec:
+            return _ineligible(
+                "speed_limit",
+                float("inf"),
+                predicted_position,
+                estimate.velocity,
+                distance_prediction,
+                distance_latest,
+                speed_required,
+                allowed_error,
+            )
 
-    tolerance = (
-        policy.motion_tolerance_px
-        + policy.localization_jitter_px
-        + policy.motion_tolerance_growth_px_per_sec * status.missing_seconds
-    )
-    normalized_prediction = distance_prediction / max(tolerance, policy.epsilon)
-    normalized_latest = distance_latest / max(tolerance, policy.epsilon)
-    normalized_speed = speed_required / max(policy.max_physical_speed_px_per_sec, policy.epsilon)
-    motion_score = max(min(normalized_prediction, normalized_latest), normalized_speed)
-
-    if motion_score > 1.0 and not (
-        status.confirmed
-        and policy.allow_weak_confirmed_matching
-        and motion_score <= policy.weak_match_max_motion_score
-    ):
-        return MotionAssessment(
-            False,
+    motion_score = distance_prediction / allowed_error
+    weak_limit = policy.weak_confirmed_max_motion_score if status.confirmed else 1.0
+    if motion_score > weak_limit:
+        return _ineligible(
+            "prediction_gate",
             motion_score,
+            predicted_position,
+            estimate.velocity,
             distance_prediction,
             distance_latest,
             speed_required,
-            predicted_position,
-            velocity,
-            "motion_tolerance",
+            allowed_error,
         )
 
-    return MotionAssessment(True, motion_score, distance_prediction, distance_latest, speed_required, predicted_position, velocity, "eligible")
+    return MotionAssessment(
+        True,
+        motion_score,
+        distance_prediction,
+        distance_latest,
+        speed_required,
+        predicted_position,
+        estimate.velocity,
+        "eligible",
+        allowed_error,
+    )
 
 
 # Backwards-compatible name for callers that still import the old helper.

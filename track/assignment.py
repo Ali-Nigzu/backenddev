@@ -1,19 +1,30 @@
-"""Deterministic continuity-first Track V2 assignment."""
+"""Deterministic continuity-first Track V2 assignment.
+
+Assignment receives only motion-eligible candidates. It owns continuity bias and
+takeover policy, but it never creates eligibility for impossible motion.
+"""
 
 from typing import Sequence, Set, Tuple
 
-from track.candidate_builder import CandidateMatch, _CLASS_PENALTY, numeric_track_id
+from track.candidate_builder import (
+    CandidateMatch,
+    PROTECTED_CONTINUATION,
+    REASSOCIATION_CONTINUATION,
+    TENTATIVE_CONTINUATION,
+    _CLASS_PENALTY,
+    numeric_track_id,
+)
 from track.policy import TrackerPolicy
+
+_ROLE_PRIORITY = {
+    PROTECTED_CONTINUATION: 0,
+    REASSOCIATION_CONTINUATION: 1,
+    TENTATIVE_CONTINUATION: 2,
+}
 
 
 def _role_priority(candidate: CandidateMatch) -> int:
-    if candidate.ownership_role == "protected_continuation":
-        return 0
-    if candidate.ownership_role == "reassociation_continuation":
-        return 1
-    if candidate.ownership_role == "tentative_continuation":
-        return 2
-    return 3
+    return _ROLE_PRIORITY.get(candidate.ownership_role, 99)
 
 
 def _appearance_cost(candidate: CandidateMatch) -> float:
@@ -22,9 +33,24 @@ def _appearance_cost(candidate: CandidateMatch) -> float:
     return 1.0 - float(candidate.appearance_score)
 
 
+def _track_key(track_id: str) -> tuple:
+    numeric = numeric_track_id(track_id)
+    return (0, numeric, track_id) if numeric is not None else (1, track_id)
+
+
+def _continuity_adjusted_motion(candidate: CandidateMatch, config: TrackerPolicy) -> float:
+    # Takeover margin and bias affect choice among already plausible candidates
+    # only. A protected incumbent can be beaten, but a challenger must be
+    # clearly better in motion score instead of microscopically better.
+    if candidate.ownership_role == PROTECTED_CONTINUATION:
+        return max(0.0, candidate.motion_score / (1.0 + config.takeover_margin) - config.continuity_bias)
+    if candidate.ownership_role == REASSOCIATION_CONTINUATION:
+        margin = 1.0 + (config.takeover_margin * 0.5)
+        return max(0.0, candidate.motion_score / margin - (config.continuity_bias * 0.5))
+    return candidate.motion_score
+
+
 def candidate_sort_key(candidate: CandidateMatch) -> tuple:
-    numeric = numeric_track_id(candidate.track_id)
-    track_key = (0, numeric, candidate.track_id) if numeric is not None else (1, candidate.track_id)
     return (
         _role_priority(candidate),
         _CLASS_PENALTY.get(candidate.classification, 99),
@@ -33,91 +59,58 @@ def candidate_sort_key(candidate: CandidateMatch) -> tuple:
         round(candidate.distance_latest, 12),
         round(candidate.speed_required, 12),
         round(_appearance_cost(candidate), 12),
-        track_key,
+        _track_key(candidate.track_id),
         candidate.detection_id,
         candidate.observation_index,
     )
 
 
-def _track_claim_key(candidate: CandidateMatch) -> tuple:
+def _assignment_cost(candidate: CandidateMatch, config: TrackerPolicy) -> tuple:
     return (
-        _role_priority(candidate),
         _CLASS_PENALTY.get(candidate.classification, 99),
+        round(_continuity_adjusted_motion(candidate, config), 12),
         round(candidate.motion_score, 12),
+        _role_priority(candidate),
         round(candidate.distance_prediction, 12),
         round(candidate.distance_latest, 12),
         round(_appearance_cost(candidate), 12),
+        _track_key(candidate.track_id),
         candidate.detection_id,
         candidate.observation_index,
     )
 
 
-def _is_defensible_first_claim(
-    candidate: CandidateMatch,
-    by_observation: dict[int, list[CandidateMatch]],
+def _better_assignment(
+    candidate_matches: list[CandidateMatch],
+    best_matches: list[CandidateMatch] | None,
     config: TrackerPolicy,
 ) -> bool:
-    peers = by_observation.get(candidate.observation_index, ())
-    if not peers:
-        return True
-    best_peer_cost = min(peer.motion_score for peer in peers)
-    allowed_cost = best_peer_cost * (1.0 + config.takeover_margin) + config.continuity_strength
-    return candidate.motion_score <= allowed_cost
-
-
-def _claim_role(
-    role: str,
-    by_track: dict[int, list[CandidateMatch]],
-    by_observation: dict[int, list[CandidateMatch]],
-    selected: list[CandidateMatch],
-    used_tracks: Set[int],
-    used_observations: Set[int],
-    config: TrackerPolicy,
-) -> None:
-    for track_index in sorted(by_track):
-        if track_index in used_tracks:
-            continue
-        track_candidates = [
-            candidate
-            for candidate in by_track[track_index]
-            if candidate.ownership_role == role
-            and candidate.observation_index not in used_observations
-            and _is_defensible_first_claim(candidate, by_observation, config)
-        ]
-        if not track_candidates:
-            continue
-        candidate = min(track_candidates, key=_track_claim_key)
-        selected.append(candidate)
-        used_tracks.add(candidate.track_index)
-        used_observations.add(candidate.observation_index)
-
-
-def _better_assignment(candidate_matches: list[CandidateMatch], best_matches: list[CandidateMatch] | None) -> bool:
     if best_matches is None:
         return True
 
     def score(matches: list[CandidateMatch]) -> tuple:
-        ordered = sorted(matches, key=candidate_sort_key)
+        ordered = sorted(matches, key=lambda match: _assignment_cost(match, config))
         return (
             -len(ordered),
-            sum(_role_priority(match) for match in ordered),
             sum(_CLASS_PENALTY.get(match.classification, 99) for match in ordered),
+            round(sum(_continuity_adjusted_motion(match, config) for match in ordered), 12),
+            sum(_role_priority(match) for match in ordered),
             round(sum(match.motion_score for match in ordered), 12),
             round(sum(_appearance_cost(match) for match in ordered), 12),
-            tuple(candidate_sort_key(match) for match in ordered),
+            tuple(_assignment_cost(match, config) for match in ordered),
         )
 
     return score(candidate_matches) < score(best_matches)
 
 
-def _optimal_remaining_assignment(candidates: list[CandidateMatch]) -> list[CandidateMatch]:
+def _optimal_assignment(candidates: Sequence[CandidateMatch], config: TrackerPolicy) -> list[CandidateMatch]:
     by_observation: dict[int, list[CandidateMatch]] = {}
     for candidate in candidates:
         by_observation.setdefault(candidate.observation_index, []).append(candidate)
 
     ordered_observation_indices = sorted(by_observation)
     for observation_index in ordered_observation_indices:
-        by_observation[observation_index].sort(key=candidate_sort_key)
+        by_observation[observation_index].sort(key=lambda candidate: _assignment_cost(candidate, config))
 
     best_matches: list[CandidateMatch] | None = None
 
@@ -127,7 +120,7 @@ def _optimal_remaining_assignment(candidates: list[CandidateMatch]) -> list[Cand
         if best_matches is not None and len(selected_matches) + remaining < len(best_matches):
             return
         if observation_position >= len(ordered_observation_indices):
-            if _better_assignment(selected_matches, best_matches):
+            if _better_assignment(selected_matches, best_matches, config):
                 best_matches = list(selected_matches)
             return
 
@@ -147,7 +140,6 @@ def _optimal_remaining_assignment(candidates: list[CandidateMatch]) -> list[Cand
     return best_matches or []
 
 
-
 def _validate_assignment(
     matches: list[tuple[int, int]],
     candidates: Sequence[CandidateMatch],
@@ -155,6 +147,8 @@ def _validate_assignment(
     observation_count: int,
 ) -> None:
     candidate_pairs = {(candidate.track_index, candidate.observation_index) for candidate in candidates}
+    if len(candidate_pairs) != len(candidates):
+        raise ValueError("duplicate candidate pair supplied to assignment")
     seen_tracks: set[int] = set()
     seen_observations: set[int] = set()
     for track_index, observation_index in matches:
@@ -171,40 +165,26 @@ def _validate_assignment(
         seen_tracks.add(track_index)
         seen_observations.add(observation_index)
 
+
 def assign_candidates(
     candidates: Sequence[CandidateMatch],
     track_count: int,
     observation_count: int,
     config: TrackerPolicy,
 ) -> Tuple[list[tuple[int, int]], Set[int], Set[int]]:
-    by_track: dict[int, list[CandidateMatch]] = {}
-    by_observation: dict[int, list[CandidateMatch]] = {}
-    for candidate in candidates:
-        by_track.setdefault(candidate.track_index, []).append(candidate)
-        by_observation.setdefault(candidate.observation_index, []).append(candidate)
-
-    selected: list[CandidateMatch] = []
-    used_tracks: Set[int] = set()
-    used_observations: Set[int] = set()
-
-    _claim_role("protected_continuation", by_track, by_observation, selected, used_tracks, used_observations, config)
-    _claim_role("reassociation_continuation", by_track, by_observation, selected, used_tracks, used_observations, config)
-
-    remaining = [
-        candidate
-        for candidate in candidates
-        if candidate.track_index not in used_tracks and candidate.observation_index not in used_observations
-    ]
-    selected.extend(_optimal_remaining_assignment(remaining))
-
+    selected = _optimal_assignment(candidates, config)
     used_tracks = {candidate.track_index for candidate in selected}
     used_observations = {candidate.observation_index for candidate in selected}
     matches = [
         (candidate.track_index, candidate.observation_index)
-        for candidate in sorted(selected, key=candidate_sort_key)
+        for candidate in sorted(selected, key=lambda candidate: _assignment_cost(candidate, config))
     ]
 
     unmatched_tracks = set(range(track_count)) - used_tracks
     unmatched_observations = set(range(observation_count)) - used_observations
+    if not unmatched_tracks.issubset(set(range(track_count))):
+        raise ValueError("invalid unmatched track index")
+    if not unmatched_observations.issubset(set(range(observation_count))):
+        raise ValueError("invalid unmatched observation index")
     _validate_assignment(matches, candidates, track_count, observation_count)
     return matches, unmatched_tracks, unmatched_observations

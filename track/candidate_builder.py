@@ -1,4 +1,9 @@
-"""Observation-specific Track V2 candidate packaging."""
+"""Observation-specific Track V2 candidate packaging.
+
+Candidates represent physically believable explanations only. Candidate
+building never performs assignment policy and never lets appearance create
+eligibility.
+"""
 
 import math
 from dataclasses import dataclass
@@ -9,12 +14,16 @@ from track.models import vector_values
 from track.motion import MotionAssessment, assess_motion
 from track.policy import TrackerPolicy
 
-STRONG = "strong"
 NORMAL = "normal"
 WEAK = "weak"
 IMPOSSIBLE = "impossible"
 
-_CLASS_PENALTY = {STRONG: 0, NORMAL: 1, WEAK: 3}
+_CLASS_PENALTY = {NORMAL: 0, WEAK: 1}
+
+PROTECTED_CONTINUATION = "protected_continuation"
+REASSOCIATION_CONTINUATION = "reassociation_continuation"
+TENTATIVE_CONTINUATION = "tentative_continuation"
+STALE_CONTINUATION = "stale"
 
 
 @dataclass(frozen=True)
@@ -70,24 +79,44 @@ def appearance_evidence(a, b) -> float | None:
     return _embedding_similarity_values(av, bv)
 
 
-def _classify_motion(motion: MotionAssessment, status: TrackStatus, policy: TrackerPolicy) -> str:
+def _classify_motion(motion: MotionAssessment) -> str:
     if not motion.eligible:
         return IMPOSSIBLE
     if motion.motion_score <= 1.0:
         return NORMAL
-    if status.confirmed and policy.allow_weak_confirmed_matching:
-        return WEAK
-    return IMPOSSIBLE
+    return WEAK
 
 
 def _ownership_role(status: TrackStatus) -> str:
     if status.state == CONFIRMED_LIVE:
-        return "protected_continuation"
+        return PROTECTED_CONTINUATION
     if status.state == CONFIRMED_MISSING:
-        return "reassociation_continuation"
+        return REASSOCIATION_CONTINUATION
     if status.state == TENTATIVE:
-        return "tentative_continuation"
-    return "stale"
+        return TENTATIVE_CONTINUATION
+    return STALE_CONTINUATION
+
+
+def _validate_candidate(candidate: CandidateMatch, track_count: int, observation_count: int) -> None:
+    if candidate.track_index < 0 or candidate.track_index >= track_count:
+        raise ValueError("candidate references nonexistent track")
+    if candidate.observation_index < 0 or candidate.observation_index >= observation_count:
+        raise ValueError("candidate references nonexistent observation")
+    numeric_values = (
+        candidate.motion_score,
+        candidate.distance_prediction,
+        candidate.distance_latest,
+        candidate.speed_required,
+    )
+    for value in numeric_values:
+        if not math.isfinite(float(value)):
+            raise ValueError("eligible candidate contains a non-finite motion value")
+    if candidate.appearance_score is not None and not math.isfinite(float(candidate.appearance_score)):
+        raise ValueError("candidate appearance score must be finite")
+    if candidate.classification not in _CLASS_PENALTY:
+        raise ValueError("candidate classification must be eligible")
+    if candidate.ownership_role == STALE_CONTINUATION:
+        raise ValueError("stale tracks must not produce candidates")
 
 
 def build_candidate(
@@ -99,7 +128,7 @@ def build_candidate(
     motion: MotionAssessment,
     policy: TrackerPolicy,
 ) -> CandidateMatch | None:
-    classification = _classify_motion(motion, status, policy)
+    classification = _classify_motion(motion)
     if classification == IMPOSSIBLE:
         return None
 
@@ -135,6 +164,7 @@ def build_candidates(
         raise ValueError("track_statuses length must match ordered_tracks length")
 
     candidates: list[CandidateMatch] = []
+    seen_pairs: set[tuple[int, int]] = set()
     for observation_index, observation in enumerate(ordered_observations):
         for track_index, track in enumerate(ordered_tracks):
             status = track_statuses[track_index]
@@ -148,7 +178,13 @@ def build_candidates(
                 motion,
                 policy,
             )
-            if candidate is not None:
-                candidates.append(candidate)
+            if candidate is None:
+                continue
+            pair = (candidate.track_index, candidate.observation_index)
+            if pair in seen_pairs:
+                raise ValueError("duplicate candidate pair generated")
+            seen_pairs.add(pair)
+            _validate_candidate(candidate, len(ordered_tracks), len(ordered_observations))
+            candidates.append(candidate)
 
     return candidates

@@ -342,3 +342,115 @@ def test_track_v2_rejects_future_track_state_loudly():
         assert "newer than the observation batch" in str(exc)
     else:
         raise AssertionError("future track state should fail loudly")
+
+
+def test_track_v2_standing_detector_jitter_keeps_one_identity():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        motion_tolerance_px=12.0,
+        localization_jitter_px=8.0,
+        motion_tolerance_growth_px_per_sec=4.0,
+        max_physical_speed_px_per_sec=120.0,
+    )
+    state = {"tracks": []}
+    positions = [
+        (100.0, 100.0),
+        (102.5, 98.0),
+        (99.5, 101.5),
+        (101.0, 99.0),
+        (100.5, 100.5),
+    ]
+
+    for index, (x, y) in enumerate(positions):
+        Track(state, _test_batch(f"f{index}", index / 10.0, [_test_observation(index, index / 10.0, x, y)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == len(positions)
+
+
+def test_track_v2_short_missed_detection_keeps_confirmed_identity():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=2,
+        detector_miss_tolerance_sec=1.0,
+        motion_tolerance_px=20.0,
+        localization_jitter_px=5.0,
+        motion_tolerance_growth_px_per_sec=20.0,
+        max_physical_speed_px_per_sec=150.0,
+    )
+    state = {"tracks": []}
+
+    Track(state, _test_batch("f0", 0.0, [_test_observation("a", 0.0, 50.0, 50.0)]), config)
+    Track(state, _test_batch("f1", 0.1, [_test_observation("b", 0.1, 52.0, 50.0)]), config)
+    Track(state, _test_batch("f2", 0.2, []), config)
+    Track(state, _test_batch("f3", 0.5, [_test_observation("c", 0.5, 58.0, 51.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+
+
+def test_track_v2_slow_walker_survives_localization_wobble():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        motion_tolerance_px=15.0,
+        localization_jitter_px=6.0,
+        motion_tolerance_growth_px_per_sec=8.0,
+        max_physical_speed_px_per_sec=140.0,
+    )
+    state_a = {"tracks": []}
+    state_b = {"tracks": []}
+    positions = [(20.0, 20.0), (23.0, 21.0), (25.0, 19.5), (29.0, 21.0), (32.0, 20.0)]
+    batches = [
+        _test_batch(f"f{index}", index * 0.2, [_test_observation(chr(97 + index), index * 0.2, x, y)])
+        for index, (x, y) in enumerate(positions)
+    ]
+
+    for batch in batches:
+        Track(state_a, batch, config)
+    for batch in batches:
+        Track(state_b, batch, config)
+
+    assert state_a == state_b
+    assert [track["track_id"] for track in state_a["tracks"]] == ["1"]
+    assert len(state_a["tracks"][0]["path"]) == len(positions)
+
+
+def test_track_v2_same_timestamp_position_change_creates_new_track():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        motion_tolerance_px=20.0,
+        localization_jitter_px=2.0,
+        max_physical_speed_px_per_sec=500.0,
+    )
+    state = {"tracks": []}
+
+    Track(state, _test_batch("f0", 1.0, [_test_observation("a", 1.0, 10.0, 10.0)]), config)
+    Track(state, _test_batch("f0b", 1.0, [_test_observation("b", 1.0, 20.0, 10.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+
+
+def test_track_v2_continuity_beats_microscopic_motion_advantage():
+    from track import Track, TrackV2Config
+
+    config = TrackV2Config(
+        confirmation_hits=1,
+        motion_tolerance_px=30.0,
+        localization_jitter_px=10.0,
+        continuity_strength=0.2,
+        takeover_margin=0.5,
+        max_physical_speed_px_per_sec=200.0,
+    )
+    state = {"tracks": []}
+    Track(state, _test_batch("f0", 0.0, [_test_observation("a", 0.0, 0.0, 0.0)]), config)
+    Track(state, _test_batch("f1", 0.1, [_test_observation("b", 0.1, 2.0, 0.0)]), config)
+    # Create a newer but less continuous challenger close to the next observation.
+    Track(state, _test_batch("f2", 0.2, [_test_observation("c", 0.2, 100.0, 0.0)]), config)
+    Track(state, _test_batch("f3", 0.3, [_test_observation("d", 0.3, 4.0, 0.0)]), config)
+
+    track_one = next(track for track in state["tracks"] if track["track_id"] == "1")
+    assert len(track_one["path"]) == 3
