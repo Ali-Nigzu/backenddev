@@ -2,56 +2,40 @@
 
 from dataclasses import dataclass
 
-from track.policy import TrackerPolicy
+from track.config import TrackV2Config
 
+ACTIVE = "active"
 TENTATIVE = "tentative"
-CONFIRMED_LIVE = "confirmed_live"
-CONFIRMED_MISSING = "confirmed_missing"
-STALE = "stale"
+INACTIVE = "inactive"
 
 
 @dataclass(frozen=True)
 class TrackStatus:
-    """Lifecycle facts derived exactly once for a track at a timestamp."""
+    """Derived lifecycle state for one track at one timestamp."""
 
-    confirmed: bool
-    age_seconds: float
-    missing_seconds: float
-    eligible: bool
     state: str
-    latest_position: dict
+    active: bool
+    tentative: bool
+    eligible: bool
+    age_seconds: float
+    history_length: int
 
 
-def classify_track(track: dict, timestamp: float, policy: TrackerPolicy) -> TrackStatus:
-    latest = track["path"][-1]
-    latest_timestamp = float(latest["timestamp"])
+def classify_track(track: dict, timestamp: float, config: TrackV2Config) -> TrackStatus:
+    latest_timestamp = float(track["path"][-1]["timestamp"])
     age_seconds = float(timestamp) - latest_timestamp
-    if age_seconds < -policy.epsilon:
+    if age_seconds < 0:
         raise ValueError("Track path contains a timestamp newer than the observation batch")
 
-    confirmed = len(track["path"]) >= int(policy.confirmation_hits)
-    missing_seconds = max(0.0, age_seconds)
+    history_length = len(track["path"])
+    if history_length >= int(config.confirmation_hits):
+        active = age_seconds <= float(config.active_timeout_seconds)
+        state = ACTIVE if active else INACTIVE
+        return TrackStatus(state, active, False, active, age_seconds, history_length)
 
-    if confirmed:
-        eligible = missing_seconds <= float(policy.confirmed_max_missed_sec)
-        if not eligible:
-            state = STALE
-        elif missing_seconds <= policy.epsilon:
-            state = CONFIRMED_LIVE
-        else:
-            state = CONFIRMED_MISSING
-    else:
-        eligible = missing_seconds <= float(policy.tentative_max_age_sec)
-        state = TENTATIVE if eligible else STALE
-
-    return TrackStatus(
-        confirmed=confirmed,
-        age_seconds=age_seconds,
-        missing_seconds=missing_seconds,
-        eligible=eligible,
-        state=state,
-        latest_position=latest["center"],
-    )
+    tentative = age_seconds <= float(config.tentative_timeout_seconds)
+    state = TENTATIVE if tentative else INACTIVE
+    return TrackStatus(state, False, tentative, tentative, age_seconds, history_length)
 
 
 def update_best_crop(track, observation, frame_id: str) -> None:
@@ -65,7 +49,15 @@ def update_best_crop(track, observation, frame_id: str) -> None:
         track["best_crop_confidence"] = confidence
 
 
-def append_observation(track, observation, frame_id: str, timestamp: float) -> None:
+def _trim_history(track, config: TrackV2Config) -> None:
+    if config.max_history_points is None:
+        return
+    overflow = len(track["path"]) - int(config.max_history_points)
+    if overflow > 0:
+        del track["path"][:overflow]
+
+
+def append_observation(track, observation, frame_id: str, timestamp: float, config: TrackV2Config) -> None:
     track["path"].append(
         {
             "timestamp": float(timestamp),
@@ -75,6 +67,7 @@ def append_observation(track, observation, frame_id: str, timestamp: float) -> N
             },
         }
     )
+    _trim_history(track, config)
     update_best_crop(track, observation, frame_id)
 
 
