@@ -296,3 +296,51 @@ def test_partition_track_indices_compatibility_uses_new_lifecycle():
 
     assert active_indices == [0]
     assert tentative_indices == [1]
+
+
+def test_matcher_ignores_exact_distance_inside_tie_window_for_continuity():
+    from track.lifecycle import classify_track
+    from track.matcher import Match, _best_for_observation
+
+    long = active_track("1", timestamp=0.0, x=10.0, y=0.0)
+    append_point(long, 0.1, 10.0, 0.0)
+    short = active_track("2", timestamp=0.0, x=14.0, y=0.0)
+    tracks = [long, short]
+    config = TrackV2Config(anchor_tie_distance_px=5.0)
+    statuses = [classify_track(track, 1.0, config) for track in tracks]
+
+    chosen = _best_for_observation(
+        [
+            Match(track_index=0, observation_index=0, distance=5.0),
+            Match(track_index=1, observation_index=0, distance=1.0),
+        ],
+        tracks,
+        statuses,
+        config,
+    )
+
+    assert chosen.track_index == 0
+
+
+def test_matcher_closest_candidate_wins_outside_tie_window():
+    from track.lifecycle import classify_track
+    from track.matcher import Match, _best_for_observation
+
+    long = active_track("1", timestamp=0.0, x=10.0, y=0.0)
+    append_point(long, 0.1, 10.0, 0.0)
+    short = active_track("2", timestamp=0.0, x=30.0, y=0.0)
+    tracks = [long, short]
+    config = TrackV2Config(anchor_tie_distance_px=5.0)
+    statuses = [classify_track(track, 1.0, config) for track in tracks]
+
+    chosen = _best_for_observation(
+        [
+            Match(track_index=0, observation_index=0, distance=7.0),
+            Match(track_index=1, observation_index=0, distance=1.0),
+        ],
+        tracks,
+        statuses,
+        config,
+    )
+
+    assert chosen.track_index == 1
