@@ -51,9 +51,10 @@ def active_track(track_id="1", timestamp=2.0, x=10.0, y=10.0):
     return track
 
 
-def test_config_has_only_final_six_fields():
+def test_config_has_only_final_seven_fields():
     assert list(TrackV2Config.__dataclass_fields__) == [
         "location_history_window_frames",
+        "anchor_weight_exponent",
         "max_anchor_distance_px",
         "anchor_tie_distance_px",
         "confirmation_hits",
@@ -65,6 +66,7 @@ def test_config_has_only_final_six_fields():
 def test_config_rejects_invalid_values():
     invalid_configs = [
         {"location_history_window_frames": 0},
+        {"anchor_weight_exponent": -1.0},
         {"max_anchor_distance_px": 0.0},
         {"anchor_tie_distance_px": -1.0},
         {"confirmation_hits": 0},
@@ -242,10 +244,41 @@ def test_historical_anchor_uses_last_configured_path_points():
     append_point(track, 2.0, 20.0, 0.0)
     append_point(track, 3.0, 30.0, 10.0)
 
-    anchor, points_used = historical_anchor(track["path"], TrackV2Config(location_history_window_frames=3))
+    anchor, points_used = historical_anchor(
+        track["path"],
+        TrackV2Config(location_history_window_frames=3, anchor_weight_exponent=0.0),
+    )
 
     assert points_used == 3
     assert anchor == {"x": 20.0, "y": 10.0 / 3.0}
+
+
+def test_historical_anchor_uses_recency_weighted_path_points():
+    track = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
+    append_point(track, 1.0, 10.0, 0.0)
+    append_point(track, 2.0, 20.0, 0.0)
+    append_point(track, 3.0, 30.0, 10.0)
+
+    anchor, points_used = historical_anchor(
+        track["path"],
+        TrackV2Config(location_history_window_frames=3, anchor_weight_exponent=1.0),
+    )
+
+    assert points_used == 3
+    assert anchor == {"x": (10.0 + 40.0 + 90.0) / 6.0, "y": 30.0 / 6.0}
+
+
+def test_historical_anchor_weights_only_real_points_when_path_is_shorter_than_window():
+    track = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
+    append_point(track, 1.0, 9.0, 6.0)
+
+    anchor, points_used = historical_anchor(
+        track["path"],
+        TrackV2Config(location_history_window_frames=5, anchor_weight_exponent=1.0),
+    )
+
+    assert points_used == 2
+    assert anchor == {"x": 18.0 / 3.0, "y": 12.0 / 3.0}
 
 
 def test_public_contract_shapes_do_not_gain_tracking_status_fields():
@@ -296,3 +329,51 @@ def test_partition_track_indices_compatibility_uses_new_lifecycle():
 
     assert active_indices == [0]
     assert tentative_indices == [1]
+
+
+def test_matcher_ignores_exact_distance_inside_tie_window_for_continuity():
+    from track.lifecycle import classify_track
+    from track.matcher import Match, _best_for_observation
+
+    long = active_track("1", timestamp=0.0, x=10.0, y=0.0)
+    append_point(long, 0.1, 10.0, 0.0)
+    short = active_track("2", timestamp=0.0, x=14.0, y=0.0)
+    tracks = [long, short]
+    config = TrackV2Config(anchor_tie_distance_px=5.0)
+    statuses = [classify_track(track, 1.0, config) for track in tracks]
+
+    chosen = _best_for_observation(
+        [
+            Match(track_index=0, observation_index=0, distance=5.0),
+            Match(track_index=1, observation_index=0, distance=1.0),
+        ],
+        tracks,
+        statuses,
+        config,
+    )
+
+    assert chosen.track_index == 0
+
+
+def test_matcher_closest_candidate_wins_outside_tie_window():
+    from track.lifecycle import classify_track
+    from track.matcher import Match, _best_for_observation
+
+    long = active_track("1", timestamp=0.0, x=10.0, y=0.0)
+    append_point(long, 0.1, 10.0, 0.0)
+    short = active_track("2", timestamp=0.0, x=30.0, y=0.0)
+    tracks = [long, short]
+    config = TrackV2Config(anchor_tie_distance_px=5.0)
+    statuses = [classify_track(track, 1.0, config) for track in tracks]
+
+    chosen = _best_for_observation(
+        [
+            Match(track_index=0, observation_index=0, distance=7.0),
+            Match(track_index=1, observation_index=0, distance=1.0),
+        ],
+        tracks,
+        statuses,
+        config,
+    )
+
+    assert chosen.track_index == 1

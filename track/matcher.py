@@ -44,26 +44,38 @@ def historical_anchor(path, config: TrackV2Config) -> tuple[dict, int]:
         raise ValueError("historical anchor requires a non-empty path")
     window = min(len(path), int(config.location_history_window_frames))
     points = path[-window:]
+    weights = [
+        float(index) ** float(config.anchor_weight_exponent)
+        for index in range(1, window + 1)
+    ]
+    total_weight = sum(weights)
     return {
-        "x": sum(float(point["center"]["x"]) for point in points) / window,
-        "y": sum(float(point["center"]["y"]) for point in points) / window,
+        "x": sum(
+            float(point["center"]["x"]) * weight for point, weight in zip(points, weights)
+        )
+        / total_weight,
+        "y": sum(
+            float(point["center"]["y"]) * weight for point, weight in zip(points, weights)
+        )
+        / total_weight,
     }, window
 
 
-def _candidate_sort_key(candidate: Match, tracks: Sequence[dict], statuses: Sequence[TrackStatus], config: TrackV2Config) -> tuple:
-    track = tracks[candidate.track_index]
-    status = statuses[candidate.track_index]
-    track_id = str(track["track_id"])
-    numeric = numeric_track_id(track_id)
-    rounded_tie_bucket = math.floor(candidate.distance / float(config.anchor_tie_distance_px)) if config.anchor_tie_distance_px > 0 else candidate.distance
-    older_key = (0, numeric, track_id) if numeric is not None else (1, track_id)
+def _continuity_key(track: dict, status: TrackStatus) -> tuple:
+    """Return deterministic priority for candidates inside the location tie window."""
+
     return (
-        rounded_tie_bucket,
-        round(candidate.distance, 12),
         0 if status.active else 1,
         -len(track["path"]),
-        older_key,
+        track_sort_key(track),
+    )
+
+
+def _candidate_tie_key(candidate: Match, tracks: Sequence[dict], statuses: Sequence[TrackStatus]) -> tuple:
+    return (
+        _continuity_key(tracks[candidate.track_index], statuses[candidate.track_index]),
         candidate.observation_index,
+        candidate.track_index,
     )
 
 
@@ -74,21 +86,7 @@ def _beats(current: Match | None, challenger: Match, tracks: Sequence[dict], sta
     if abs(distance_delta) > float(config.anchor_tie_distance_px):
         return distance_delta < 0
 
-    challenger_track = tracks[challenger.track_index]
-    current_track = tracks[current.track_index]
-    challenger_status = statuses[challenger.track_index]
-    current_status = statuses[current.track_index]
-    tie_key = (
-        0 if challenger_status.active else 1,
-        -len(challenger_track["path"]),
-        track_sort_key(challenger_track),
-    )
-    current_key = (
-        0 if current_status.active else 1,
-        -len(current_track["path"]),
-        track_sort_key(current_track),
-    )
-    return tie_key < current_key
+    return _candidate_tie_key(challenger, tracks, statuses) < _candidate_tie_key(current, tracks, statuses)
 
 
 def _best_for_observation(candidates: Iterable[Match], tracks: Sequence[dict], statuses: Sequence[TrackStatus], config: TrackV2Config) -> Match | None:
@@ -140,10 +138,7 @@ def match_tier(
         if not proposals:
             break
 
-        chosen = min(
-            proposals,
-            key=lambda candidate: _candidate_sort_key(candidate, tracks, statuses, config),
-        )
+        chosen = _best_for_observation(proposals, tracks, statuses, config)
         matches.append(chosen)
         used_tracks.add(chosen.track_index)
         used_observations.add(chosen.observation_index)

@@ -9,6 +9,7 @@ class TrackV2Config:
     """Behaviour settings for historical-location-only, frame-based tracking."""
 
     location_history_window_frames: int = 7
+    anchor_weight_exponent: float = 1.0
     max_anchor_distance_px: float = 100.0
     anchor_tie_distance_px: float = 20.0
     confirmation_hits: int = 3
@@ -17,6 +18,7 @@ class TrackV2Config:
 
     def __post_init__(self) -> None:
         _require_positive_int(self.location_history_window_frames, "location_history_window_frames")
+        _require_non_negative_float(self.anchor_weight_exponent, "anchor_weight_exponent")
         _require_positive_float(self.max_anchor_distance_px, "max_anchor_distance_px")
         _require_non_negative_float(self.anchor_tie_distance_px, "anchor_tie_distance_px")
         _require_positive_int(self.confirmation_hits, "confirmation_hits")
