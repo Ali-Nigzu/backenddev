@@ -66,7 +66,7 @@ def active_track_ids(tracking_state, observation_batch, config) -> set[str]:
 def current_frame_assignments(
     tracking_state, observation_batch, active_track_ids: set[str]
 ) -> list[tuple[dict, dict]]:
-    """Pair confirmed active tracks updated on this frame with their observations."""
+    """Pair active tracks updated on this frame with their observations."""
 
     timestamp = float(observation_batch["timestamp"])
     observations_by_center = {}
@@ -238,7 +238,7 @@ def main():
             if not ok:
                 break
 
-            timestamp = frame_index / fps
+            timestamp = float(frame_index)
             rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
             if not rgb_frame.flags.c_contiguous:
                 rgb_frame = rgb_frame.copy()

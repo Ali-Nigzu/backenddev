@@ -122,10 +122,10 @@ def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
 
 
-def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config):
+def _partition_track_indices(tracks, frame_number: float, config: TrackV2Config):
     """Compatibility helper returning active and tentative track indices."""
 
-    statuses = [classify_track(track, timestamp, config) for track in tracks]
+    statuses = [classify_track(track, frame_number, config) for track in tracks]
     active_indices = [index for index, status in enumerate(statuses) if status.state == ACTIVE]
     tentative_indices = [index for index, status in enumerate(statuses) if status.state == TENTATIVE]
     return active_indices, tentative_indices
@@ -138,7 +138,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     _validate_tracking_state(tracking_state)
     _validate_observation_batch(observation_batch)
 
-    timestamp = float(observation_batch["timestamp"])
+    frame_number = float(observation_batch["timestamp"])
     frame_id = observation_batch["frame_id"]
 
     _reorder_state_tracks(tracking_state)
@@ -149,7 +149,7 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         )
     ]
 
-    statuses = [classify_track(track, timestamp, config) for track in tracking_state["tracks"]]
+    statuses = [classify_track(track, frame_number, config) for track in tracking_state["tracks"]]
     active_track_indices = [index for index, status in enumerate(statuses) if status.state == ACTIVE]
     tentative_track_indices = [index for index, status in enumerate(statuses) if status.state == TENTATIVE]
     all_observation_indices = list(range(len(ordered_observations)))
@@ -176,14 +176,13 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
             tracking_state["tracks"][state_track_index],
             ordered_observations[observation_index],
             frame_id,
-            timestamp,
-            config,
+            frame_number,
         )
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
     for observation_index in sorted(remaining_observation_indices):
         observation = ordered_observations[observation_index]
-        tracking_state["tracks"].append(create_track(observation, frame_id, timestamp, str(next_id)))
+        tracking_state["tracks"].append(create_track(observation, frame_id, frame_number, str(next_id)))
         next_id += 1
 
     _reorder_state_tracks(tracking_state)

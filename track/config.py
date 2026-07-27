@@ -6,35 +6,40 @@ from math import isfinite
 
 @dataclass(frozen=True)
 class TrackV2Config:
-    """Configuration for historical-location-only tracking."""
+    """Behaviour settings for historical-location-only, frame-based tracking."""
 
-    location_history_window_frames: int = 5
+    location_history_window_frames: int = 7
     max_anchor_distance_px: float = 100.0
-    anchor_tie_distance_px: float = 5.0
-    confirmation_hits: int = 2
-    tentative_timeout_seconds: float = 1.0
-    active_timeout_seconds: float = 2.0
-    max_history_points: int | None = 30
+    anchor_tie_distance_px: float = 20.0
+    confirmation_hits: int = 3
+    active_timeout_frames: int = 30
+    tentative_timeout_frames: int = 15
 
     def __post_init__(self) -> None:
-        if not isinstance(self.location_history_window_frames, int):
-            raise ValueError("location_history_window_frames must be an integer")
-        if self.location_history_window_frames <= 0:
-            raise ValueError("location_history_window_frames must be positive")
-        if not isfinite(float(self.max_anchor_distance_px)) or float(self.max_anchor_distance_px) < 0:
-            raise ValueError("max_anchor_distance_px must be finite and non-negative")
-        if not isfinite(float(self.anchor_tie_distance_px)) or float(self.anchor_tie_distance_px) < 0:
-            raise ValueError("anchor_tie_distance_px must be finite and non-negative")
-        if not isinstance(self.confirmation_hits, int):
-            raise ValueError("confirmation_hits must be an integer")
-        if self.confirmation_hits <= 0:
-            raise ValueError("confirmation_hits must be positive")
-        if not isfinite(float(self.tentative_timeout_seconds)) or float(self.tentative_timeout_seconds) < 0:
-            raise ValueError("tentative_timeout_seconds must be finite and non-negative")
-        if not isfinite(float(self.active_timeout_seconds)) or float(self.active_timeout_seconds) < 0:
-            raise ValueError("active_timeout_seconds must be finite and non-negative")
-        if self.max_history_points is not None:
-            if not isinstance(self.max_history_points, int):
-                raise ValueError("max_history_points must be an integer or None")
-            if self.max_history_points <= 0:
-                raise ValueError("max_history_points must be positive when configured")
+        _require_positive_int(self.location_history_window_frames, "location_history_window_frames")
+        _require_positive_float(self.max_anchor_distance_px, "max_anchor_distance_px")
+        _require_non_negative_float(self.anchor_tie_distance_px, "anchor_tie_distance_px")
+        _require_positive_int(self.confirmation_hits, "confirmation_hits")
+        _require_positive_int(self.active_timeout_frames, "active_timeout_frames")
+        _require_positive_int(self.tentative_timeout_frames, "tentative_timeout_frames")
+
+
+def _require_positive_int(value, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+
+
+def _require_positive_float(value, name: str) -> None:
+    if not isinstance(value, (float, int)) or not isfinite(float(value)):
+        raise ValueError(f"{name} must be finite")
+    if float(value) <= 0:
+        raise ValueError(f"{name} must be positive")
+
+
+def _require_non_negative_float(value, name: str) -> None:
+    if not isinstance(value, (float, int)) or not isfinite(float(value)):
+        raise ValueError(f"{name} must be finite")
+    if float(value) < 0:
+        raise ValueError(f"{name} must be non-negative")
