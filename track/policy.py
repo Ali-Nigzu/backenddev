@@ -23,6 +23,7 @@ class TrackerPolicy:
     base_position_uncertainty_px: float
     miss_uncertainty_growth_px_per_sec: float
     localization_jitter_px: float
+    location_history_window_frames: int
     max_speed_px_per_sec: float
     weak_confirmed_max_motion_score: float
     continuity_bias: float
@@ -84,6 +85,7 @@ def validate_public_config(config: TrackV2Config) -> None:
         "strong_motion_threshold",
         "normal_motion_threshold",
         "weak_motion_threshold",
+        "location_history_window_frames",
         "continuity_strength",
         "takeover_margin",
         "birth_suppression_strength",
@@ -98,6 +100,7 @@ def validate_public_config(config: TrackV2Config) -> None:
         "tentative_confirmation_min_path_points",
         "max_speed_px_per_sec",
         "base_motion_gate_px",
+        "location_history_window_frames",
         "epsilon",
     )
     for field in positive_fields:
@@ -129,6 +132,10 @@ def validate_public_config(config: TrackV2Config) -> None:
         raise ValueError("TrackV2Config.strong_motion_threshold must be <= normal_motion_threshold")
     if float(config.normal_motion_threshold) > float(config.weak_motion_threshold):
         raise ValueError("TrackV2Config.normal_motion_threshold must be <= weak_motion_threshold")
+    if int(config.location_history_window_frames) != float(config.location_history_window_frames):
+        raise ValueError("TrackV2Config.location_history_window_frames must be an integer")
+    if int(config.location_history_window_frames) > 30:
+        raise ValueError("TrackV2Config.location_history_window_frames must be <= 30")
 
 
 def _confirmation_hits(config: TrackV2Config) -> int:
@@ -220,6 +227,7 @@ def build_policy(config: TrackV2Config) -> TrackerPolicy:
         base_position_uncertainty_px=_spatial_uncertainty(config),
         miss_uncertainty_growth_px_per_sec=_miss_growth(config),
         localization_jitter_px=float(localization_jitter_px),
+        location_history_window_frames=int(config.location_history_window_frames),
         max_speed_px_per_sec=float(max_speed_px_per_sec),
         weak_confirmed_max_motion_score=max(1.0, weak_score),
         continuity_bias=float(config.continuity_strength),
@@ -244,6 +252,7 @@ def validate_policy(policy: TrackerPolicy) -> None:
         "base_position_uncertainty_px",
         "max_speed_px_per_sec",
         "weak_confirmed_max_motion_score",
+        "location_history_window_frames",
         "alpha_beta_position_gain",
         "alpha_beta_velocity_gain",
         "max_history_points",
@@ -268,6 +277,8 @@ def validate_policy(policy: TrackerPolicy) -> None:
         raise ValueError("TrackerPolicy.weak_confirmed_max_motion_score must be >= 1.0")
     if policy.birth_suppression_strength > 1.0:
         raise ValueError("TrackerPolicy.birth_suppression_strength must be <= 1.0")
+    if int(policy.location_history_window_frames) > 30:
+        raise ValueError("TrackerPolicy.location_history_window_frames must be <= 30")
     if not 0.0 < policy.alpha_beta_position_gain <= 1.0:
         raise ValueError("TrackerPolicy.alpha_beta_position_gain must be in (0, 1]")
     if not 0.0 < policy.alpha_beta_velocity_gain <= 1.0:

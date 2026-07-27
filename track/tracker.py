@@ -130,6 +130,23 @@ def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
 
 
+def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config):
+    """Compatibility helper returning eligible confirmed and tentative indices."""
+
+    policy = build_policy(config)
+    active_indices = []
+    tentative_indices = []
+    for index, track in enumerate(tracks):
+        status = classify_track(track, timestamp, policy)
+        if not status.eligible:
+            continue
+        if status.confirmed:
+            active_indices.append(index)
+        else:
+            tentative_indices.append(index)
+    return active_indices, tentative_indices
+
+
 def Track(tracking_state, observation_batch, config: TrackV2Config | None = None):
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 

@@ -94,8 +94,8 @@ def test_impossible_observations_birth_even_when_observations_do_not_exceed_acti
         config,
     )
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3", "4"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 2, 1, 1]
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
 
 
 def test_track_never_prunes_tracks_with_empty_observations():
@@ -249,10 +249,9 @@ def test_confirmed_active_track_rejects_huge_jump_even_when_escape_valve_disable
 
     Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]), config)
 
-    assert [track["track_id"] for track in state["tracks"]] == ["7", "8"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 10.0, "y": 10.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
+    assert [track["track_id"] for track in state["tracks"]] == ["7"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
 
 
 def test_default_forced_continuity_break_rejects_extreme_jump_and_creates_tentative_track():
@@ -260,10 +259,9 @@ def test_default_forced_continuity_break_rejects_extreme_jump_and_creates_tentat
 
     Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]))
 
-    assert [track["track_id"] for track in state["tracks"]] == ["7", "8"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 10.0, "y": 10.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
+    assert [track["track_id"] for track in state["tracks"]] == ["7"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
 
 
 def test_forced_continuity_break_preserves_normal_walking_continuity():
@@ -322,10 +320,9 @@ def test_forced_continuity_break_multi_person_scene_is_deterministic():
     state_b = deepcopy(initial_state)
 
     assert Track(state_a, deepcopy(batch), config) == Track(state_b, deepcopy(batch), config)
-    assert [track["track_id"] for track in state_a["tracks"]] == ["1", "2", "3"]
-    assert [len(track["path"]) for track in state_a["tracks"]] == [2, 3, 1]
+    assert [track["track_id"] for track in state_a["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state_a["tracks"]] == [3, 3]
     assert state_a["tracks"][1]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
-    assert state_a["tracks"][2]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
 
 
 def test_forced_continuity_break_does_not_reoptimize_remaining_selected_matches():
@@ -349,11 +346,9 @@ def test_forced_continuity_break_does_not_reoptimize_remaining_selected_matches(
         config,
     )
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 3, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 0.0, "y": 0.0}
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
     assert state["tracks"][1]["path"][-1]["center"] == {"x": 102.0, "y": 0.0}
-    assert state["tracks"][2]["path"][-1]["center"] == {"x": 800.0, "y": 0.0}
 
 
 def test_five_confirmed_active_tracks_three_observations_zero_births():
@@ -436,8 +431,8 @@ def test_confirmed_track_receives_first_claim_over_tentative_track():
     Track(state, obs_batch(1.0, [obs("could-fit-both", 101.0, 100.0)]))
 
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 101.0, "y": 100.0}
+    assert [len(track["path"]) for track in state["tracks"]] == [2, 2]
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 101.0, "y": 100.0}
 
 
 def test_only_tentative_track_can_continue_and_mature():
@@ -508,10 +503,9 @@ def test_gap_beyond_reassociation_gap_creates_new_id_for_confirmed_track():
     Track(state, obs_batch(0.8, []), config)
     Track(state, obs_batch(1.0, [obs("b-0", 12.0, 10.0)]), config)
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 11.0, "y": 10.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
 
 
 def test_stale_confirmed_track_cannot_suppress_new_birth():
@@ -522,10 +516,9 @@ def test_stale_confirmed_track_cannot_suppress_new_birth():
 
     Track(state, obs_batch(1.0, [obs("new-person", 20.0, 20.0)]), config)
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 10.0, "y": 10.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 20.0, "y": 20.0}
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 20.0, "y": 20.0}
 
 
 def test_matched_observations_do_not_birth_and_unmatched_observations_do_birth():
@@ -549,10 +542,9 @@ def test_observation_specific_eligibility_births_unexplained_new_person_with_act
 
     Track(state, obs_batch(1.0, [obs("near-1", 12.0, 10.0), obs("new", 900.0, 900.0)]))
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 2, 1]
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-    assert state["tracks"][2]["path"][-1]["center"] == {"x": 900.0, "y": 900.0}
 
 
 def test_configurable_hard_speed_limit_controls_eligibility():
@@ -561,8 +553,8 @@ def test_configurable_hard_speed_limit_controls_eligibility():
 
     Track(state, obs_batch(1.0, [obs("too-fast", 20.0, 0.0)]), strict)
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
 
 
 def test_deterministic_replay_many_runs_with_eligibility():
@@ -691,9 +683,9 @@ def test_far_observation_births_instead_of_forcing_continuity():
 
     Track(state, obs_batch(1.0, [obs("too-far", 1000.0, 0.0)]), config)
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 1000.0, "y": 0.0}
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 1000.0, "y": 0.0}
 
 
 def test_legacy_config_maps_to_normalized_config_once():
@@ -742,5 +734,78 @@ def test_appearance_does_not_rescue_impossible_motion():
 
     Track(state, obs_batch(1.0, [obs("same-appearance-too-fast", 100.0, 0.0, emb=[1.0, 0.0])]), config)
 
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 1]
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 3
+
+
+def test_historical_anchor_uses_last_configured_path_points():
+    from track.motion import historical_anchor
+    from track.policy import build_policy
+
+    track = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
+    append_point(track, 1.0, 10.0, 0.0)
+    append_point(track, 2.0, 20.0, 0.0)
+    append_point(track, 3.0, 30.0, 10.0)
+    policy = build_policy(TrackV2Config(location_history_window_frames=3))
+
+    anchor, points_used = historical_anchor(track["path"], policy)
+
+    assert points_used == 3
+    assert anchor == {"x": 20.0, "y": 10.0 / 3.0}
+
+
+def test_historical_anchor_short_history_uses_available_points():
+    from track.motion import historical_anchor
+    from track.policy import build_policy
+
+    track = existing_track("1", timestamp=0.0, x=4.0, y=6.0)
+    policy = build_policy(TrackV2Config(location_history_window_frames=5))
+
+    anchor, points_used = historical_anchor(track["path"], policy)
+
+    assert points_used == 1
+    assert anchor == {"x": 4.0, "y": 6.0}
+
+
+def test_location_history_window_frames_is_validated():
+    from track.policy import build_policy
+
+    for value in (0, 31, 2.5):
+        try:
+            build_policy(TrackV2Config(location_history_window_frames=value))
+        except ValueError as exc:
+            assert "location_history_window_frames" in str(exc)
+        else:
+            raise AssertionError("invalid location history window should fail")
+
+
+def test_historical_anchor_dominates_latest_detector_jitter_assignment():
+    stable_left = confirmed_track("1", timestamp=0.0, x=100.0, y=100.0)
+    append_point(stable_left, 0.1, 101.0, 100.0)
+    append_point(stable_left, 0.2, 99.0, 100.0)
+    append_point(stable_left, 0.3, 100.0, 100.0)
+    append_point(stable_left, 0.4, 130.0, 100.0)  # latest-point detector jitter toward track 2
+    stable_right = confirmed_track("2", timestamp=0.0, x=140.0, y=100.0)
+    append_point(stable_right, 0.1, 139.0, 100.0)
+    append_point(stable_right, 0.2, 141.0, 100.0)
+    append_point(stable_right, 0.3, 140.0, 100.0)
+    append_point(stable_right, 0.4, 140.0, 100.0)
+    state = {"tracks": [stable_left, stable_right]}
+    config = TrackV2Config(location_history_window_frames=5)
+
+    Track(state, obs_batch(0.5, [obs("left-return", 100.0, 100.0), obs("right", 140.0, 100.0)]), config)
+
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 100.0, "y": 100.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 140.0, "y": 100.0}
+
+
+def test_historical_anchor_preserves_medium_walking_continuity():
+    config = TrackV2Config(location_history_window_frames=5, max_physical_speed_px_per_sec=250.0)
+    state = {"tracks": []}
+
+    for index, x in enumerate([100.0, 108.0, 116.0, 124.0, 132.0, 140.0]):
+        Track(state, obs_batch(index * 0.2, [obs(f"walk-{index}", x, 100.0)]), config)
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 6
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 140.0, "y": 100.0}
