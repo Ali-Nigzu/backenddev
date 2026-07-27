@@ -18,13 +18,16 @@ from track.policy import TrackerPolicy
 class MotionAssessment:
     eligible: bool
     motion_score: float
+    distance_anchor: float
     distance_prediction: float
     distance_latest: float
     speed_required: float
+    anchor_position: dict
     predicted_position: dict
     velocity: dict
     rejection_reason: str
     allowed_error: float
+    anchor_points_used: int
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,23 @@ def distance(a, b) -> float:
     dx = ax - bx
     dy = ay - by
     return math.sqrt(dx * dx + dy * dy)
+
+
+def historical_anchor(path, policy: TrackerPolicy) -> tuple[dict, int]:
+    """Return the mean center of the last configured path observations.
+
+    The anchor is derived on demand from public path history so Track V2 keeps
+    deterministic reducer semantics without persisted tracking state.
+    """
+
+    if not path:
+        raise ValueError("historical anchor requires a non-empty path")
+
+    window = min(len(path), int(policy.location_history_window_frames))
+    points = path[-window:]
+    x = sum(float(point["center"]["x"]) for point in points) / window
+    y = sum(float(point["center"]["y"]) for point in points) / window
+    return _point(x, y), window
 
 
 def _clamp_velocity(vx: float, vy: float, policy: TrackerPolicy) -> tuple[float, float]:
@@ -136,21 +156,27 @@ def _ineligible(
     score: float,
     predicted_position: dict,
     velocity: dict,
+    distance_anchor: float = float("inf"),
     distance_prediction: float = float("inf"),
     distance_latest: float = float("inf"),
     speed_required: float = float("inf"),
     allowed_error: float = 0.0,
+    anchor_position: dict | None = None,
+    anchor_points_used: int = 0,
 ) -> MotionAssessment:
     return MotionAssessment(
         False,
         score,
+        distance_anchor,
         distance_prediction,
         distance_latest,
         speed_required,
+        anchor_position or dict(predicted_position),
         predicted_position,
         velocity,
         reason,
         allowed_error,
+        anchor_points_used,
     )
 
 
@@ -165,13 +191,15 @@ def assess_motion(
     latest_timestamp = float(track["path"][-1]["timestamp"])
     dt = float(timestamp) - latest_timestamp
     predicted_position = _predict_from_estimate(estimate, latest_timestamp, timestamp, policy)
+    anchor_position, anchor_points_used = historical_anchor(track["path"], policy)
     allowed_error = _allowed_error(status, policy)
 
     if status.age_seconds < -policy.epsilon or dt < -policy.epsilon:
-        return _ineligible("negative_time_gap", float("inf"), predicted_position, estimate.velocity, allowed_error=allowed_error)
+        return _ineligible("negative_time_gap", float("inf"), predicted_position, estimate.velocity, allowed_error=allowed_error, anchor_position=anchor_position, anchor_points_used=anchor_points_used)
     if not status.eligible:
-        return _ineligible("outside_track_window", float("inf"), predicted_position, estimate.velocity, allowed_error=allowed_error)
+        return _ineligible("outside_track_window", float("inf"), predicted_position, estimate.velocity, allowed_error=allowed_error, anchor_position=anchor_position, anchor_points_used=anchor_points_used)
 
+    distance_anchor = distance(anchor_position, observation["center"])
     distance_prediction = distance(predicted_position, observation["center"])
     distance_latest = distance(status.latest_position, observation["center"])
 
@@ -183,10 +211,13 @@ def assess_motion(
                 float("inf"),
                 predicted_position,
                 estimate.velocity,
+                distance_anchor,
                 distance_prediction,
                 distance_latest,
                 speed_required,
                 allowed_error,
+                anchor_position,
+                anchor_points_used,
             )
     else:
         speed_required = distance_latest / dt
@@ -196,10 +227,13 @@ def assess_motion(
                 float("inf"),
                 predicted_position,
                 estimate.velocity,
+                distance_anchor,
                 distance_prediction,
                 distance_latest,
                 speed_required,
                 allowed_error,
+                anchor_position,
+                anchor_points_used,
             )
 
     motion_score = distance_prediction / allowed_error
@@ -210,21 +244,27 @@ def assess_motion(
             motion_score,
             predicted_position,
             estimate.velocity,
+            distance_anchor,
             distance_prediction,
             distance_latest,
             speed_required,
             allowed_error,
+            anchor_position,
+            anchor_points_used,
         )
 
     return MotionAssessment(
         True,
         motion_score,
+        distance_anchor,
         distance_prediction,
         distance_latest,
         speed_required,
+        anchor_position,
         predicted_position,
         estimate.velocity,
         "eligible",
         allowed_error,
+        anchor_points_used,
     )
 

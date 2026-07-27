@@ -53,12 +53,13 @@ def _continuity_adjusted_motion(candidate: CandidateMatch, config: TrackerPolicy
 
 def _assignment_cost(candidate: CandidateMatch, config: TrackerPolicy) -> tuple:
     return (
-        round(candidate.distance_latest, 12),
+        round(candidate.distance_anchor, 12),
         _role_priority(candidate),
         _CLASS_PENALTY.get(candidate.classification, 99),
         round(_continuity_adjusted_motion(candidate, config), 12),
         round(candidate.motion_score, 12),
         round(candidate.distance_prediction, 12),
+        round(candidate.distance_latest, 12),
         round(candidate.speed_required, 12),
         round(_appearance_cost(candidate), 12),
         _track_key(candidate.track_id),
@@ -68,46 +69,51 @@ def _assignment_cost(candidate: CandidateMatch, config: TrackerPolicy) -> tuple:
 
 
 def _maximum_coverage_assignment(candidates: Sequence[CandidateMatch], config: TrackerPolicy) -> list[CandidateMatch]:
-    """Select deterministic one-to-one matches with coverage as the first objective.
+    """Select a deterministic maximum-cardinality, minimum-cost matching.
 
-    Birth suppression makes unmatched observations expensive. This solver therefore
-    finds a maximum-cardinality bipartite matching first, using deterministic
-    candidate costs only to choose among equally coverable explanations. The result
-    keeps births as an overflow outcome instead of a side effect of greedy local
-    choices.
+    Birth suppression makes unmatched observations expensive. This solver first
+    maximizes observation coverage, then globally minimizes the sorted candidate
+    costs so historical-anchor proximity can dominate N-to-N continuity choices.
     """
 
     by_observation: dict[int, list[CandidateMatch]] = {}
+    track_indices = sorted({candidate.track_index for candidate in candidates})
+    track_bit = {track_index: 1 << offset for offset, track_index in enumerate(track_indices)}
     for candidate in candidates:
         by_observation.setdefault(candidate.observation_index, []).append(candidate)
     for observation_candidates in by_observation.values():
         observation_candidates.sort(key=lambda candidate: _assignment_cost(candidate, config))
 
-    observation_order = sorted(
-        by_observation,
-        key=lambda observation_index: (
-            len(by_observation[observation_index]),
-            min(_assignment_cost(candidate, config) for candidate in by_observation[observation_index]),
-            observation_index,
-        ),
-    )
-    track_to_candidate: dict[int, CandidateMatch] = {}
+    observation_order = sorted(by_observation)
+    memo: dict[tuple[int, int], tuple[int, tuple, tuple[CandidateMatch, ...]]] = {}
 
-    def try_assign(observation_index: int, visited_tracks: set[int]) -> bool:
+    def result_key(result: tuple[int, tuple, tuple[CandidateMatch, ...]]) -> tuple:
+        count, costs, _selected = result
+        return (-count, costs)
+
+    def search(position: int, used_mask: int) -> tuple[int, tuple, tuple[CandidateMatch, ...]]:
+        key = (position, used_mask)
+        if key in memo:
+            return memo[key]
+        if position >= len(observation_order):
+            return (0, (), ())
+
+        observation_index = observation_order[position]
+        best = search(position + 1, used_mask)
         for candidate in by_observation[observation_index]:
-            if candidate.track_index in visited_tracks:
+            bit = track_bit[candidate.track_index]
+            if used_mask & bit:
                 continue
-            visited_tracks.add(candidate.track_index)
-            incumbent = track_to_candidate.get(candidate.track_index)
-            if incumbent is None or try_assign(incumbent.observation_index, visited_tracks):
-                track_to_candidate[candidate.track_index] = candidate
-                return True
-        return False
+            tail_count, tail_costs, tail_selected = search(position + 1, used_mask | bit)
+            selected = (candidate,) + tail_selected
+            costs = tuple(sorted((_assignment_cost(item, config) for item in selected)))
+            current = (tail_count + 1, costs, selected)
+            if result_key(current) < result_key(best):
+                best = current
+        memo[key] = best
+        return best
 
-    for observation_index in observation_order:
-        try_assign(observation_index, set())
-
-    selected = list(track_to_candidate.values())
+    _count, _costs, selected = search(0, 0)
     return sorted(selected, key=lambda candidate: _assignment_cost(candidate, config))
 
 

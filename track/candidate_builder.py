@@ -34,6 +34,7 @@ class CandidateMatch:
     track_id: str
     detection_id: str
     motion_score: float
+    distance_anchor: float
     appearance_score: float | None
     ownership_role: str
     classification: str
@@ -106,6 +107,7 @@ def _validate_candidate(candidate: CandidateMatch, track_count: int, observation
         raise ValueError("candidate references nonexistent observation")
     numeric_values = (
         candidate.motion_score,
+        candidate.distance_anchor,
         candidate.distance_prediction,
         candidate.distance_latest,
         candidate.speed_required,
@@ -146,6 +148,7 @@ def build_candidate(
         track_id=str(track["track_id"]),
         detection_id=str(observation["detection_id"]),
         motion_score=float(motion.motion_score),
+        distance_anchor=float(motion.distance_anchor),
         appearance_score=similarity,
         ownership_role=_ownership_role(status),
         classification=classification,
@@ -179,6 +182,7 @@ def build_suppression_coverage_candidate(
         return None
 
     score = _fallback_motion_score(motion, policy)
+    distance_anchor = motion.distance_anchor if math.isfinite(float(motion.distance_anchor)) else score
     distance_prediction = motion.distance_prediction if math.isfinite(float(motion.distance_prediction)) else score
     distance_latest = motion.distance_latest if math.isfinite(float(motion.distance_latest)) else score
     speed_required = motion.speed_required if math.isfinite(float(motion.speed_required)) else score
@@ -188,6 +192,7 @@ def build_suppression_coverage_candidate(
         track_id=str(track["track_id"]),
         detection_id=str(observation["detection_id"]),
         motion_score=float(score),
+        distance_anchor=float(distance_anchor),
         appearance_score=None,
         ownership_role=_ownership_role(status),
         classification=SUPPRESSION_COVERAGE,

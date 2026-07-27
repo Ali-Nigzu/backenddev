@@ -27,6 +27,11 @@ def parse_args():
         default=None,
         help="Annotated replay output path",
     )
+    parser.add_argument(
+        "--debug-track-anchors",
+        action="store_true",
+        help="Draw latest, historical anchor, prediction, and anchor-to-observation lines.",
+    )
     return parser.parse_args()
 
 
@@ -99,6 +104,8 @@ def draw_tracking_state(
     observation_batch,
     active_track_ids: set[str],
     previous_track_ids: set[str] | None = None,
+    config=None,
+    debug_track_anchors: bool = False,
 ) -> dict:
     import cv2
 
@@ -115,7 +122,51 @@ def draw_tracking_state(
     unmatched_active_ids = set(active_track_ids) - matched_track_ids
 
     height, width = frame.shape[:2]
+    anchor_debug_policy = None
+    if debug_track_anchors and config is not None:
+        from track.motion import estimate_motion, historical_anchor
+        from track.policy import build_policy
+
+        anchor_debug_policy = build_policy(config)
+        for track in tracking_state["tracks"]:
+            track_id = str(track["track_id"])
+            if track_id not in active_track_ids:
+                continue
+            color = track_color(track_id)
+            latest = track["path"][-1]["center"]
+            anchor, _points_used = historical_anchor(track["path"], anchor_debug_policy)
+            estimate = estimate_motion(track["path"], anchor_debug_policy)
+            markers = (
+                (latest, 4, color),
+                (anchor, 7, (0, 255, 255)),
+                (estimate.position, 5, (255, 255, 0)),
+            )
+            for center, radius, marker_color in markers:
+                x = max(0, min(width - 1, int(round(float(center["x"])))))
+                y = max(0, min(height - 1, int(round(float(center["y"])))))
+                cv2.circle(frame, (x, y), radius, marker_color, 1)
+            ax = max(0, min(width - 1, int(round(float(anchor["x"])))))
+            ay = max(0, min(height - 1, int(round(float(anchor["y"])))))
+            cv2.putText(
+                frame,
+                f"A {track_id}",
+                (ax + 8, ay),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
     for track, observation in assignments:
+        if debug_track_anchors and anchor_debug_policy is not None:
+            anchor, _points_used = historical_anchor(track["path"], anchor_debug_policy)
+            ax = max(0, min(width - 1, int(round(float(anchor["x"])))))
+            ay = max(0, min(height - 1, int(round(float(anchor["y"])))))
+            ox = max(0, min(width - 1, int(round(float(observation["center"]["x"])))))
+            oy = max(0, min(height - 1, int(round(float(observation["center"]["y"])))))
+            cv2.line(frame, (ax, ay), (ox, oy), (0, 255, 255), 1)
+
         bbox = observation["bbox"]
         x1 = max(0, min(width - 1, int(round(float(bbox["x1"])))))
         y1 = max(0, min(height - 1, int(round(float(bbox["y1"])))))
@@ -277,7 +328,13 @@ def main():
             tracking_state = Track(tracking_state, observation_batch, config)
             update_track_summary(track_summary, tracking_state)
             debug = draw_tracking_state(
-                bgr_frame, tracking_state, observation_batch, active_track_ids, previous_track_ids
+                bgr_frame,
+                tracking_state,
+                observation_batch,
+                active_track_ids,
+                previous_track_ids,
+                config,
+                args.debug_track_anchors,
             )
             if debug["births"] or debug["unmatched_active"]:
                 print(

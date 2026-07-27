@@ -11,8 +11,9 @@ class TrackV2Config:
     fields are collapsed by ``track.policy.build_policy`` into one small behaviour
     policy. The authoritative tuning concepts are: confirmation hits, tentative
     age, confirmed miss tolerance, position uncertainty, miss uncertainty growth,
-    localization jitter, max speed, weak confirmed motion score, continuity bias,
-    takeover margin, appearance tie-breaking, and birth suppression strength.
+    localization jitter, historical location anchoring, max speed, weak
+    confirmed motion score, continuity bias, takeover margin, appearance
+    tie-breaking, and birth suppression strength.
     Remaining historical names are accepted only as compatibility aliases.
     """
 
@@ -54,6 +55,7 @@ class TrackV2Config:
     latest_position_gate_growth_px_per_sec: float | None = None
     localization_jitter_px: float | None = None
     jitter_tolerance_px: float | None = None
+    location_history_window_frames: int = 5
 
     # Backwards-compatible motion names.
     max_speed_px_per_sec: float = 500.0
