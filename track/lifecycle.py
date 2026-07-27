@@ -1,57 +1,42 @@
-"""Track V2 lifecycle classification and state mutation helpers."""
+"""Frame-based Track V2 lifecycle classification and state mutation helpers."""
 
 from dataclasses import dataclass
 
-from track.policy import TrackerPolicy
+from track.config import TrackV2Config
 
+ACTIVE = "active"
 TENTATIVE = "tentative"
-CONFIRMED_LIVE = "confirmed_live"
-CONFIRMED_MISSING = "confirmed_missing"
-STALE = "stale"
+INACTIVE = "inactive"
 
 
 @dataclass(frozen=True)
 class TrackStatus:
-    """Lifecycle facts derived exactly once for a track at a timestamp."""
+    """Derived lifecycle state for one track at one frame."""
 
-    confirmed: bool
-    age_seconds: float
-    missing_seconds: float
-    eligible: bool
     state: str
-    latest_position: dict
+    active: bool
+    tentative: bool
+    eligible: bool
+    age_frames: int
+    history_length: int
 
 
-def classify_track(track: dict, timestamp: float, policy: TrackerPolicy) -> TrackStatus:
-    latest = track["path"][-1]
-    latest_timestamp = float(latest["timestamp"])
-    age_seconds = float(timestamp) - latest_timestamp
-    if age_seconds < -policy.epsilon:
-        raise ValueError("Track path contains a timestamp newer than the observation batch")
+def classify_track(track: dict, current_frame_number: float, config: TrackV2Config) -> TrackStatus:
+    last_seen_frame = float(track["path"][-1]["timestamp"])
+    frame_delta = float(current_frame_number) - last_seen_frame
+    if frame_delta < 0:
+        raise ValueError("Track path contains a frame newer than the observation batch")
+    age_frames = int(frame_delta)
 
-    confirmed = len(track["path"]) >= int(policy.confirmation_hits)
-    missing_seconds = max(0.0, age_seconds)
+    history_length = len(track["path"])
+    if history_length >= int(config.confirmation_hits):
+        active = age_frames <= int(config.active_timeout_frames)
+        state = ACTIVE if active else INACTIVE
+        return TrackStatus(state, active, False, active, age_frames, history_length)
 
-    if confirmed:
-        eligible = missing_seconds <= float(policy.confirmed_max_missed_sec)
-        if not eligible:
-            state = STALE
-        elif missing_seconds <= policy.epsilon:
-            state = CONFIRMED_LIVE
-        else:
-            state = CONFIRMED_MISSING
-    else:
-        eligible = missing_seconds <= float(policy.tentative_max_age_sec)
-        state = TENTATIVE if eligible else STALE
-
-    return TrackStatus(
-        confirmed=confirmed,
-        age_seconds=age_seconds,
-        missing_seconds=missing_seconds,
-        eligible=eligible,
-        state=state,
-        latest_position=latest["center"],
-    )
+    tentative = age_frames <= int(config.tentative_timeout_frames)
+    state = TENTATIVE if tentative else INACTIVE
+    return TrackStatus(state, False, tentative, tentative, age_frames, history_length)
 
 
 def update_best_crop(track, observation, frame_id: str) -> None:
@@ -65,10 +50,10 @@ def update_best_crop(track, observation, frame_id: str) -> None:
         track["best_crop_confidence"] = confidence
 
 
-def append_observation(track, observation, frame_id: str, timestamp: float) -> None:
+def append_observation(track, observation, frame_id: str, frame_number: float) -> None:
     track["path"].append(
         {
-            "timestamp": float(timestamp),
+            "timestamp": float(frame_number),
             "center": {
                 "x": float(observation["center"]["x"]),
                 "y": float(observation["center"]["y"]),
@@ -78,12 +63,12 @@ def append_observation(track, observation, frame_id: str, timestamp: float) -> N
     update_best_crop(track, observation, frame_id)
 
 
-def create_track(observation, frame_id: str, timestamp: float, track_id: str) -> dict:
+def create_track(observation, frame_id: str, frame_number: float, track_id: str) -> dict:
     return {
         "track_id": str(track_id),
         "path": [
             {
-                "timestamp": float(timestamp),
+                "timestamp": float(frame_number),
                 "center": {
                     "x": float(observation["center"]["x"]),
                     "y": float(observation["center"]["y"]),

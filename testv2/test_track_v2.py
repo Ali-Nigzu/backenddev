@@ -1,6 +1,9 @@
 from copy import deepcopy
 
-from track import Track, TrackV2Config
+from track import Track, TrackV2, TrackV2Config
+from track.lifecycle import ACTIVE, INACTIVE, TENTATIVE, classify_track
+from track.matcher import historical_anchor
+from track.tracker import _partition_track_indices
 
 
 def obs_batch(timestamp, observations):
@@ -41,410 +44,208 @@ def append_point(track, timestamp, x, y):
     track["path"].append({"timestamp": timestamp, "center": {"x": x, "y": y}})
 
 
-def confirmed_track(track_id="1", timestamp=1.0, x=10.0, y=10.0):
-    track = existing_track(track_id, timestamp=timestamp - 1.0, x=x - 1.0, y=y)
+def active_track(track_id="1", timestamp=2.0, x=10.0, y=10.0):
+    track = existing_track(track_id, timestamp=timestamp - 2.0, x=x - 2.0, y=y)
+    append_point(track, timestamp - 1.0, x - 1.0, y)
     append_point(track, timestamp, x, y)
     return track
 
 
-def test_empty_state_creates_deterministic_numeric_ids():
+def test_config_has_only_final_six_fields():
+    assert list(TrackV2Config.__dataclass_fields__) == [
+        "location_history_window_frames",
+        "max_anchor_distance_px",
+        "anchor_tie_distance_px",
+        "confirmation_hits",
+        "active_timeout_frames",
+        "tentative_timeout_frames",
+    ]
+
+
+def test_config_rejects_invalid_values():
+    invalid_configs = [
+        {"location_history_window_frames": 0},
+        {"max_anchor_distance_px": 0.0},
+        {"anchor_tie_distance_px": -1.0},
+        {"confirmation_hits": 0},
+        {"active_timeout_frames": 0},
+        {"tentative_timeout_frames": 0},
+        {"active_timeout_frames": 1.5},
+    ]
+
+    for kwargs in invalid_configs:
+        try:
+            TrackV2Config(**kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid config should fail: {kwargs}")
+
+
+def test_empty_state_creates_deterministic_numeric_ids_from_sorted_observations():
     state = {"tracks": []}
     returned = Track(state, obs_batch(1.0, [obs("b", 20, 20), obs("a", 10, 10)]))
 
     assert returned is state
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [track["path"][0]["center"]["x"] for track in state["tracks"]] == [
-        10.0,
-        20.0,
-    ]
+    assert [track["path"][0]["center"]["x"] for track in state["tracks"]] == [10.0, 20.0]
 
 
-def test_existing_tracks_match_and_append_path():
+def test_trackv2_callable_wrapper_preserves_public_interface():
     state = {"tracks": []}
-    Track(state, obs_batch(0.0, [obs("a", 10, 10, emb=[1.0, 0.0])]))
-    Track(state, obs_batch(1.0, [obs("b", 12, 10, emb=[1.0, 0.0])]))
+    tracker = TrackV2(TrackV2Config())
 
-    assert len(state["tracks"]) == 1
-    assert state["tracks"][0]["track_id"] == "1"
-    assert len(state["tracks"][0]["path"]) == 2
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-
-
-def test_unmatched_observation_creates_next_max_id_without_filling_gaps():
-    state = {"tracks": []}
-    Track(state, obs_batch(0.0, [obs("a", 10, 10)]))
-    state["tracks"][0]["track_id"] = "77"
-    Track(state, obs_batch(4.0, [obs("far", 10000, 10000)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["77", "78"]
-
-
-def test_impossible_observations_birth_even_when_observations_do_not_exceed_active_tracks():
-    state = {
-        "tracks": [
-            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
-            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
-        ]
-    }
-    config = TrackV2Config(forced_continuity_break_normalized_motion=None)
-
-    Track(
-        state,
-        obs_batch(1.0, [obs("far-a", 10000.0, 10000.0), obs("far-b", 20000.0, 20000.0)]),
-        config,
-    )
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
-
-
-def test_track_never_prunes_tracks_with_empty_observations():
-    state = {
-        "tracks": [
-            existing_track("1", timestamp=0.0),
-            existing_track("2", timestamp=20.0),
-        ]
-    }
-
-    returned = Track(state, obs_batch(100.0, []))
+    returned = tracker(state, obs_batch(0.0, [obs("first", 10.0, 10.0)]))
 
     assert returned is state
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [1, 1]
+    assert state["tracks"][0]["track_id"] == "1"
 
 
-def test_zero_observation_call_preserves_track_count_invariant():
+def test_closest_anchor_wins():
     state = {
         "tracks": [
-            existing_track("3", timestamp=0.0),
-            existing_track("4", timestamp=5.0),
-            existing_track("77", timestamp=10.0),
+            active_track("1", timestamp=0.0, x=10.0, y=0.0),
+            active_track("2", timestamp=0.0, x=100.0, y=0.0),
         ]
     }
-    input_count = len(state["tracks"])
 
-    Track(state, obs_batch(1000.0, []))
+    Track(state, obs_batch(1.0, [obs("near-two", 96.0, 0.0)]))
 
-    assert len(state["tracks"]) == input_count
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 4]
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 96.0, "y": 0.0}
+
+
+def test_active_beats_tentative_even_when_tentative_is_closer():
+    active = active_track("1", timestamp=0.0, x=100.0, y=100.0)
+    tentative = existing_track("2", timestamp=0.0, x=101.0, y=100.0)
+    state = {"tracks": [active, tentative]}
+
+    Track(state, obs_batch(1.0, [obs("could-fit-both", 101.0, 100.0)]))
+
+    assert [len(track["path"]) for track in state["tracks"]] == [4, 1]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 101.0, "y": 100.0}
+
+
+def test_one_to_one_matching_assigns_each_track_and_observation_once():
+    state = {
+        "tracks": [
+            active_track("1", timestamp=0.0, x=0.0, y=0.0),
+            active_track("2", timestamp=0.0, x=100.0, y=0.0),
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("left", 1.0, 0.0), obs("right", 101.0, 0.0)]))
+
+    assert [len(track["path"]) for track in state["tracks"]] == [4, 4]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 1.0, "y": 0.0}
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 101.0, "y": 0.0}
+
+
+def test_tentative_matching_uses_remaining_observations_after_active_tier():
+    state = {
+        "tracks": [
+            active_track("1", timestamp=0.0, x=0.0, y=0.0),
+            existing_track("2", timestamp=0.0, x=50.0, y=0.0),
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("for-active", 1.0, 0.0), obs("for-tentative", 51.0, 0.0)]))
+
+    assert [len(track["path"]) for track in state["tracks"]] == [4, 2]
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 51.0, "y": 0.0}
+
+
+def test_longer_history_wins_inside_tie_distance():
+    short = active_track("1", timestamp=0.0, x=100.0, y=0.0)
+    long = active_track("2", timestamp=0.0, x=104.0, y=0.0)
+    append_point(long, 0.1, 104.0, 0.0)
+    state = {"tracks": [short, long]}
+
+    Track(state, obs_batch(1.0, [obs("tie", 101.0, 0.0)]), TrackV2Config(anchor_tie_distance_px=5.0))
+
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 5]
+    assert state["tracks"][1]["path"][-1]["center"] == {"x": 101.0, "y": 0.0}
+
+
+def test_older_id_wins_identical_tie_when_history_lengths_match():
+    state = {
+        "tracks": [
+            active_track("1", timestamp=0.0, x=98.0, y=0.0),
+            active_track("2", timestamp=0.0, x=102.0, y=0.0),
+        ]
+    }
+
+    Track(state, obs_batch(1.0, [obs("middle", 100.0, 0.0)]), TrackV2Config(anchor_tie_distance_px=5.0))
+
+    assert [len(track["path"]) for track in state["tracks"]] == [4, 3]
+    assert state["tracks"][0]["path"][-1]["center"] == {"x": 100.0, "y": 0.0}
+
+
+def test_tentative_becomes_active_after_confirmation_hits():
+    config = TrackV2Config(confirmation_hits=3)
+    state = {"tracks": []}
+
+    Track(state, obs_batch(0.0, [obs("a", 10.0, 10.0)]), config)
+    assert classify_track(state["tracks"][0], 0.5, config).state == TENTATIVE
+
+    Track(state, obs_batch(0.5, [obs("b", 11.0, 10.0)]), config)
+    assert classify_track(state["tracks"][0], 1.0, config).state == TENTATIVE
+
+    Track(state, obs_batch(1.0, [obs("c", 12.0, 10.0)]), config)
+    assert classify_track(state["tracks"][0], 1.0, config).state == ACTIVE
+
+
+def test_inactive_track_stays_stored_but_cannot_match():
+    config = TrackV2Config(active_timeout_frames=1)
+    state = {"tracks": [active_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+
+    Track(state, obs_batch(2.0, [obs("return", 11.0, 10.0)]), config)
+
+    assert classify_track(state["tracks"][0], 2.0, config).state == INACTIVE
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
+
+
+def test_far_observation_creates_new_track_without_birth_suppression():
+    state = {"tracks": [active_track("1", timestamp=0.0, x=0.0, y=0.0)]}
+
+    Track(state, obs_batch(1.0, [obs("far", 1000.0, 0.0)]), TrackV2Config(max_anchor_distance_px=100.0))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
+    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
+
+
+def test_embeddings_are_ignored_for_matching():
+    state = {"tracks": [active_track("1", timestamp=0.0, x=10.0, y=10.0)]}
+
+    Track(state, obs_batch(1.0, [obs("next", 12.0, 10.0, emb=[-1.0, 0.0])]))
+
+    assert [track["track_id"] for track in state["tracks"]] == ["1"]
+    assert len(state["tracks"][0]["path"]) == 4
 
 
 def test_best_crop_updates_only_on_higher_confidence():
     state = {"tracks": []}
-    Track(
-        state,
-        obs_batch(0.0, [obs("a", 10, 10, confidence=0.5, emb=[1.0, 0.0])]),
-    )
-    Track(state, obs_batch(1.0, [obs("b", 12, 10, confidence=0.4, emb=[1.0, 0.0])]))
+    Track(state, obs_batch(0.0, [obs("a", 10, 10, confidence=0.5)]))
+    Track(state, obs_batch(1.0, [obs("b", 12, 10, confidence=0.4)]))
     assert state["tracks"][0]["best_crop"]["frame_id"] == "frame-0.0"
     assert state["tracks"][0]["best_crop_confidence"] == 0.5
 
-    Track(state, obs_batch(2.0, [obs("c", 14, 10, confidence=0.9, emb=[1.0, 0.0])]))
+    Track(state, obs_batch(2.0, [obs("c", 14, 10, confidence=0.9)]))
     assert state["tracks"][0]["best_crop"]["frame_id"] == "frame-2.0"
     assert state["tracks"][0]["best_crop_confidence"] == 0.9
 
 
-def test_deterministic_replay_from_same_inputs():
-    initial_state = {"tracks": []}
-    batch = obs_batch(1.0, [obs("b", 20, 20), obs("a", 10, 10)])
-
-    state_a = deepcopy(initial_state)
-    state_b = deepcopy(initial_state)
-
-    assert Track(state_a, deepcopy(batch)) == Track(state_b, deepcopy(batch))
-
-
-def test_new_track_id_uses_existing_max_id():
-    state = {"tracks": [existing_track("156", timestamp=0.0)]}
-    Track(state, obs_batch(100.0, [obs("new", 10000, 10000)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["156", "157"]
-
-
-def test_one_track_one_observation_prefers_continuity_despite_embedding_disagreement():
-    state = {"tracks": [existing_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-
-    Track(state, obs_batch(1.0, [obs("next", 14.0, 10.0, emb=[-1.0, 0.0])]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 2
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 14.0, "y": 10.0}
-
-
-def test_appearance_tiebreak_does_not_fragment_physically_plausible_continuation():
-    state = {"tracks": [existing_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-    config = TrackV2Config(appearance_tiebreak_enabled=True)
-
-    Track(state, obs_batch(1.0, [obs("next", 14.0, 10.0, emb=[-1.0, 0.0])]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 2
-
-
-def test_many_tracks_one_observation_reuses_most_physically_plausible_track():
-    state = {
-        "tracks": [
-            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
-            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
-            confirmed_track("3", timestamp=0.0, x=200.0, y=200.0),
-        ]
-    }
-
-    Track(state, obs_batch(1.0, [obs("only", 104.0, 100.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 3, 2]
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
-
-
-def test_one_track_multiple_observations_extends_existing_before_births():
-    state = {"tracks": [confirmed_track("5", timestamp=0.0, x=50.0, y=50.0)]}
-
-    Track(state, obs_batch(1.0, [obs("new-object", 500.0, 500.0), obs("same", 55.0, 50.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["5", "6"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 55.0, "y": 50.0}
-    assert state["tracks"][1]["path"][0]["center"] == {"x": 500.0, "y": 500.0}
-
-
-def test_stale_track_does_not_long_term_reidentify_returning_object():
-    state = {"tracks": [existing_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-
-    Track(state, obs_batch(5.0, [obs("returning", 12.0, 10.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [1, 1]
-
-
-def test_motion_dominates_when_appearance_conflicts_with_clear_spatial_match():
-    track_1 = confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)
-    track_2 = confirmed_track("2", timestamp=0.0, x=100.0, y=100.0)
-    track_2["best_crop"]["embedding"] = obs("seed-2", 100.0, 100.0, emb=[0.0, 1.0])[
-        "embedding"
-    ]
-    state = {"tracks": [track_1, track_2]}
-
-    Track(state, obs_batch(1.0, [obs("near-1", 12.0, 10.0, emb=[0.0, 1.0])]))
-
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 2]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-
-
-def test_recent_path_velocity_is_smoothed_to_resist_detector_jitter():
-    state = {"tracks": [existing_track("1", timestamp=0.0, x=0.0, y=0.0)]}
-    append_point(state["tracks"][0], 1.0, 10.0, 0.0)
-    append_point(state["tracks"][0], 2.0, 20.0, 0.0)
-    append_point(state["tracks"][0], 3.0, 24.0, 0.0)
-
-    Track(state, obs_batch(4.0, [obs("next", 40.0, 0.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 5
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}
-
-
-def test_confirmed_active_track_rejects_huge_jump_even_when_escape_valve_disabled():
-    state = {"tracks": [confirmed_track("7", timestamp=0.0, x=10.0, y=10.0)]}
-    config = TrackV2Config(forced_continuity_break_normalized_motion=None)
-
-    Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["7"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
-
-
-def test_default_forced_continuity_break_rejects_extreme_jump_and_creates_tentative_track():
-    state = {"tracks": [confirmed_track("7", timestamp=0.0, x=10.0, y=10.0)]}
-
-    Track(state, obs_batch(1.0, [obs("jump", 2000.0, 2000.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["7"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 2000.0, "y": 2000.0}
-
-
-def test_forced_continuity_break_preserves_normal_walking_continuity():
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-    config = TrackV2Config(forced_continuity_break_normalized_motion=0.1)
-
-    Track(state, obs_batch(1.0, [obs("walk", 14.0, 10.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 14.0, "y": 10.0}
-
-
-def test_forced_continuity_break_preserves_brief_occlusion_continuity():
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-    config = TrackV2Config(
-        max_reassociation_gap_sec=2.0,
-        forced_continuity_break_normalized_motion=0.1,
-    )
-
-    Track(state, obs_batch(1.0, []), config)
-    Track(state, obs_batch(1.5, [obs("return", 12.0, 10.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-
-
-def test_forced_continuity_break_ignores_appearance_disagreement_for_plausible_motion():
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-    config = TrackV2Config(forced_continuity_break_normalized_motion=0.1)
-
-    Track(state, obs_batch(1.0, [obs("appearance", 12.0, 10.0, emb=[-1.0, 0.0])]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-
-
-def test_forced_continuity_break_multi_person_scene_is_deterministic():
-    config = TrackV2Config(forced_continuity_break_normalized_motion=8.0)
-    initial_state = {
-        "tracks": [
-            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
-            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
-        ]
-    }
-    batch = obs_batch(
-        1.0,
-        [
-            obs("far", 2000.0, 2000.0),
-            obs("near-2", 104.0, 100.0),
-        ],
-    )
-    state_a = deepcopy(initial_state)
-    state_b = deepcopy(initial_state)
-
-    assert Track(state_a, deepcopy(batch), config) == Track(state_b, deepcopy(batch), config)
-    assert [track["track_id"] for track in state_a["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state_a["tracks"]] == [3, 3]
-    assert state_a["tracks"][1]["path"][-1]["center"] == {"x": 104.0, "y": 100.0}
-
-
-def test_forced_continuity_break_does_not_reoptimize_remaining_selected_matches():
-    config = TrackV2Config(forced_continuity_break_normalized_motion=15.0)
-    state = {
-        "tracks": [
-            confirmed_track("1", timestamp=1.0, x=0.0, y=0.0),
-            confirmed_track("2", timestamp=1.0, x=100.0, y=0.0),
-        ]
-    }
-
-    Track(
-        state,
-        obs_batch(
-            2.0,
-            [
-                obs("far-new", 800.0, 0.0),
-                obs("near-2", 102.0, 0.0),
-            ],
-        ),
-        config,
-    )
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 102.0, "y": 0.0}
-
-
-def test_five_confirmed_active_tracks_three_observations_zero_births():
-    state = {
-        "tracks": [
-            confirmed_track(str(index), timestamp=0.0, x=float(index * 10), y=0.0)
-            for index in range(1, 6)
-        ]
-    }
-
-    Track(state, obs_batch(1.0, [obs("a", 10.0, 0.0), obs("b", 20.0, 0.0), obs("c", 30.0, 0.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3", "4", "5"]
-    assert sum(len(track["path"]) == 3 for track in state["tracks"]) == 3
-
-
-def test_five_confirmed_active_tracks_five_observations_zero_births():
-    state = {
-        "tracks": [
-            confirmed_track(str(index), timestamp=0.0, x=float(index * 10), y=0.0)
-            for index in range(1, 6)
-        ]
-    }
-
-    Track(
-        state,
-        obs_batch(
-            1.0,
-            [obs(str(index), float(index * 10), 0.0) for index in range(1, 6)],
-        ),
-    )
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2", "3", "4", "5"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 3, 3, 3, 3]
-
-
-def test_five_confirmed_active_tracks_seven_observations_creates_two_births():
-    state = {
-        "tracks": [
-            confirmed_track(str(index), timestamp=0.0, x=float(index * 10), y=0.0)
-            for index in range(1, 6)
-        ]
-    }
-
-    Track(
-        state,
-        obs_batch(
-            1.0,
-            [obs(str(index), float(index * 10), 0.0) for index in range(1, 8)],
-        ),
-    )
-
-    assert [track["track_id"] for track in state["tracks"]] == [
-        "1",
-        "2",
-        "3",
-        "4",
-        "5",
-        "6",
-        "7",
-    ]
-    assert [len(track["path"]) for track in state["tracks"][:5]] == [3, 3, 3, 3, 3]
-    assert [len(track["path"]) for track in state["tracks"][5:]] == [1, 1]
-
-
-def test_confirmed_track_continues_with_poor_detection_confidence():
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-
-    Track(state, obs_batch(1.0, [obs("poor", 11.0, 10.0, confidence=0.01)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-
-
-def test_confirmed_track_receives_first_claim_over_tentative_track():
-    confirmed = confirmed_track("1", timestamp=0.0, x=100.0, y=100.0)
-    tentative = existing_track("2", timestamp=0.0, x=101.0, y=100.0)
-    state = {"tracks": [confirmed, tentative]}
-
-    Track(state, obs_batch(1.0, [obs("could-fit-both", 101.0, 100.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 2]
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 101.0, "y": 100.0}
-
-
-def test_only_tentative_track_can_continue_and_mature():
-    state = {"tracks": []}
-
-    Track(state, obs_batch(0.0, [obs("first", 10.0, 10.0)]))
-    Track(state, obs_batch(1.0, [obs("second", 11.0, 10.0)]))
-    Track(state, obs_batch(2.0, [obs("third", 12.0, 10.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
+def test_historical_anchor_uses_last_configured_path_points():
+    track = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
+    append_point(track, 1.0, 10.0, 0.0)
+    append_point(track, 2.0, 20.0, 0.0)
+    append_point(track, 3.0, 30.0, 10.0)
+
+    anchor, points_used = historical_anchor(track["path"], TrackV2Config(location_history_window_frames=3))
+
+    assert points_used == 3
+    assert anchor == {"x": 20.0, "y": 10.0 / 3.0}
 
 
 def test_public_contract_shapes_do_not_gain_tracking_status_fields():
@@ -464,104 +265,11 @@ def test_public_contract_shapes_do_not_gain_tracking_status_fields():
     assert set(state["tracks"][0]["best_crop"].keys()) == {"frame_id", "bbox", "embedding"}
 
 
-def test_continuous_tracking_within_reassociation_gap_keeps_same_id():
-    config = TrackV2Config(max_reassociation_gap_sec=0.5)
-    state = {"tracks": []}
-
-    for index, timestamp in enumerate([0.0, 0.25, 0.5, 0.75, 1.0]):
-        Track(state, obs_batch(timestamp, [obs(f"a-{index}", 10.0 + index, 10.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 5
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 14.0, "y": 10.0}
-
-
-def test_gap_within_reassociation_gap_keeps_confirmed_identity():
-    config = TrackV2Config(max_reassociation_gap_sec=0.5)
-    state = {"tracks": []}
-
-    Track(state, obs_batch(0.0, [obs("a-0", 10.0, 10.0)]), config)
-    Track(state, obs_batch(0.25, [obs("a-1", 11.0, 10.0)]), config)
-    Track(state, obs_batch(0.5, []), config)
-    Track(state, obs_batch(0.6, []), config)
-    Track(state, obs_batch(0.7, [obs("a-2", 12.0, 10.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-
-
-def test_gap_beyond_reassociation_gap_creates_new_id_for_confirmed_track():
-    config = TrackV2Config(
-        max_reassociation_gap_sec=0.5,
-    )
-    state = {"tracks": []}
-
-    Track(state, obs_batch(0.0, [obs("a-0", 10.0, 10.0)]), config)
-    Track(state, obs_batch(0.25, [obs("a-1", 11.0, 10.0)]), config)
-    Track(state, obs_batch(0.6, []), config)
-    Track(state, obs_batch(0.8, []), config)
-    Track(state, obs_batch(1.0, [obs("b-0", 12.0, 10.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-
-
-def test_stale_confirmed_track_cannot_suppress_new_birth():
-    config = TrackV2Config(
-        max_reassociation_gap_sec=0.5,
-    )
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-
-    Track(state, obs_batch(1.0, [obs("new-person", 20.0, 20.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 20.0, "y": 20.0}
-
-
-def test_matched_observations_do_not_birth_and_unmatched_observations_do_birth():
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=10.0, y=10.0)]}
-
-    Track(state, obs_batch(1.0, [obs("near", 12.0, 10.0), obs("teleport", 5000.0, 5000.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 5000.0, "y": 5000.0}
-
-
-def test_observation_specific_eligibility_births_unexplained_new_person_with_active_tracks():
-    state = {
-        "tracks": [
-            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
-            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
-        ]
-    }
-
-    Track(state, obs_batch(1.0, [obs("near-1", 12.0, 10.0), obs("new", 900.0, 900.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 12.0, "y": 10.0}
-
-
-def test_configurable_hard_speed_limit_controls_eligibility():
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)]}
-    strict = TrackV2Config(hard_speed_limit_px_per_sec=5.0)
-
-    Track(state, obs_batch(1.0, [obs("too-fast", 20.0, 0.0)]), strict)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-
-
-def test_deterministic_replay_many_runs_with_eligibility():
+def test_repeated_identical_inputs_create_identical_outputs():
     initial_state = {
         "tracks": [
-            confirmed_track("1", timestamp=0.0, x=10.0, y=10.0),
-            confirmed_track("2", timestamp=0.0, x=100.0, y=100.0),
+            active_track("1", timestamp=0.0, x=10.0, y=10.0),
+            active_track("2", timestamp=0.0, x=100.0, y=100.0),
         ]
     }
     batch = obs_batch(1.0, [obs("b", 101.0, 100.0), obs("a", 11.0, 10.0)])
@@ -574,22 +282,13 @@ def test_deterministic_replay_many_runs_with_eligibility():
     assert all(output == outputs[0] for output in outputs)
 
 
-def test_partition_track_indices_compatibility_uses_lifecycle_windows():
-    from track.tracker import _partition_track_indices
-
-    config = TrackV2Config(
-        confirmation_min_path_points=3,
-        active_confirmation_min_path_points=3,
-        tentative_confirmation_min_path_points=3,
-        confirmed_reassociation_window_sec=2.0,
-        max_reassociation_gap_sec=2.0,
-        tentative_track_window_sec=0.5,
-    )
+def test_partition_track_indices_compatibility_uses_new_lifecycle():
+    config = TrackV2Config(confirmation_hits=3, active_timeout_frames=2, tentative_timeout_frames=1)
     confirmed = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
     append_point(confirmed, 0.1, 1.0, 0.0)
     append_point(confirmed, 0.2, 2.0, 0.0)
     tentative_recent = existing_track("2", timestamp=0.8, x=10.0, y=0.0)
-    tentative_stale = existing_track("3", timestamp=0.0, x=20.0, y=0.0)
+    tentative_stale = existing_track("3", timestamp=-1.0, x=20.0, y=0.0)
 
     active_indices, tentative_indices = _partition_track_indices(
         [confirmed, tentative_recent, tentative_stale], 1.0, config
@@ -597,215 +296,3 @@ def test_partition_track_indices_compatibility_uses_lifecycle_windows():
 
     assert active_indices == [0]
     assert tentative_indices == [1]
-
-
-def test_tentative_tracks_use_stricter_observation_specific_gates():
-    config = TrackV2Config(
-        confirmed_prediction_gate_px=200.0,
-        tentative_prediction_gate_px=20.0,
-        confirmed_latest_position_gate_px=200.0,
-        tentative_latest_position_gate_px=20.0,
-        confirmed_max_speed_px_per_sec=500.0,
-        tentative_max_speed_px_per_sec=25.0,
-    )
-    confirmed = confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)
-    tentative = existing_track("2", timestamp=0.0, x=100.0, y=0.0)
-    state = {"tracks": [confirmed, tentative]}
-
-    Track(state, obs_batch(1.0, [obs("could-fit-confirmed-only", 40.0, 0.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 40.0, "y": 0.0}
-
-
-def test_nearby_confirmed_tracks_do_not_steal_clear_owner_observation():
-    state = {
-        "tracks": [
-            confirmed_track("1", timestamp=0.0, x=10.0, y=0.0),
-            confirmed_track("2", timestamp=0.0, x=20.0, y=0.0),
-        ]
-    }
-
-    Track(state, obs_batch(1.0, [obs("near-owner-2", 21.0, 0.0)]))
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [2, 3]
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 21.0, "y": 0.0}
-
-
-def test_confirmed_ownership_survives_small_localisation_jitter_between_people():
-    state = {
-        "tracks": [
-            confirmed_track("1", timestamp=0.0, x=100.0, y=100.0),
-            confirmed_track("2", timestamp=0.0, x=106.0, y=100.0),
-        ]
-    }
-
-    Track(
-        state,
-        obs_batch(
-            1.0,
-            [
-                obs("right-person", 105.5, 100.0),
-                obs("left-person", 100.5, 100.0),
-            ],
-        ),
-    )
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 3]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 100.5, "y": 100.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 105.5, "y": 100.0}
-
-
-def test_short_occlusion_with_nearby_confirmed_tracks_preserves_original_owner():
-    config = TrackV2Config(detector_miss_tolerance_sec=2.0)
-    state = {
-        "tracks": [
-            confirmed_track("1", timestamp=0.0, x=50.0, y=50.0),
-            confirmed_track("2", timestamp=0.0, x=80.0, y=50.0),
-        ]
-    }
-
-    Track(state, obs_batch(1.0, [obs("right-visible", 81.0, 50.0)]), config)
-    Track(state, obs_batch(1.5, [obs("left-return", 51.0, 50.0), obs("right-next", 82.0, 50.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
-    assert [len(track["path"]) for track in state["tracks"]] == [3, 4]
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 51.0, "y": 50.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 82.0, "y": 50.0}
-
-
-def test_far_observation_births_instead_of_forcing_continuity():
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)]}
-    config = TrackV2Config(max_physical_speed_px_per_sec=100.0)
-
-    Track(state, obs_batch(1.0, [obs("too-far", 1000.0, 0.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 1000.0, "y": 0.0}
-
-
-def test_legacy_config_maps_to_normalized_config_once():
-    from track.normalize import _normalize_config
-
-    config = TrackV2Config(
-        confirmation_min_path_points=3,
-        active_confirmation_min_path_points=4,
-        detector_miss_tolerance_sec=1.25,
-        tentative_tolerance_sec=0.75,
-        prediction_gate_px=30.0,
-        prediction_gate_growth_px_per_sec=80.0,
-        hard_speed_limit_px_per_sec=120.0,
-        jitter_tolerance_px=6.0,
-        continuity_strength=0.2,
-        takeover_margin=0.4,
-    )
-
-    normalized = _normalize_config(config)
-
-    assert normalized.confirmation_hits == 4
-    assert normalized.detector_miss_tolerance_sec == 1.25
-    assert normalized.tentative_tolerance_sec == 0.75
-    assert normalized.motion_tolerance_px == 30.0
-    assert normalized.motion_tolerance_growth_px_per_sec == 80.0
-    assert normalized.max_physical_speed_px_per_sec == 120.0
-    assert normalized.localization_jitter_px == 6.0
-    assert normalized.continuity_strength == 0.2
-    assert normalized.takeover_margin == 0.4
-
-
-def test_normalized_config_is_stable_for_equal_public_config():
-    from track.normalize import _normalize_config
-
-    config = TrackV2Config(detector_miss_tolerance_sec=1.0, motion_tolerance_px=75.0)
-
-    assert _normalize_config(config) == _normalize_config(config)
-
-
-def test_appearance_does_not_rescue_impossible_motion():
-    state = {"tracks": [confirmed_track("1", timestamp=0.0, x=0.0, y=0.0)]}
-    state["tracks"][0]["best_crop"]["embedding"] = obs("seed", 0.0, 0.0, emb=[1.0, 0.0])[
-        "embedding"
-    ]
-    config = TrackV2Config(max_physical_speed_px_per_sec=10.0)
-
-    Track(state, obs_batch(1.0, [obs("same-appearance-too-fast", 100.0, 0.0, emb=[1.0, 0.0])]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 3
-
-
-def test_historical_anchor_uses_last_configured_path_points():
-    from track.motion import historical_anchor
-    from track.policy import build_policy
-
-    track = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
-    append_point(track, 1.0, 10.0, 0.0)
-    append_point(track, 2.0, 20.0, 0.0)
-    append_point(track, 3.0, 30.0, 10.0)
-    policy = build_policy(TrackV2Config(location_history_window_frames=3))
-
-    anchor, points_used = historical_anchor(track["path"], policy)
-
-    assert points_used == 3
-    assert anchor == {"x": 20.0, "y": 10.0 / 3.0}
-
-
-def test_historical_anchor_short_history_uses_available_points():
-    from track.motion import historical_anchor
-    from track.policy import build_policy
-
-    track = existing_track("1", timestamp=0.0, x=4.0, y=6.0)
-    policy = build_policy(TrackV2Config(location_history_window_frames=5))
-
-    anchor, points_used = historical_anchor(track["path"], policy)
-
-    assert points_used == 1
-    assert anchor == {"x": 4.0, "y": 6.0}
-
-
-def test_location_history_window_frames_is_validated():
-    from track.policy import build_policy
-
-    for value in (0, 31, 2.5):
-        try:
-            build_policy(TrackV2Config(location_history_window_frames=value))
-        except ValueError as exc:
-            assert "location_history_window_frames" in str(exc)
-        else:
-            raise AssertionError("invalid location history window should fail")
-
-
-def test_historical_anchor_dominates_latest_detector_jitter_assignment():
-    stable_left = confirmed_track("1", timestamp=0.0, x=100.0, y=100.0)
-    append_point(stable_left, 0.1, 101.0, 100.0)
-    append_point(stable_left, 0.2, 99.0, 100.0)
-    append_point(stable_left, 0.3, 100.0, 100.0)
-    append_point(stable_left, 0.4, 130.0, 100.0)  # latest-point detector jitter toward track 2
-    stable_right = confirmed_track("2", timestamp=0.0, x=140.0, y=100.0)
-    append_point(stable_right, 0.1, 139.0, 100.0)
-    append_point(stable_right, 0.2, 141.0, 100.0)
-    append_point(stable_right, 0.3, 140.0, 100.0)
-    append_point(stable_right, 0.4, 140.0, 100.0)
-    state = {"tracks": [stable_left, stable_right]}
-    config = TrackV2Config(location_history_window_frames=5)
-
-    Track(state, obs_batch(0.5, [obs("left-return", 100.0, 100.0), obs("right", 140.0, 100.0)]), config)
-
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 100.0, "y": 100.0}
-    assert state["tracks"][1]["path"][-1]["center"] == {"x": 140.0, "y": 100.0}
-
-
-def test_historical_anchor_preserves_medium_walking_continuity():
-    config = TrackV2Config(location_history_window_frames=5, max_physical_speed_px_per_sec=250.0)
-    state = {"tracks": []}
-
-    for index, x in enumerate([100.0, 108.0, 116.0, 124.0, 132.0, 140.0]):
-        Track(state, obs_batch(index * 0.2, [obs(f"walk-{index}", x, 100.0)]), config)
-
-    assert [track["track_id"] for track in state["tracks"]] == ["1"]
-    assert len(state["tracks"][0]["path"]) == 6
-    assert state["tracks"][0]["path"][-1]["center"] == {"x": 140.0, "y": 100.0}

@@ -1,17 +1,10 @@
 """Stateless deterministic Track V2 reducer."""
 
-from math import floor, isfinite
+from math import isfinite
 
-from track.assignment import assign_candidates
-from track.candidate_builder import (
-    add_suppression_coverage_candidates,
-    build_candidates,
-    observation_sort_key,
-    track_sort_key,
-)
 from track.config import TrackV2Config
-from track.lifecycle import classify_track
-from track.lifecycle import append_observation, create_track
+from track.lifecycle import ACTIVE, TENTATIVE, append_observation, classify_track, create_track
+from track.matcher import match_tier, observation_sort_key, track_sort_key
 from track.models import (
     REQUIRED_BBOX_FIELDS,
     REQUIRED_BEST_CROP_FIELDS,
@@ -22,7 +15,6 @@ from track.models import (
     REQUIRED_TRACK_FIELDS,
     REQUIRED_TRACKING_STATE_FIELDS,
 )
-from track.policy import build_policy
 
 
 def _require_mapping(value, name: str) -> None:
@@ -130,20 +122,12 @@ def _reorder_state_tracks(state) -> None:
     state["tracks"].sort(key=track_sort_key)
 
 
-def _partition_track_indices(tracks, timestamp: float, config: TrackV2Config):
-    """Compatibility helper returning eligible confirmed and tentative indices."""
+def _partition_track_indices(tracks, frame_number: float, config: TrackV2Config):
+    """Compatibility helper returning active and tentative track indices."""
 
-    policy = build_policy(config)
-    active_indices = []
-    tentative_indices = []
-    for index, track in enumerate(tracks):
-        status = classify_track(track, timestamp, policy)
-        if not status.eligible:
-            continue
-        if status.confirmed:
-            active_indices.append(index)
-        else:
-            tentative_indices.append(index)
+    statuses = [classify_track(track, frame_number, config) for track in tracks]
+    active_indices = [index for index, status in enumerate(statuses) if status.state == ACTIVE]
+    tentative_indices = [index for index, status in enumerate(statuses) if status.state == TENTATIVE]
     return active_indices, tentative_indices
 
 
@@ -151,11 +135,10 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 
     config = config or TrackV2Config()
-    normalized_config = build_policy(config)
     _validate_tracking_state(tracking_state)
     _validate_observation_batch(observation_batch)
 
-    timestamp = float(observation_batch["timestamp"])
+    frame_number = float(observation_batch["timestamp"])
     frame_id = observation_batch["frame_id"]
 
     _reorder_state_tracks(tracking_state)
@@ -166,69 +149,40 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
         )
     ]
 
-    next_id = _next_numeric_track_id(tracking_state["tracks"])
-    track_statuses = [
-        classify_track(track, timestamp, normalized_config)
-        for track in tracking_state["tracks"]
-    ]
-    active_track_indices = [
-        index for index, status in enumerate(track_statuses) if status.eligible
-    ]
-    observation_count = len(ordered_observations)
-    explainable_observations = min(len(active_track_indices), observation_count)
-    overflow_observations = max(0, observation_count - len(active_track_indices))
-    suppression = normalized_config.birth_suppression_strength
-    max_suppressed_births = floor(explainable_observations * (1.0 - suppression))
-    max_births_allowed = overflow_observations + max_suppressed_births
+    statuses = [classify_track(track, frame_number, config) for track in tracking_state["tracks"]]
+    active_track_indices = [index for index, status in enumerate(statuses) if status.state == ACTIVE]
+    tentative_track_indices = [index for index, status in enumerate(statuses) if status.state == TENTATIVE]
+    all_observation_indices = list(range(len(ordered_observations)))
 
-    candidates = build_candidates(
+    active_matches, remaining_observation_indices = match_tier(
         tracking_state["tracks"],
         ordered_observations,
-        timestamp,
-        normalized_config,
-        track_statuses,
+        statuses,
+        active_track_indices,
+        all_observation_indices,
+        config,
     )
-    if max_births_allowed < observation_count and active_track_indices:
-        candidates = add_suppression_coverage_candidates(
-            candidates,
-            tracking_state["tracks"],
-            ordered_observations,
-            timestamp,
-            normalized_config,
-            track_statuses,
-            active_track_indices,
-        )
-    (
-        matches,
-        _unmatched_track_indices,
-        unmatched_observation_indices,
-    ) = assign_candidates(
-        candidates,
-        len(tracking_state["tracks"]),
-        len(ordered_observations),
-        normalized_config,
-        max_births_allowed,
+    tentative_matches, remaining_observation_indices = match_tier(
+        tracking_state["tracks"],
+        ordered_observations,
+        statuses,
+        tentative_track_indices,
+        remaining_observation_indices,
+        config,
     )
-    state_matches = matches
 
-    remaining_observation_indices = set(unmatched_observation_indices)
-    if len(remaining_observation_indices) > max_births_allowed:
-        raise ValueError("birth suppression invariant violated")
-    if suppression >= 1.0 and len(active_track_indices) >= observation_count and remaining_observation_indices:
-        raise ValueError("hard birth suppression invariant violated")
-
-    for state_track_index, observation_index in sorted(state_matches):
+    for state_track_index, observation_index in sorted(active_matches + tentative_matches):
         append_observation(
             tracking_state["tracks"][state_track_index],
             ordered_observations[observation_index],
             frame_id,
-            timestamp,
+            frame_number,
         )
 
-    birth_observation_indices = sorted(remaining_observation_indices)
-    for observation_index in birth_observation_indices:
+    next_id = _next_numeric_track_id(tracking_state["tracks"])
+    for observation_index in sorted(remaining_observation_indices):
         observation = ordered_observations[observation_index]
-        tracking_state["tracks"].append(create_track(observation, frame_id, timestamp, str(next_id)))
+        tracking_state["tracks"].append(create_track(observation, frame_id, frame_number, str(next_id)))
         next_id += 1
 
     _reorder_state_tracks(tracking_state)
