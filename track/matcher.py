@@ -44,9 +44,20 @@ def historical_anchor(path, config: TrackV2Config) -> tuple[dict, int]:
         raise ValueError("historical anchor requires a non-empty path")
     window = min(len(path), int(config.location_history_window_frames))
     points = path[-window:]
+    weights = [
+        float(index) ** float(config.anchor_weight_exponent)
+        for index in range(1, window + 1)
+    ]
+    total_weight = sum(weights)
     return {
-        "x": sum(float(point["center"]["x"]) for point in points) / window,
-        "y": sum(float(point["center"]["y"]) for point in points) / window,
+        "x": sum(
+            float(point["center"]["x"]) * weight for point, weight in zip(points, weights)
+        )
+        / total_weight,
+        "y": sum(
+            float(point["center"]["y"]) * weight for point, weight in zip(points, weights)
+        )
+        / total_weight,
     }, window
 
 
