@@ -1,4 +1,7 @@
-from typing import Sequence
+"""Finite counting-segment overlay for replay video frames."""
+
+from collections.abc import Mapping
+from math import isfinite
 
 import cv2
 import numpy as np
@@ -6,82 +9,24 @@ import numpy as np
 LINE_COLOR_BGR = (255, 255, 255)
 POINT_A_COLOR_BGR = (0, 0, 255)
 POINT_B_COLOR_BGR = (255, 0, 0)
+LABEL_COLOR_BGR = (255, 255, 255)
 LINE_THICKNESS = 2
 POINT_RADIUS = 6
 
 
-def _point_xy(point: Sequence[float], name: str) -> tuple[float, float]:
-    if len(point) != 2:
-        raise ValueError(f"{name} must contain exactly two coordinates")
-    return float(point[0]), float(point[1])
-
-
-def _line_intersections_with_frame(
-    point_a: tuple[float, float],
-    point_b: tuple[float, float],
-    width: int,
-    height: int,
-) -> list[tuple[int, int]]:
-    ax, ay = point_a
-    bx, by = point_b
-    dx = bx - ax
-    dy = by - ay
-
-    if dx == 0.0 and dy == 0.0:
-        raise ValueError("LineConfig point_a and point_b must define a non-zero line")
-
-    max_x = float(width - 1)
-    max_y = float(height - 1)
-    intersections: list[tuple[int, int]] = []
-
-    if dx != 0.0:
-        for x in (0.0, max_x):
-            t = (x - ax) / dx
-            y = ay + t * dy
-            if 0.0 <= y <= max_y:
-                intersections.append((int(round(x)), int(round(y))))
-
-    if dy != 0.0:
-        for y in (0.0, max_y):
-            t = (y - ay) / dy
-            x = ax + t * dx
-            if 0.0 <= x <= max_x:
-                intersections.append((int(round(x)), int(round(y))))
-
-    deduplicated = []
-    for point in intersections:
-        if point not in deduplicated:
-            deduplicated.append(point)
-    return deduplicated
-
-
-def _extended_line_points(
-    point_a: tuple[float, float],
-    point_b: tuple[float, float],
-    width: int,
-    height: int,
-) -> tuple[tuple[int, int], tuple[int, int]]:
-    intersections = _line_intersections_with_frame(point_a, point_b, width, height)
-    if len(intersections) >= 2:
-        best_pair = (intersections[0], intersections[1])
-        best_distance = -1
-        for first_index, first in enumerate(intersections):
-            for second in intersections[first_index + 1 :]:
-                distance = (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2
-                if distance > best_distance:
-                    best_distance = distance
-                    best_pair = (first, second)
-        return best_pair
-
-    ax, ay = point_a
-    bx, by = point_b
-    dx = bx - ax
-    dy = by - ay
-    scale = float(max(width, height) * 4)
-    return (
-        (int(round(ax - dx * scale)), int(round(ay - dy * scale))),
-        (int(round(ax + dx * scale)), int(round(ay + dy * scale))),
-    )
+def _point_xy(point, name: str) -> tuple[float, float]:
+    if not isinstance(point, Mapping):
+        raise ValueError(f"{name} must be an object")
+    for field in ("x", "y"):
+        if field not in point:
+            raise ValueError(f"Missing required {name} field: {field}")
+    if isinstance(point["x"], bool) or isinstance(point["y"], bool):
+        raise ValueError(f"{name} coordinates must be finite")
+    x = float(point["x"])
+    y = float(point["y"])
+    if not isfinite(x) or not isfinite(y):
+        raise ValueError(f"{name} coordinates must be finite")
+    return x, y
 
 
 def _draw_point(
@@ -98,23 +43,36 @@ def _draw_point(
 
 
 def draw_line_overlay(frame: np.ndarray, line_config: dict) -> np.ndarray:
-    height, width = frame.shape[:2]
     point_a = _point_xy(line_config["point_a"], "point_a")
     point_b = _point_xy(line_config["point_b"], "point_b")
-    line_start, line_end = _extended_line_points(point_a, point_b, width, height)
-
     cv2.line(
         frame,
-        line_start,
-        line_end,
+        (int(round(point_a[0])), int(round(point_a[1]))),
+        (int(round(point_b[0])), int(round(point_b[1]))),
         LINE_COLOR_BGR,
         thickness=LINE_THICKNESS,
         lineType=cv2.LINE_AA,
     )
     _draw_point(frame, point_a, POINT_A_COLOR_BGR)
     _draw_point(frame, point_b, POINT_B_COLOR_BGR)
+    cv2.putText(
+        frame,
+        "A",
+        (int(round(point_a[0])) + 8, int(round(point_a[1])) - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        LABEL_COLOR_BGR,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        "B",
+        (int(round(point_b[0])) + 8, int(round(point_b[1])) - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        LABEL_COLOR_BGR,
+        1,
+        cv2.LINE_AA,
+    )
     return frame
-
-
-def render_line_overlay(frame: np.ndarray, line_config: dict) -> np.ndarray:
-    return draw_line_overlay(frame.copy(), line_config)

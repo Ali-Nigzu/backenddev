@@ -1,8 +1,4 @@
-"""Replay Detect -> Track over an input video.
-
-This script intentionally stops at Track V2. It does not run Event,
-Demographic, Assemble, or Output stages.
-"""
+"""Replay Detect -> Track over a video, then run Event once."""
 
 import argparse
 from pathlib import Path
@@ -10,6 +6,10 @@ from pathlib import Path
 
 DEFAULT_VIDEO_PATH = "videoplayback.mp4"
 DEFAULT_OUTPUT_NAME = "tracking_replay.mp4"
+LINE_CONFIG = {
+    "point_a": {"x": 100.0, "y": 300.0},
+    "point_b": {"x": 700.0, "y": 300.0},
+}
 
 
 def parse_args():
@@ -71,7 +71,9 @@ def current_frame_assignments(
     timestamp = float(detection_batch["timestamp"])
     detections_by_centre = {}
     for detection in detection_batch["detections"]:
-        detections_by_centre.setdefault(point_key(detection["centre"]), []).append(detection)
+        detections_by_centre.setdefault(point_key(detection["centre"]), []).append(
+            detection
+        )
 
     assignments = []
     for track in tracking_state["tracks"]:
@@ -145,9 +147,21 @@ def draw_tracking_state(
         "unmatched_active": len(unmatched_active_ids),
     }
     overlay = f"tracks={len(tracking_state['tracks'])} det={debug['detections']} matched={debug['matched']}"
-    cv2.rectangle(frame, (8, 8), (min(width - 1, 8 + 12 * len(overlay)), 36), (0, 0, 0), -1)
-    cv2.putText(frame, overlay, (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.rectangle(
+        frame, (8, 8), (min(width - 1, 8 + 12 * len(overlay)), 36), (0, 0, 0), -1
+    )
+    cv2.putText(
+        frame,
+        overlay,
+        (14, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
     return debug
+
 
 def update_track_summary(track_summary, tracking_state) -> None:
     for track in tracking_state["tracks"]:
@@ -159,6 +173,38 @@ def update_track_summary(track_summary, tracking_state) -> None:
         )
         summary["first_seen"] = min(summary["first_seen"], first_seen)
         summary["last_seen"] = max(summary["last_seen"], last_seen)
+
+
+def event_label(event_type: int) -> str:
+    return "ENTRY" if event_type == 1 else "EXIT"
+
+
+def print_event_summary(event_batch: dict) -> None:
+    events = event_batch["events"]
+    entry_count = sum(1 for event in events if event["event_type"] == 1)
+    exit_count = sum(1 for event in events if event["event_type"] == 0)
+    tracks_with_events = {event["track_id"] for event in events}
+
+    print("\nEVENTS")
+    print("======")
+    if not events:
+        print("- none")
+    for event in events:
+        bbox = event["best_crop"]["bbox"]
+        print(
+            f"Track {event['track_id']} | "
+            f"timestamp={float(event['timestamp']):.6f} | "
+            f"event_type={event['event_type']} | "
+            f"{event_label(event['event_type'])} | "
+            f"best_crop_frame={event['best_crop']['frame_id']} | "
+            f"bbox=({float(bbox['x1']):.3f}, {float(bbox['y1']):.3f}, "
+            f"{float(bbox['x2']):.3f}, {float(bbox['y2']):.3f})"
+        )
+
+    print(f"Total events: {len(events)}")
+    print(f"Entries: {entry_count}")
+    print(f"Exits: {exit_count}")
+    print(f"Tracks with events: {len(tracks_with_events)}")
 
 
 def print_track_summary(track_summary, frame_count: int) -> None:
@@ -189,11 +235,17 @@ def print_track_summary(track_summary, frame_count: int) -> None:
 def main():
     args = parse_args()
     video_path = Path(args.input)
-    output_path = Path(args.output) if args.output else Path(__file__).with_name(DEFAULT_OUTPUT_NAME)
+    output_path = (
+        Path(args.output)
+        if args.output
+        else Path(__file__).with_name(DEFAULT_OUTPUT_NAME)
+    )
 
     import cv2
 
     from detect import Detect
+    from events import Event
+    from events.line_overlay import draw_line_overlay
     from track import Track
 
     cap = cv2.VideoCapture(str(video_path))
@@ -223,6 +275,7 @@ def main():
     print("DETECT -> TRACK REPLAY")
     print("======================")
     print(f"input: {video_path}")
+    print(f"line_config: {LINE_CONFIG}")
 
     try:
         while True:
@@ -243,7 +296,9 @@ def main():
 
             detection_batch = detect(frame)
             active_ids = active_track_ids(tracking_state, detection_batch)
-            previous_track_ids = {str(track["track_id"]) for track in tracking_state["tracks"]}
+            previous_track_ids = {
+                str(track["track_id"]) for track in tracking_state["tracks"]
+            }
             tracking_state = Track(tracking_state, detection_batch)
             update_track_summary(track_summary, tracking_state)
             debug = draw_tracking_state(
@@ -253,6 +308,7 @@ def main():
                 active_ids,
                 previous_track_ids,
             )
+            draw_line_overlay(bgr_frame, LINE_CONFIG)
             if debug["births"] or debug["unmatched_active"]:
                 print(
                     f"\nframe {frame_index}: active={debug['active']} det={debug['detections']} "
@@ -267,7 +323,9 @@ def main():
         cap.release()
         writer.release()
 
+    event_batch = Event(tracking_state, LINE_CONFIG)
     print_track_summary(track_summary, frame_index)
+    print_event_summary(event_batch)
     print("\nReplay complete")
     print(f"\nFrames processed: {frame_index}")
     print(f"Tracks created: {len(track_summary)}")
@@ -276,4 +334,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

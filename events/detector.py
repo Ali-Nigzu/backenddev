@@ -1,144 +1,184 @@
-import hashlib
-from typing import Any, Sequence
+"""Final TrackingState -> EventBatch reducer."""
 
-from .geometry import compute_side, line_points_from_config
-from .models import RuntimeEventCandidate
+from collections.abc import Mapping
+from math import isfinite
 
-
-def _field(track: Any, name: str) -> Any:
-    if isinstance(track, dict):
-        return track[name]
-    return getattr(track, name)
+from .geometry import GEOMETRY_EPSILON, Point, _segments_intersect, _side
+from .models import EventBatch, EventRecord
 
 
-def _point(point: Sequence[float]) -> list[float]:
-    if len(point) != 2:
-        raise ValueError("centre_history points must contain exactly two coordinates")
-    return [float(point[0]), float(point[1])]
+def _require_mapping(value, name: str) -> Mapping:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be an object")
+    return value
 
 
-def _canonical(value: float) -> str:
-    return format(float(value), ".12g")
+def _require_fields(value: Mapping, fields: tuple[str, ...], name: str) -> None:
+    for field in fields:
+        if field not in value:
+            raise ValueError(f"Missing required {name} field: {field}")
 
 
-def _stable_event_id(
-    runtime_track_id: str,
-    point_a: Sequence[float],
-    point_b: Sequence[float],
-    transition_index: int,
-    event_type: str,
-    direction: str,
-) -> str:
-    payload = "|".join(
-        [
-            runtime_track_id,
-            f"{_canonical(point_a[0])},{_canonical(point_a[1])}",
-            f"{_canonical(point_b[0])},{_canonical(point_b[1])}",
-            str(int(transition_index)),
-            event_type,
-            direction,
-        ]
+def _finite_number(value, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not isfinite(float(value))
+    ):
+        raise ValueError(f"{name} must be finite")
+    return float(value)
+
+
+def _point_from_mapping(value, name: str) -> Point:
+    point = _require_mapping(value, name)
+    _require_fields(point, ("x", "y"), name)
+    return (
+        _finite_number(point["x"], f"{name}.x"),
+        _finite_number(point["y"], f"{name}.y"),
     )
-    return "evt_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _make_event(
-    runtime_track_id: str,
-    timestamp: float,
-    centre_history: list[list[float]],
-    point_a: Sequence[float],
-    point_b: Sequence[float],
-    previous_index: int,
-    previous_side: str,
-    transition_index: int,
-    transition_side: str,
-    support_end_index: int,
-) -> RuntimeEventCandidate:
-    event_type, direction = (
-        ("ENTRY", "IN")
-        if previous_side == "A" and transition_side == "B"
-        else ("EXIT", "OUT")
+def _validate_bbox(value, name: str) -> dict[str, float]:
+    bbox = _require_mapping(value, name)
+    _require_fields(bbox, ("x1", "y1", "x2", "y2"), name)
+    copied = {
+        "x1": _finite_number(bbox["x1"], f"{name}.x1"),
+        "y1": _finite_number(bbox["y1"], f"{name}.y1"),
+        "x2": _finite_number(bbox["x2"], f"{name}.x2"),
+        "y2": _finite_number(bbox["y2"], f"{name}.y2"),
+    }
+    if copied["x2"] < copied["x1"] or copied["y2"] < copied["y1"]:
+        raise ValueError(f"{name} must have x2 >= x1 and y2 >= y1")
+    return copied
+
+
+def _copy_best_crop(value, name: str) -> dict:
+    best_crop = _require_mapping(value, name)
+    _require_fields(best_crop, ("frame_id", "bbox"), name)
+    frame_id = best_crop["frame_id"]
+    if not isinstance(frame_id, str) or not frame_id:
+        raise ValueError(f"{name}.frame_id must be a non-empty string")
+    return {
+        "frame_id": frame_id,
+        "bbox": _validate_bbox(best_crop["bbox"], f"{name}.bbox"),
+    }
+
+
+def _validate_track_point(value, name: str) -> tuple[float, Point]:
+    point = _require_mapping(value, name)
+    _require_fields(point, ("timestamp", "centre"), name)
+    return (
+        _finite_number(point["timestamp"], f"{name}.timestamp"),
+        _point_from_mapping(point["centre"], f"{name}.centre"),
     )
-    supporting_positions = [
-        _point(point)
-        for point in centre_history[previous_index : support_end_index + 1]
-    ]
 
-    return RuntimeEventCandidate(
-        event_id=_stable_event_id(
-            runtime_track_id,
-            point_a,
-            point_b,
-            transition_index,
-            event_type,
-            direction,
-        ),
-        runtime_track_id=runtime_track_id,
-        timestamp=timestamp,
-        event_type=event_type,
-        direction=direction,
-        supporting_positions=supporting_positions,
+
+def _validate_inputs(tracking_state, line_config) -> tuple[list[dict], Point, Point]:
+    state = _require_mapping(tracking_state, "TrackingState")
+    _require_fields(state, ("tracks",), "TrackingState")
+    tracks = state["tracks"]
+    if not isinstance(tracks, list):
+        raise ValueError("TrackingState.tracks must be a list")
+
+    for track_index, track in enumerate(tracks):
+        track_name = f"TrackingState.tracks[{track_index}]"
+        track_mapping = _require_mapping(track, track_name)
+        _require_fields(track_mapping, ("track_id", "path", "best_crop"), track_name)
+        track_id = track_mapping["track_id"]
+        if not isinstance(track_id, str) or not track_id:
+            raise ValueError(f"{track_name}.track_id must be a non-empty string")
+        if not isinstance(track_mapping["path"], list):
+            raise ValueError(f"{track_name}.path must be a list")
+        previous_timestamp = None
+        for point_index, path_point in enumerate(track_mapping["path"]):
+            timestamp, _centre = _validate_track_point(
+                path_point, f"{track_name}.path[{point_index}]"
+            )
+            if previous_timestamp is not None and timestamp < previous_timestamp:
+                raise ValueError(f"{track_name}.path timestamps must be monotonic")
+            previous_timestamp = timestamp
+        _copy_best_crop(track_mapping["best_crop"], f"{track_name}.best_crop")
+
+    config = _require_mapping(line_config, "LineConfig")
+    _require_fields(config, ("point_a", "point_b"), "LineConfig")
+    point_a = _point_from_mapping(config["point_a"], "LineConfig.point_a")
+    point_b = _point_from_mapping(config["point_b"], "LineConfig.point_b")
+    if (point_a[0] - point_b[0]) ** 2 + (
+        point_a[1] - point_b[1]
+    ) ** 2 <= GEOMETRY_EPSILON**2:
+        raise ValueError(
+            "LineConfig point_a and point_b must define a non-zero segment"
+        )
+    return tracks, point_a, point_b
+
+
+def _path_point(value) -> tuple[float, Point]:
+    return (
+        float(value["timestamp"]),
+        (float(value["centre"]["x"]), float(value["centre"]["y"])),
     )
+
+
+def _path_span_intersects(
+    path: list, start_index: int, end_index: int, line_a: Point, line_b: Point
+) -> bool:
+    for index in range(start_index, end_index):
+        _timestamp_a, point_a = _path_point(path[index])
+        _timestamp_b, point_b = _path_point(path[index + 1])
+        if _segments_intersect(point_a, point_b, line_a, line_b):
+            return True
+    return False
+
+
+def _make_event(track: Mapping, timestamp: float, event_type: int) -> EventRecord:
+    return {
+        "track_id": track["track_id"],
+        "timestamp": timestamp,
+        "event_type": event_type,
+        "best_crop": _copy_best_crop(track["best_crop"], "Track.best_crop"),
+    }
 
 
 def _events_for_track(
-    track: Any, point_a: Sequence[float], point_b: Sequence[float]
-) -> list[RuntimeEventCandidate]:
-    runtime_track_id = str(_field(track, "runtime_track_id"))
-    timestamp = float(_field(track, "last_seen_timestamp"))
-    centre_history = [_point(point) for point in _field(track, "centre_history")]
+    track: Mapping, line_a: Point, line_b: Point
+) -> list[EventRecord]:
+    path = track["path"]
+    events: list[EventRecord] = []
+    last_side = None
+    last_side_index = None
 
-    compressed: list[tuple[int, str]] = []
-    for original_index, point in enumerate(centre_history):
-        side = compute_side(point_a, point_b, point)
-        if side != "ON":
-            compressed.append((original_index, side))
-
-    events: list[RuntimeEventCandidate] = []
-    previous_index: int | None = None
-    previous_side: str | None = None
-    for compressed_index, (transition_index, transition_side) in enumerate(compressed):
-        if previous_side is not None and previous_side != transition_side:
-            if previous_index is None:
-                raise AssertionError("previous transition index missing")
-            support_end_index = transition_index
-            next_compressed_index = compressed_index + 1
-            if next_compressed_index < len(compressed):
-                next_index, next_side = compressed[next_compressed_index]
-                if next_side == transition_side:
-                    support_end_index = next_index
-
+    for index, path_point in enumerate(path):
+        timestamp, point = _path_point(path_point)
+        current_side = _side(point, line_a, line_b)
+        if current_side == 0:
+            continue
+        if last_side is None:
+            last_side = current_side
+            last_side_index = index
+            continue
+        if current_side == last_side:
+            last_side_index = index
+            continue
+        if last_side_index is not None and _path_span_intersects(
+            path, last_side_index, index, line_a, line_b
+        ):
             events.append(
                 _make_event(
-                    runtime_track_id,
-                    timestamp,
-                    centre_history,
-                    point_a,
-                    point_b,
-                    previous_index,
-                    previous_side,
-                    transition_index,
-                    transition_side,
-                    support_end_index,
+                    track, timestamp, 1 if last_side == -1 and current_side == 1 else 0
                 )
             )
-        previous_index = transition_index
-        previous_side = transition_side
+        last_side = current_side
+        last_side_index = index
 
     return events
 
 
-def detect_events(tracks: list[Any], line_config: dict) -> list[RuntimeEventCandidate]:
-    point_a, point_b = line_points_from_config(line_config)
-    events = []
+def Event(tracking_state, line_config) -> EventBatch:
+    """Return all finite-segment crossing events from the final TrackingState."""
 
+    tracks, line_a, line_b = _validate_inputs(tracking_state, line_config)
+    events: list[EventRecord] = []
     for track in tracks:
-        events.extend(_events_for_track(track, point_a, point_b))
-
-    return sorted(
-        events,
-        key=lambda event: (
-            event["timestamp"],
-            event["runtime_track_id"],
-        ),
-    )
+        for event in _events_for_track(track, line_a, line_b):
+            events.append(event)
+    return {"events": events}
