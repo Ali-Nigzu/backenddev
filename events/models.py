@@ -1,14 +1,26 @@
-from typing import Literal, TypedDict
+"""Typed dictionary contracts for Event outputs."""
+
+from typing import TypedDict
 
 
-EventType = Literal["ENTRY", "EXIT"]
-Direction = Literal["IN", "OUT"]
+class BoundingBox(TypedDict):
+    x1: float
+    y1: float
+    x2: float
+    y2: float
 
 
-class RuntimeEventCandidate(TypedDict):
-    event_id: str
-    runtime_track_id: str
+class BestCrop(TypedDict):
+    frame_id: str
+    bbox: BoundingBox
+
+
+class EventRecord(TypedDict):
+    track_id: str
     timestamp: float
-    event_type: EventType
-    direction: Direction
-    supporting_positions: list[list[float]]
+    event_type: int
+    best_crop: BestCrop
+
+
+class EventBatch(TypedDict):
+    events: list[EventRecord]

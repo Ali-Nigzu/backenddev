@@ -1,4 +1,3 @@
-from .detector import detect_events
-from .models import RuntimeEventCandidate
+from .detector import Event
 
-__all__ = ["RuntimeEventCandidate", "detect_events"]
+__all__ = ["Event"]

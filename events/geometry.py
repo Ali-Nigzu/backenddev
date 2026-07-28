@@ -1,40 +1,59 @@
-from typing import Sequence
+"""Private finite-segment geometry used by Event."""
 
-LINE_SIDE_EPSILON = 1e-9
+GEOMETRY_EPSILON = 1e-6
 
-
-def _as_xy(point: Sequence[float], name: str) -> tuple[float, float]:
-    if len(point) != 2:
-        raise ValueError(f"{name} must contain exactly two coordinates")
-    return float(point[0]), float(point[1])
+Point = tuple[float, float]
 
 
-def signed_cross(a: Sequence[float], b: Sequence[float], p: Sequence[float]) -> float:
-    ax, ay = _as_xy(a, "point_a")
-    bx, by = _as_xy(b, "point_b")
-    px, py = _as_xy(p, "point")
-
-    if ax == bx and ay == by:
-        raise ValueError("LineConfig point_a and point_b must define a non-zero line")
-
-    return (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+def _signed_area(a: Point, b: Point, p: Point) -> float:
+    return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
 
 
-def side_from_cross(cross: float) -> str:
-    if cross < -LINE_SIDE_EPSILON:
-        return "A"
-    if cross > LINE_SIDE_EPSILON:
-        return "B"
-    return "ON"
+def _sign(value: float) -> int:
+    if value > GEOMETRY_EPSILON:
+        return 1
+    if value < -GEOMETRY_EPSILON:
+        return -1
+    return 0
 
 
-def compute_side(a: Sequence[float], b: Sequence[float], p: Sequence[float]) -> str:
-    return side_from_cross(signed_cross(a, b, p))
+def _side(point: Point, line_a: Point, line_b: Point) -> int:
+    return _sign(_signed_area(line_a, line_b, point))
 
 
-def line_points_from_config(line_config: dict) -> tuple[list[float], list[float]]:
-    point_a = list(_as_xy(line_config["point_a"], "point_a"))
-    point_b = list(_as_xy(line_config["point_b"], "point_b"))
-    if point_a == point_b:
-        raise ValueError("LineConfig point_a and point_b must define a non-zero line")
-    return point_a, point_b
+def _point_on_segment(point: Point, segment_a: Point, segment_b: Point) -> bool:
+    if _sign(_signed_area(segment_a, segment_b, point)) != 0:
+        return False
+    return (
+        min(segment_a[0], segment_b[0]) - GEOMETRY_EPSILON
+        <= point[0]
+        <= max(segment_a[0], segment_b[0]) + GEOMETRY_EPSILON
+        and min(segment_a[1], segment_b[1]) - GEOMETRY_EPSILON
+        <= point[1]
+        <= max(segment_a[1], segment_b[1]) + GEOMETRY_EPSILON
+    )
+
+
+def _segments_intersect(
+    first_a: Point, first_b: Point, second_a: Point, second_b: Point
+) -> bool:
+    if (
+        abs(first_a[0] - first_b[0]) <= GEOMETRY_EPSILON
+        and abs(first_a[1] - first_b[1]) <= GEOMETRY_EPSILON
+    ):
+        return _point_on_segment(first_a, second_a, second_b)
+
+    first_second_a = _sign(_signed_area(first_a, first_b, second_a))
+    first_second_b = _sign(_signed_area(first_a, first_b, second_b))
+    second_first_a = _sign(_signed_area(second_a, second_b, first_a))
+    second_first_b = _sign(_signed_area(second_a, second_b, first_b))
+
+    if first_second_a * first_second_b < 0 and second_first_a * second_first_b < 0:
+        return True
+
+    return (
+        (first_second_a == 0 and _point_on_segment(second_a, first_a, first_b))
+        or (first_second_b == 0 and _point_on_segment(second_b, first_a, first_b))
+        or (second_first_a == 0 and _point_on_segment(first_a, second_a, second_b))
+        or (second_first_b == 0 and _point_on_segment(first_b, second_a, second_b))
+    )
