@@ -1,17 +1,14 @@
 """Historical-anchor matching for Track."""
 
 import math
-from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from track.config import _TrackConfig
-
-
-@dataclass(frozen=True)
-class _Match:
-    track_index: int
-    observation_index: int
-    distance: float
+from track.config import (
+    _ANCHOR_TIE_DISTANCE_PX,
+    _ANCHOR_WEIGHT_EXPONENT,
+    _LOCATION_HISTORY_WINDOW_FRAMES,
+    _MAX_ANCHOR_DISTANCE_PX,
+)
 
 
 def _track_sort_key(track) -> tuple:
@@ -19,50 +16,33 @@ def _track_sort_key(track) -> tuple:
     return (0, int(track_id), track_id) if track_id.isdecimal() else (1, track_id)
 
 
-def _observation_sort_key(index_observation) -> tuple:
-    index, observation = index_observation
-    return (str(observation["detection_id"]), index)
-
-
-def _distance(a, b) -> float:
-    return math.hypot(float(a["x"]) - float(b["x"]), float(a["y"]) - float(b["y"]))
-
-
-def _historical_anchor(path, config: _TrackConfig) -> dict:
-    window = min(len(path), int(config.location_history_window_frames))
+def _historical_anchor(path) -> dict:
+    window = min(len(path), _LOCATION_HISTORY_WINDOW_FRAMES)
     points = path[-window:]
     total_weight = 0.0
     weighted_x = 0.0
     weighted_y = 0.0
     for index, point in enumerate(points, start=1):
-        weight = float(index) ** float(config.anchor_weight_exponent)
+        weight = float(index) ** _ANCHOR_WEIGHT_EXPONENT
         total_weight += weight
         weighted_x += float(point["center"]["x"]) * weight
         weighted_y += float(point["center"]["y"]) * weight
     return {"x": weighted_x / total_weight, "y": weighted_y / total_weight}
 
 
-def _continuity_key(track: dict, status) -> tuple:
-    return (0 if status.active else 1, -len(track["path"]), _track_sort_key(track))
-
-
-def _candidate_tie_key(candidate: _Match, tie_keys: Sequence[tuple]) -> tuple:
-    return (tie_keys[candidate.track_index], candidate.observation_index, candidate.track_index)
-
-
-def _beats(current: _Match | None, challenger: _Match, tie_keys: Sequence[tuple], config: _TrackConfig) -> bool:
+def _beats(current: tuple[int, int, float] | None, challenger: tuple[int, int, float], tie_keys: Sequence[tuple]) -> bool:
     if current is None:
         return True
-    distance_delta = challenger.distance - current.distance
-    if abs(distance_delta) > float(config.anchor_tie_distance_px):
+    distance_delta = challenger[2] - current[2]
+    if abs(distance_delta) > _ANCHOR_TIE_DISTANCE_PX:
         return distance_delta < 0
-    return _candidate_tie_key(challenger, tie_keys) < _candidate_tie_key(current, tie_keys)
+    return (tie_keys[challenger[0]], challenger[1], challenger[0]) < (tie_keys[current[0]], current[1], current[0])
 
 
-def _best_for_observation(candidates: Iterable[_Match], tie_keys: Sequence[tuple], config: _TrackConfig) -> _Match | None:
+def _best_for_observation(candidates: Iterable[tuple[int, int, float]], tie_keys: Sequence[tuple]) -> tuple[int, int, float] | None:
     best = None
     for candidate in candidates:
-        if _beats(best, candidate, tie_keys, config):
+        if _beats(best, candidate, tie_keys):
             best = candidate
     return best
 
@@ -70,28 +50,32 @@ def _best_for_observation(candidates: Iterable[_Match], tie_keys: Sequence[tuple
 def _match_tier(
     tracks: Sequence[dict],
     observations: Sequence[dict],
-    statuses: Sequence,
+    statuses: Sequence[str],
     track_indices: Sequence[int],
     observation_indices: Sequence[int],
-    config: _TrackConfig,
 ) -> tuple[list[tuple[int, int]], list[int]]:
-    candidates_by_observation: dict[int, list[_Match]] = {index: [] for index in observation_indices}
+    candidates_by_observation: dict[int, list[tuple[int, int, float]]] = {index: [] for index in observation_indices}
     for track_index in track_indices:
-        anchor = _historical_anchor(tracks[track_index]["path"], config)
+        anchor = _historical_anchor(tracks[track_index]["path"])
         for observation_index in observation_indices:
-            candidate_distance = _distance(anchor, observations[observation_index]["center"])
-            if candidate_distance <= float(config.max_anchor_distance_px):
-                candidates_by_observation[observation_index].append(
-                    _Match(track_index, observation_index, candidate_distance)
-                )
+            observation_center = observations[observation_index]["center"]
+            candidate_distance = math.hypot(
+                float(anchor["x"]) - float(observation_center["x"]),
+                float(anchor["y"]) - float(observation_center["y"]),
+            )
+            if candidate_distance <= _MAX_ANCHOR_DISTANCE_PX:
+                candidates_by_observation[observation_index].append((track_index, observation_index, candidate_distance))
 
-    tie_keys = [_continuity_key(track, status) for track, status in zip(tracks, statuses)]
+    tie_keys = [
+        (0 if status == "active" else 1, -len(track["path"]), _track_sort_key(track))
+        for track, status in zip(tracks, statuses)
+    ]
     used_tracks: set[int] = set()
     used_observations: set[int] = set()
-    matches: list[_Match] = []
+    matches: list[tuple[int, int, float]] = []
 
     while True:
-        proposals: list[_Match] = []
+        proposals: list[tuple[int, int, float]] = []
         for observation_index in observation_indices:
             if observation_index in used_observations:
                 continue
@@ -99,10 +83,9 @@ def _match_tier(
                 (
                     candidate
                     for candidate in candidates_by_observation.get(observation_index, ())
-                    if candidate.track_index not in used_tracks
+                    if candidate[0] not in used_tracks
                 ),
                 tie_keys,
-                config,
             )
             if best is not None:
                 proposals.append(best)
@@ -110,12 +93,12 @@ def _match_tier(
         if not proposals:
             break
 
-        chosen = _best_for_observation(proposals, tie_keys, config)
+        chosen = _best_for_observation(proposals, tie_keys)
         matches.append(chosen)
-        used_tracks.add(chosen.track_index)
-        used_observations.add(chosen.observation_index)
+        used_tracks.add(chosen[0])
+        used_observations.add(chosen[1])
 
     return (
-        [(match.track_index, match.observation_index) for match in matches],
+        [(track_index, observation_index) for track_index, observation_index, _distance in matches],
         [index for index in observation_indices if index not in used_observations],
     )

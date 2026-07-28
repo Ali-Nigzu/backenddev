@@ -53,13 +53,13 @@ def point_key(point: dict) -> tuple[float, float]:
 def active_track_ids(tracking_state, observation_batch) -> set[str]:
     """Return active track IDs before this frame update."""
 
-    from track.tracker import _ACTIVE, _CONFIG, _classify_track
+    from track.tracker import _classify_track
 
     timestamp = float(observation_batch["timestamp"])
     return {
         str(track["track_id"])
         for track in tracking_state["tracks"]
-        if _classify_track(track, timestamp, _CONFIG).state == _ACTIVE
+        if _classify_track(track, timestamp) == "active"
     }
 
 
