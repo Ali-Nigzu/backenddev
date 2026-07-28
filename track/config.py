@@ -1,13 +1,11 @@
-"""Small deterministic Track V2 configuration."""
+"""Internal Track configuration."""
 
 from dataclasses import dataclass
 from math import isfinite
 
 
 @dataclass(frozen=True)
-class TrackV2Config:
-    """Behaviour settings for historical-location-only, frame-based tracking."""
-
+class _TrackConfig:
     location_history_window_frames: int = 7
     anchor_weight_exponent: float = 1.0
     max_anchor_distance_px: float = 100.0
@@ -45,3 +43,6 @@ def _require_non_negative_float(value, name: str) -> None:
         raise ValueError(f"{name} must be finite")
     if float(value) < 0:
         raise ValueError(f"{name} must be non-negative")
+
+
+_CONFIG = _TrackConfig()
