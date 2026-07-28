@@ -25,8 +25,8 @@ def _historical_anchor(path) -> dict:
     for index, point in enumerate(points, start=1):
         weight = float(index) ** _ANCHOR_WEIGHT_EXPONENT
         total_weight += weight
-        weighted_x += float(point["center"]["x"]) * weight
-        weighted_y += float(point["center"]["y"]) * weight
+        weighted_x += float(point["centre"]["x"]) * weight
+        weighted_y += float(point["centre"]["y"]) * weight
     return {"x": weighted_x / total_weight, "y": weighted_y / total_weight}
 
 
@@ -39,7 +39,7 @@ def _beats(current: tuple[int, int, float] | None, challenger: tuple[int, int, f
     return (tie_keys[challenger[0]], challenger[1], challenger[0]) < (tie_keys[current[0]], current[1], current[0])
 
 
-def _best_for_observation(candidates: Iterable[tuple[int, int, float]], tie_keys: Sequence[tuple]) -> tuple[int, int, float] | None:
+def _best_for_detection(candidates: Iterable[tuple[int, int, float]], tie_keys: Sequence[tuple]) -> tuple[int, int, float] | None:
     best = None
     for candidate in candidates:
         if _beats(best, candidate, tie_keys):
@@ -49,40 +49,40 @@ def _best_for_observation(candidates: Iterable[tuple[int, int, float]], tie_keys
 
 def _match_tier(
     tracks: Sequence[dict],
-    observations: Sequence[dict],
+    detections: Sequence[dict],
     statuses: Sequence[str],
     track_indices: Sequence[int],
-    observation_indices: Sequence[int],
+    detection_indices: Sequence[int],
 ) -> tuple[list[tuple[int, int]], list[int]]:
-    candidates_by_observation: dict[int, list[tuple[int, int, float]]] = {index: [] for index in observation_indices}
+    candidates_by_detection: dict[int, list[tuple[int, int, float]]] = {index: [] for index in detection_indices}
     for track_index in track_indices:
         anchor = _historical_anchor(tracks[track_index]["path"])
-        for observation_index in observation_indices:
-            observation_center = observations[observation_index]["center"]
+        for detection_index in detection_indices:
+            detection_centre = detections[detection_index]["centre"]
             candidate_distance = math.hypot(
-                float(anchor["x"]) - float(observation_center["x"]),
-                float(anchor["y"]) - float(observation_center["y"]),
+                float(anchor["x"]) - float(detection_centre["x"]),
+                float(anchor["y"]) - float(detection_centre["y"]),
             )
             if candidate_distance <= _MAX_ANCHOR_DISTANCE_PX:
-                candidates_by_observation[observation_index].append((track_index, observation_index, candidate_distance))
+                candidates_by_detection[detection_index].append((track_index, detection_index, candidate_distance))
 
     tie_keys = [
         (0 if status == "active" else 1, -len(track["path"]), _track_sort_key(track))
         for track, status in zip(tracks, statuses)
     ]
     used_tracks: set[int] = set()
-    used_observations: set[int] = set()
+    used_detections: set[int] = set()
     matches: list[tuple[int, int, float]] = []
 
     while True:
         proposals: list[tuple[int, int, float]] = []
-        for observation_index in observation_indices:
-            if observation_index in used_observations:
+        for detection_index in detection_indices:
+            if detection_index in used_detections:
                 continue
-            best = _best_for_observation(
+            best = _best_for_detection(
                 (
                     candidate
-                    for candidate in candidates_by_observation.get(observation_index, ())
+                    for candidate in candidates_by_detection.get(detection_index, ())
                     if candidate[0] not in used_tracks
                 ),
                 tie_keys,
@@ -93,12 +93,12 @@ def _match_tier(
         if not proposals:
             break
 
-        chosen = _best_for_observation(proposals, tie_keys)
+        chosen = _best_for_detection(proposals, tie_keys)
         matches.append(chosen)
         used_tracks.add(chosen[0])
-        used_observations.add(chosen[1])
+        used_detections.add(chosen[1])
 
     return (
-        [(track_index, observation_index) for track_index, observation_index, _distance in matches],
-        [index for index in observation_indices if index not in used_observations],
+        [(track_index, detection_index) for track_index, detection_index, _distance in matches],
+        [index for index in detection_indices if index not in used_detections],
     )

@@ -1,4 +1,4 @@
-"""Replay Detect -> Embed -> Observe -> Track over an input video.
+"""Replay Detect -> Track over an input video.
 
 This script intentionally stops at Track V2. It does not run Event,
 Demographic, Assemble, or Output stages.
@@ -14,7 +14,7 @@ DEFAULT_OUTPUT_NAME = "tracking_replay.mp4"
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run the V2 Detect -> Embed -> Observe -> Track replay over a video."
+        description="Run the Detect -> Track replay over a video."
     )
     parser.add_argument(
         "input",
@@ -46,16 +46,16 @@ def track_color(track_id: str) -> tuple[int, int, int]:
 
 
 def point_key(point: dict) -> tuple[float, float]:
-    center = point["center"] if "center" in point else point
-    return (round(float(center["x"]), 6), round(float(center["y"]), 6))
+    centre = point["centre"] if "centre" in point else point
+    return (round(float(centre["x"]), 6), round(float(centre["y"]), 6))
 
 
-def active_track_ids(tracking_state, observation_batch) -> set[str]:
+def active_track_ids(tracking_state, detection_batch) -> set[str]:
     """Return active track IDs before this frame update."""
 
     from track.tracker import _classify_track
 
-    timestamp = float(observation_batch["timestamp"])
+    timestamp = float(detection_batch["timestamp"])
     return {
         str(track["track_id"])
         for track in tracking_state["tracks"]
@@ -64,25 +64,22 @@ def active_track_ids(tracking_state, observation_batch) -> set[str]:
 
 
 def current_frame_assignments(
-    tracking_state, observation_batch, active_track_ids: set[str]
+    tracking_state, detection_batch, _previous_active_track_ids: set[str]
 ) -> list[tuple[dict, dict]]:
-    """Pair active tracks updated on this frame with their observations."""
+    """Pair tracks updated on this frame with their detections."""
 
-    timestamp = float(observation_batch["timestamp"])
-    observations_by_center = {}
-    for observation in observation_batch["observations"]:
-        observations_by_center.setdefault(point_key(observation["center"]), []).append(observation)
+    timestamp = float(detection_batch["timestamp"])
+    detections_by_centre = {}
+    for detection in detection_batch["detections"]:
+        detections_by_centre.setdefault(point_key(detection["centre"]), []).append(detection)
 
     assignments = []
     for track in tracking_state["tracks"]:
-        if str(track["track_id"]) not in active_track_ids:
-            continue
-
         latest_point = track["path"][-1]
         if float(latest_point["timestamp"]) != timestamp:
             continue
 
-        candidates = observations_by_center.get(point_key(latest_point), [])
+        candidates = detections_by_centre.get(point_key(latest_point), [])
         if not candidates:
             continue
 
@@ -94,16 +91,16 @@ def current_frame_assignments(
 def draw_tracking_state(
     frame,
     tracking_state,
-    observation_batch,
+    detection_batch,
     active_ids: set[str],
     previous_track_ids: set[str] | None = None,
 ) -> dict:
     import cv2
 
     previous_track_ids = previous_track_ids or set()
-    timestamp = float(observation_batch["timestamp"])
-    assignments = current_frame_assignments(tracking_state, observation_batch, active_ids)
-    matched_track_ids = {str(track["track_id"]) for track, _observation in assignments}
+    timestamp = float(detection_batch["timestamp"])
+    assignments = current_frame_assignments(tracking_state, detection_batch, active_ids)
+    matched_track_ids = {str(track["track_id"]) for track, _detection in assignments}
     birth_track_ids = {
         str(track["track_id"])
         for track in tracking_state["tracks"]
@@ -113,8 +110,8 @@ def draw_tracking_state(
     unmatched_active_ids = set(active_ids) - matched_track_ids
 
     height, width = frame.shape[:2]
-    for track, observation in assignments:
-        bbox = observation["bbox"]
+    for track, detection in assignments:
+        bbox = detection["bbox"]
         x1 = max(0, min(width - 1, int(round(float(bbox["x1"])))))
         y1 = max(0, min(height - 1, int(round(float(bbox["y1"])))))
         x2 = max(0, min(width - 1, int(round(float(bbox["x2"])))))
@@ -142,12 +139,12 @@ def draw_tracking_state(
 
     debug = {
         "active": len(active_ids),
-        "observations": len(observation_batch["observations"]),
+        "detections": len(detection_batch["detections"]),
         "matched": len(matched_track_ids),
         "births": len(birth_track_ids),
         "unmatched_active": len(unmatched_active_ids),
     }
-    overlay = f"tracks={len(tracking_state['tracks'])} obs={debug['observations']} matched={debug['matched']}"
+    overlay = f"tracks={len(tracking_state['tracks'])} det={debug['detections']} matched={debug['matched']}"
     cv2.rectangle(frame, (8, 8), (min(width - 1, 8 + 12 * len(overlay)), 36), (0, 0, 0), -1)
     cv2.putText(frame, overlay, (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
     return debug
@@ -196,9 +193,7 @@ def main():
 
     import cv2
 
-    from detection import Detect
-    from embed import Embed
-    from observe import Observe
+    from detect import Detect
     from track import Track
 
     cap = cv2.VideoCapture(str(video_path))
@@ -221,14 +216,12 @@ def main():
         raise ValueError(f"Cannot open replay output: {output_path}")
 
     detect = Detect()
-    embed = Embed()
-    observe = Observe()
     tracking_state = {"tracks": []}
     track_summary = {}
     frame_index = 0
 
-    print("V2 TRACK REPLAY")
-    print("===============")
+    print("DETECT -> TRACK REPLAY")
+    print("======================")
     print(f"input: {video_path}")
 
     try:
@@ -249,22 +242,20 @@ def main():
             }
 
             detection_batch = detect(frame)
-            embedding_batch = embed(detection_batch)
-            observation_batch = observe(detection_batch, embedding_batch)
-            active_ids = active_track_ids(tracking_state, observation_batch)
+            active_ids = active_track_ids(tracking_state, detection_batch)
             previous_track_ids = {str(track["track_id"]) for track in tracking_state["tracks"]}
-            tracking_state = Track(tracking_state, observation_batch)
+            tracking_state = Track(tracking_state, detection_batch)
             update_track_summary(track_summary, tracking_state)
             debug = draw_tracking_state(
                 bgr_frame,
                 tracking_state,
-                observation_batch,
+                detection_batch,
                 active_ids,
                 previous_track_ids,
             )
             if debug["births"] or debug["unmatched_active"]:
                 print(
-                    f"\nframe {frame_index}: active={debug['active']} obs={debug['observations']} "
+                    f"\nframe {frame_index}: active={debug['active']} det={debug['detections']} "
                     f"matched={debug['matched']} births={debug['births']} "
                     f"unmatched_active={debug['unmatched_active']}"
                 )
