@@ -13,7 +13,7 @@ def _field(track: Any, name: str) -> Any:
 
 def _point(point: Sequence[float]) -> list[float]:
     if len(point) != 2:
-        raise ValueError("center_history points must contain exactly two coordinates")
+        raise ValueError("centre_history points must contain exactly two coordinates")
     return [float(point[0]), float(point[1])]
 
 
@@ -45,7 +45,7 @@ def _stable_event_id(
 def _make_event(
     runtime_track_id: str,
     timestamp: float,
-    center_history: list[list[float]],
+    centre_history: list[list[float]],
     point_a: Sequence[float],
     point_b: Sequence[float],
     previous_index: int,
@@ -61,7 +61,7 @@ def _make_event(
     )
     supporting_positions = [
         _point(point)
-        for point in center_history[previous_index : support_end_index + 1]
+        for point in centre_history[previous_index : support_end_index + 1]
     ]
 
     return RuntimeEventCandidate(
@@ -86,10 +86,10 @@ def _events_for_track(
 ) -> list[RuntimeEventCandidate]:
     runtime_track_id = str(_field(track, "runtime_track_id"))
     timestamp = float(_field(track, "last_seen_timestamp"))
-    center_history = [_point(point) for point in _field(track, "center_history")]
+    centre_history = [_point(point) for point in _field(track, "centre_history")]
 
     compressed: list[tuple[int, str]] = []
-    for original_index, point in enumerate(center_history):
+    for original_index, point in enumerate(centre_history):
         side = compute_side(point_a, point_b, point)
         if side != "ON":
             compressed.append((original_index, side))
@@ -112,7 +112,7 @@ def _events_for_track(
                 _make_event(
                     runtime_track_id,
                     timestamp,
-                    center_history,
+                    centre_history,
                     point_a,
                     point_b,
                     previous_index,

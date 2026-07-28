@@ -68,14 +68,19 @@ class Detect:
                 if x1 >= x2 or y1 >= y2:
                     continue
 
+                bbox = {
+                    "x1": float(np.float32(x1)),
+                    "y1": float(np.float32(y1)),
+                    "x2": float(np.float32(x2)),
+                    "y2": float(np.float32(y2)),
+                }
                 detections.append(
                     {
                         "detection_id": f"{frame_id}:det:{detection_index}",
-                        "bbox": {
-                            "x1": float(np.float32(x1)),
-                            "y1": float(np.float32(y1)),
-                            "x2": float(np.float32(x2)),
-                            "y2": float(np.float32(y2)),
+                        "bbox": bbox,
+                        "centre": {
+                            "x": float(np.float32((bbox["x1"] + bbox["x2"]) / 2.0)),
+                            "y": float(np.float32((bbox["y1"] + bbox["y2"]) / 2.0)),
                         },
                         "confidence": float(np.float32(confidence)),
                     }
@@ -85,6 +90,5 @@ class Detect:
         return {
             "frame_id": frame_id,
             "timestamp": float(timestamp),
-            "frame": {"image": image},
             "detections": detections,
         }

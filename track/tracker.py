@@ -29,10 +29,10 @@ def _validate_bbox(bbox, name: str) -> None:
         raise ValueError(f"{name} must have x1 <= x2 and y1 <= y2")
 
 
-def _validate_center(center, name: str) -> None:
-    _require_fields(center, ("x", "y"), name)
-    _require_finite_number(center["x"], f"{name}.x")
-    _require_finite_number(center["y"], f"{name}.y")
+def _validate_centre(centre, name: str) -> None:
+    _require_fields(centre, ("x", "y"), name)
+    _require_finite_number(centre["x"], f"{name}.x")
+    _require_finite_number(centre["y"], f"{name}.y")
 
 
 def _validate_tracking_state(state) -> None:
@@ -56,47 +56,47 @@ def _validate_tracking_state(state) -> None:
         previous_timestamp = None
         for point_index, point in enumerate(track["path"]):
             point_name = f"{name}.path[{point_index}]"
-            _require_fields(point, ("timestamp", "center"), point_name)
+            _require_fields(point, ("timestamp", "centre"), point_name)
             timestamp = _require_finite_number(point["timestamp"], f"{point_name}.timestamp")
             if previous_timestamp is not None and timestamp < previous_timestamp:
                 raise ValueError(f"{name}.path timestamps must be monotonic")
             previous_timestamp = timestamp
-            _validate_center(point["center"], f"{point_name}.center")
+            _validate_centre(point["centre"], f"{point_name}.centre")
 
-        _require_fields(track["best_crop"], ("frame_id", "bbox", "embedding"), f"{name}.best_crop")
+        _require_fields(track["best_crop"], ("frame_id", "bbox"), f"{name}.best_crop")
         if not isinstance(track["best_crop"]["frame_id"], str):
             raise ValueError(f"{name}.best_crop.frame_id must be a string")
         _validate_bbox(track["best_crop"]["bbox"], f"{name}.best_crop.bbox")
         _require_finite_number(track["best_crop_confidence"], f"{name}.best_crop_confidence")
 
 
-def _validate_observation_batch(batch) -> None:
-    _require_fields(batch, ("frame_id", "timestamp", "observations"), "ObservationBatch")
+def _validate_detection_batch(batch) -> None:
+    _require_fields(batch, ("frame_id", "timestamp", "detections"), "DetectionBatch")
     if not isinstance(batch["frame_id"], str) or not batch["frame_id"]:
-        raise ValueError("ObservationBatch.frame_id must be a non-empty string")
-    _require_finite_number(batch["timestamp"], "ObservationBatch.timestamp")
-    if not isinstance(batch["observations"], list):
-        raise ValueError("ObservationBatch.observations must be a list")
+        raise ValueError("DetectionBatch.frame_id must be a non-empty string")
+    _require_finite_number(batch["timestamp"], "DetectionBatch.timestamp")
+    if not isinstance(batch["detections"], list):
+        raise ValueError("DetectionBatch.detections must be a list")
 
     seen_ids = set()
-    for observation_index, observation in enumerate(batch["observations"]):
-        name = f"ObservationBatch.observations[{observation_index}]"
-        _require_fields(observation, ("detection_id", "bbox", "center", "embedding", "confidence"), name)
-        detection_id = observation["detection_id"]
+    for detection_index, detection in enumerate(batch["detections"]):
+        name = f"DetectionBatch.detections[{detection_index}]"
+        _require_fields(detection, ("detection_id", "bbox", "centre", "confidence"), name)
+        detection_id = detection["detection_id"]
         if not isinstance(detection_id, str) or not detection_id:
             raise ValueError(f"{name}.detection_id must be a non-empty string")
         if detection_id in seen_ids:
             raise ValueError(f"Duplicate detection_id: {detection_id}")
         seen_ids.add(detection_id)
-        _validate_bbox(observation["bbox"], f"{name}.bbox")
-        _validate_center(observation["center"], f"{name}.center")
-        _require_finite_number(observation["confidence"], f"{name}.confidence")
+        _validate_bbox(detection["bbox"], f"{name}.bbox")
+        _validate_centre(detection["centre"], f"{name}.centre")
+        _require_finite_number(detection["confidence"], f"{name}.confidence")
 
 
 def _classify_track(track: dict, current_frame_number: float) -> str:
     frame_delta = float(current_frame_number) - float(track["path"][-1]["timestamp"])
     if frame_delta < 0:
-        raise ValueError("Track path contains a frame newer than the observation batch")
+        raise ValueError("Track path contains a frame newer than the detection batch")
 
     if len(track["path"]) >= _CONFIRMATION_HITS:
         return "active" if int(frame_delta) <= _ACTIVE_TIMEOUT_FRAMES else "inactive"
@@ -104,44 +104,20 @@ def _classify_track(track: dict, current_frame_number: float) -> str:
     return "tentative" if int(frame_delta) <= _TENTATIVE_TIMEOUT_FRAMES else "inactive"
 
 
-def _append_observation(track, observation, frame_id: str, frame_number: float) -> None:
-    track["path"].append(
-        {
-            "timestamp": float(frame_number),
-            "center": {
-                "x": float(observation["center"]["x"]),
-                "y": float(observation["center"]["y"]),
-            },
-        }
-    )
-    confidence = float(observation["confidence"])
+def _append_detection(track, detection, frame_id: str, frame_number: float) -> None:
+    track["path"].append({"timestamp": float(frame_number), "centre": dict(detection["centre"])})
+    confidence = float(detection["confidence"])
     if confidence > float(track["best_crop_confidence"]):
-        track["best_crop"] = {
-            "frame_id": frame_id,
-            "bbox": dict(observation["bbox"]),
-            "embedding": observation["embedding"],
-        }
+        track["best_crop"] = {"frame_id": frame_id, "bbox": dict(detection["bbox"])}
         track["best_crop_confidence"] = confidence
 
 
-def _create_track(observation, frame_id: str, frame_number: float, track_id: str) -> dict:
+def _create_track(detection, frame_id: str, frame_number: float, track_id: str) -> dict:
     return {
         "track_id": str(track_id),
-        "path": [
-            {
-                "timestamp": float(frame_number),
-                "center": {
-                    "x": float(observation["center"]["x"]),
-                    "y": float(observation["center"]["y"]),
-                },
-            }
-        ],
-        "best_crop": {
-            "frame_id": frame_id,
-            "bbox": dict(observation["bbox"]),
-            "embedding": observation["embedding"],
-        },
-        "best_crop_confidence": float(observation["confidence"]),
+        "path": [{"timestamp": float(frame_number), "centre": dict(detection["centre"])}],
+        "best_crop": {"frame_id": frame_id, "bbox": dict(detection["bbox"])},
+        "best_crop_confidence": float(detection["confidence"]),
     }
 
 
@@ -154,20 +130,20 @@ def _next_numeric_track_id(tracks) -> int:
     return max_numeric_id + 1
 
 
-def Track(tracking_state, observation_batch):
-    """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
+def Track(tracking_state, detection_batch):
+    """Update ``tracking_state`` in place from one ``DetectionBatch`` and return it."""
 
     _validate_tracking_state(tracking_state)
-    _validate_observation_batch(observation_batch)
+    _validate_detection_batch(detection_batch)
 
-    frame_number = float(observation_batch["timestamp"])
-    frame_id = observation_batch["frame_id"]
+    frame_number = float(detection_batch["timestamp"])
+    frame_id = detection_batch["frame_id"]
 
     tracking_state["tracks"].sort(key=_track_sort_key)
-    ordered_observations = [
-        observation
-        for _index, observation in sorted(
-            enumerate(observation_batch["observations"]),
+    ordered_detections = [
+        detection
+        for _index, detection in sorted(
+            enumerate(detection_batch["detections"]),
             key=lambda item: (str(item[1]["detection_id"]), item[0]),
         )
     ]
@@ -175,36 +151,21 @@ def Track(tracking_state, observation_batch):
     statuses = [_classify_track(track, frame_number) for track in tracking_state["tracks"]]
     active_track_indices = [index for index, status in enumerate(statuses) if status == "active"]
     tentative_track_indices = [index for index, status in enumerate(statuses) if status == "tentative"]
-    all_observation_indices = list(range(len(ordered_observations)))
+    all_detection_indices = list(range(len(ordered_detections)))
 
-    active_matches, remaining_observation_indices = _match_tier(
-        tracking_state["tracks"],
-        ordered_observations,
-        statuses,
-        active_track_indices,
-        all_observation_indices,
+    active_matches, remaining_detection_indices = _match_tier(
+        tracking_state["tracks"], ordered_detections, statuses, active_track_indices, all_detection_indices
     )
-    tentative_matches, remaining_observation_indices = _match_tier(
-        tracking_state["tracks"],
-        ordered_observations,
-        statuses,
-        tentative_track_indices,
-        remaining_observation_indices,
+    tentative_matches, remaining_detection_indices = _match_tier(
+        tracking_state["tracks"], ordered_detections, statuses, tentative_track_indices, remaining_detection_indices
     )
 
-    for state_track_index, observation_index in sorted(active_matches + tentative_matches):
-        _append_observation(
-            tracking_state["tracks"][state_track_index],
-            ordered_observations[observation_index],
-            frame_id,
-            frame_number,
-        )
+    for state_track_index, detection_index in sorted(active_matches + tentative_matches):
+        _append_detection(tracking_state["tracks"][state_track_index], ordered_detections[detection_index], frame_id, frame_number)
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
-    for observation_index in sorted(remaining_observation_indices):
-        tracking_state["tracks"].append(
-            _create_track(ordered_observations[observation_index], frame_id, frame_number, str(next_id))
-        )
+    for detection_index in sorted(remaining_detection_indices):
+        tracking_state["tracks"].append(_create_track(ordered_detections[detection_index], frame_id, frame_number, str(next_id)))
         next_id += 1
 
     tracking_state["tracks"].sort(key=_track_sort_key)
