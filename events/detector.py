@@ -3,8 +3,10 @@
 from collections.abc import Mapping
 from math import isfinite
 
-from .geometry import GEOMETRY_EPSILON, Point, _segments_intersect, _side
+from .geometry import GEOMETRY_EPSILON, Point, _side
 from .models import EventBatch, EventRecord
+
+_MIN_CONFIRMING_SIDE_POINTS = 2
 
 
 def _require_mapping(value, name: str) -> Mapping:
@@ -107,7 +109,7 @@ def _validate_inputs(tracking_state, line_config) -> tuple[list[dict], Point, Po
         point_a[1] - point_b[1]
     ) ** 2 <= GEOMETRY_EPSILON**2:
         raise ValueError(
-            "LineConfig point_a and point_b must define a non-zero segment"
+            "LineConfig point_a and point_b must define a non-zero line"
         )
     return tracks, point_a, point_b
 
@@ -117,17 +119,6 @@ def _path_point(value) -> tuple[float, Point]:
         float(value["timestamp"]),
         (float(value["centre"]["x"]), float(value["centre"]["y"])),
     )
-
-
-def _path_span_intersects(
-    path: list, start_index: int, end_index: int, line_a: Point, line_b: Point
-) -> bool:
-    for index in range(start_index, end_index):
-        _timestamp_a, point_a = _path_point(path[index])
-        _timestamp_b, point_b = _path_point(path[index + 1])
-        if _segments_intersect(point_a, point_b, line_a, line_b):
-            return True
-    return False
 
 
 def _make_event(track: Mapping, timestamp: float, event_type: int) -> EventRecord:
@@ -144,37 +135,55 @@ def _events_for_track(
 ) -> list[EventRecord]:
     path = track["path"]
     events: list[EventRecord] = []
-    last_side = None
-    last_side_index = None
+    confirmed_side = None
+    candidate_side = None
+    candidate_start_timestamp = None
+    candidate_count = 0
 
-    for index, path_point in enumerate(path):
+    for path_point in path:
         timestamp, point = _path_point(path_point)
-        current_side = _side(point, line_a, line_b)
-        if current_side == 0:
+        observed_side = _side(point, line_a, line_b)
+        if observed_side == 0:
             continue
-        if last_side is None:
-            last_side = current_side
-            last_side_index = index
+
+        if confirmed_side is None:
+            confirmed_side = observed_side
+            candidate_side = None
+            candidate_start_timestamp = None
+            candidate_count = 0
             continue
-        if current_side == last_side:
-            last_side_index = index
+
+        if observed_side == confirmed_side:
+            candidate_side = None
+            candidate_start_timestamp = None
+            candidate_count = 0
             continue
-        if last_side_index is not None and _path_span_intersects(
-            path, last_side_index, index, line_a, line_b
-        ):
+
+        if observed_side != candidate_side:
+            candidate_side = observed_side
+            candidate_start_timestamp = timestamp
+            candidate_count = 1
+            continue
+
+        candidate_count += 1
+        if candidate_count >= _MIN_CONFIRMING_SIDE_POINTS:
             events.append(
                 _make_event(
-                    track, timestamp, 1 if last_side == -1 and current_side == 1 else 0
+                    track,
+                    candidate_start_timestamp,
+                    1 if confirmed_side == -1 and candidate_side == 1 else 0,
                 )
             )
-        last_side = current_side
-        last_side_index = index
+            confirmed_side = candidate_side
+            candidate_side = None
+            candidate_start_timestamp = None
+            candidate_count = 0
 
     return events
 
 
 def Event(tracking_state, line_config) -> EventBatch:
-    """Return all finite-segment crossing events from the final TrackingState."""
+    """Return all confirmed continuous-line crossing events from final TrackingState."""
 
     tracks, line_a, line_b = _validate_inputs(tracking_state, line_config)
     events: list[EventRecord] = []

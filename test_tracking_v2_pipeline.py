@@ -179,7 +179,13 @@ def event_label(event_type: int) -> str:
     return "ENTRY" if event_type == 1 else "EXIT"
 
 
-def print_event_summary(event_batch: dict) -> None:
+def _format_video_time(total_seconds: float) -> str:
+    minutes = int(total_seconds // 60)
+    seconds = total_seconds % 60
+    return f"{minutes:02d}:{seconds:06.3f}"
+
+
+def print_event_summary(event_batch: dict, fps: float) -> None:
     events = event_batch["events"]
     entry_count = sum(1 for event in events if event["event_type"] == 1)
     exit_count = sum(1 for event in events if event["event_type"] == 0)
@@ -191,9 +197,11 @@ def print_event_summary(event_batch: dict) -> None:
         print("- none")
     for event in events:
         bbox = event["best_crop"]["bbox"]
+        event_seconds = float(event["timestamp"]) / float(fps)
         print(
             f"Track {event['track_id']} | "
-            f"timestamp={float(event['timestamp']):.6f} | "
+            f"{event_seconds:.3f}s | "
+            f"{_format_video_time(event_seconds)} | "
             f"event_type={event['event_type']} | "
             f"{event_label(event['event_type'])} | "
             f"best_crop_frame={event['best_crop']['frame_id']} | "
@@ -226,9 +234,9 @@ def print_track_summary(track_summary, frame_count: int) -> None:
         duration = last_seen - first_seen
         print(
             f"Track ID: {track_id} | "
-            f"first_seen={first_seen:.6f}s | "
-            f"last_seen={last_seen:.6f}s | "
-            f"duration={duration:.6f}s"
+            f"first_seen_frame={first_seen:.0f} | "
+            f"last_seen_frame={last_seen:.0f} | "
+            f"duration_frames={duration:.0f}"
         )
 
 
@@ -325,7 +333,7 @@ def main():
 
     event_batch = Event(tracking_state, LINE_CONFIG)
     print_track_summary(track_summary, frame_index)
-    print_event_summary(event_batch)
+    print_event_summary(event_batch, fps)
     print("\nReplay complete")
     print(f"\nFrames processed: {frame_index}")
     print(f"Tracks created: {len(track_summary)}")
