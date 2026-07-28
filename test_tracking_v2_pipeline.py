@@ -50,16 +50,16 @@ def point_key(point: dict) -> tuple[float, float]:
     return (round(float(center["x"]), 6), round(float(center["y"]), 6))
 
 
-def active_track_ids(tracking_state, observation_batch, config) -> set[str]:
+def active_track_ids(tracking_state, observation_batch) -> set[str]:
     """Return active track IDs before this frame update."""
 
-    from track.lifecycle import ACTIVE, classify_track
+    from track.tracker import _classify_track
 
     timestamp = float(observation_batch["timestamp"])
     return {
         str(track["track_id"])
         for track in tracking_state["tracks"]
-        if classify_track(track, timestamp, config).state == ACTIVE
+        if _classify_track(track, timestamp) == "active"
     }
 
 
@@ -199,7 +199,7 @@ def main():
     from detection import Detect
     from embed import Embed
     from observe import Observe
-    from track import Track, TrackV2Config
+    from track import Track
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -223,7 +223,6 @@ def main():
     detect = Detect()
     embed = Embed()
     observe = Observe()
-    config = TrackV2Config()
     tracking_state = {"tracks": []}
     track_summary = {}
     frame_index = 0
@@ -252,9 +251,9 @@ def main():
             detection_batch = detect(frame)
             embedding_batch = embed(detection_batch)
             observation_batch = observe(detection_batch, embedding_batch)
-            active_ids = active_track_ids(tracking_state, observation_batch, config)
+            active_ids = active_track_ids(tracking_state, observation_batch)
             previous_track_ids = {str(track["track_id"]) for track in tracking_state["tracks"]}
-            tracking_state = Track(tracking_state, observation_batch, config)
+            tracking_state = Track(tracking_state, observation_batch)
             update_track_summary(track_summary, tracking_state)
             debug = draw_tracking_state(
                 bgr_frame,

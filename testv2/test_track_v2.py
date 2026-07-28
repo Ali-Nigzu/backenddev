@@ -1,9 +1,8 @@
 from copy import deepcopy
 
-from track import Track, TrackV2, TrackV2Config
-from track.lifecycle import ACTIVE, INACTIVE, TENTATIVE, classify_track
-from track.matcher import historical_anchor
-from track.tracker import _partition_track_indices
+from track import Track
+from track.matcher import _best_for_observation, _historical_anchor
+from track.tracker import _classify_track
 
 
 def obs_batch(timestamp, observations):
@@ -51,39 +50,6 @@ def active_track(track_id="1", timestamp=2.0, x=10.0, y=10.0):
     return track
 
 
-def test_config_has_only_final_seven_fields():
-    assert list(TrackV2Config.__dataclass_fields__) == [
-        "location_history_window_frames",
-        "anchor_weight_exponent",
-        "max_anchor_distance_px",
-        "anchor_tie_distance_px",
-        "confirmation_hits",
-        "active_timeout_frames",
-        "tentative_timeout_frames",
-    ]
-
-
-def test_config_rejects_invalid_values():
-    invalid_configs = [
-        {"location_history_window_frames": 0},
-        {"anchor_weight_exponent": -1.0},
-        {"max_anchor_distance_px": 0.0},
-        {"anchor_tie_distance_px": -1.0},
-        {"confirmation_hits": 0},
-        {"active_timeout_frames": 0},
-        {"tentative_timeout_frames": 0},
-        {"active_timeout_frames": 1.5},
-    ]
-
-    for kwargs in invalid_configs:
-        try:
-            TrackV2Config(**kwargs)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"invalid config should fail: {kwargs}")
-
-
 def test_empty_state_creates_deterministic_numeric_ids_from_sorted_observations():
     state = {"tracks": []}
     returned = Track(state, obs_batch(1.0, [obs("b", 20, 20), obs("a", 10, 10)]))
@@ -93,14 +59,12 @@ def test_empty_state_creates_deterministic_numeric_ids_from_sorted_observations(
     assert [track["path"][0]["center"]["x"] for track in state["tracks"]] == [10.0, 20.0]
 
 
-def test_trackv2_callable_wrapper_preserves_public_interface():
-    state = {"tracks": []}
-    tracker = TrackV2(TrackV2Config())
+def test_track_package_exports_only_track():
+    import track
 
-    returned = tracker(state, obs_batch(0.0, [obs("first", 10.0, 10.0)]))
-
-    assert returned is state
-    assert state["tracks"][0]["track_id"] == "1"
+    assert track.__all__ == ["Track"]
+    assert not hasattr(track, "TrackV2")
+    assert not hasattr(track, "TrackV2Config")
 
 
 def test_closest_anchor_wins():
@@ -163,7 +127,7 @@ def test_longer_history_wins_inside_tie_distance():
     append_point(long, 0.1, 104.0, 0.0)
     state = {"tracks": [short, long]}
 
-    Track(state, obs_batch(1.0, [obs("tie", 101.0, 0.0)]), TrackV2Config(anchor_tie_distance_px=5.0))
+    Track(state, obs_batch(1.0, [obs("tie", 101.0, 0.0)]))
 
     assert [len(track["path"]) for track in state["tracks"]] == [3, 5]
     assert state["tracks"][1]["path"][-1]["center"] == {"x": 101.0, "y": 0.0}
@@ -177,33 +141,31 @@ def test_older_id_wins_identical_tie_when_history_lengths_match():
         ]
     }
 
-    Track(state, obs_batch(1.0, [obs("middle", 100.0, 0.0)]), TrackV2Config(anchor_tie_distance_px=5.0))
+    Track(state, obs_batch(1.0, [obs("middle", 100.0, 0.0)]))
 
     assert [len(track["path"]) for track in state["tracks"]] == [4, 3]
     assert state["tracks"][0]["path"][-1]["center"] == {"x": 100.0, "y": 0.0}
 
 
 def test_tentative_becomes_active_after_confirmation_hits():
-    config = TrackV2Config(confirmation_hits=3)
     state = {"tracks": []}
 
-    Track(state, obs_batch(0.0, [obs("a", 10.0, 10.0)]), config)
-    assert classify_track(state["tracks"][0], 0.5, config).state == TENTATIVE
+    Track(state, obs_batch(0.0, [obs("a", 10.0, 10.0)]))
+    assert _classify_track(state["tracks"][0], 0.5) == "tentative"
 
-    Track(state, obs_batch(0.5, [obs("b", 11.0, 10.0)]), config)
-    assert classify_track(state["tracks"][0], 1.0, config).state == TENTATIVE
+    Track(state, obs_batch(0.5, [obs("b", 11.0, 10.0)]))
+    assert _classify_track(state["tracks"][0], 1.0) == "tentative"
 
-    Track(state, obs_batch(1.0, [obs("c", 12.0, 10.0)]), config)
-    assert classify_track(state["tracks"][0], 1.0, config).state == ACTIVE
+    Track(state, obs_batch(1.0, [obs("c", 12.0, 10.0)]))
+    assert _classify_track(state["tracks"][0], 1.0) == "active"
 
 
 def test_inactive_track_stays_stored_but_cannot_match():
-    config = TrackV2Config(active_timeout_frames=1)
     state = {"tracks": [active_track("1", timestamp=0.0, x=10.0, y=10.0)]}
 
-    Track(state, obs_batch(2.0, [obs("return", 11.0, 10.0)]), config)
+    Track(state, obs_batch(31.0, [obs("return", 11.0, 10.0)]))
 
-    assert classify_track(state["tracks"][0], 2.0, config).state == INACTIVE
+    assert _classify_track(state["tracks"][0], 31.0) == "inactive"
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
     assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
 
@@ -211,7 +173,7 @@ def test_inactive_track_stays_stored_but_cannot_match():
 def test_far_observation_creates_new_track_without_birth_suppression():
     state = {"tracks": [active_track("1", timestamp=0.0, x=0.0, y=0.0)]}
 
-    Track(state, obs_batch(1.0, [obs("far", 1000.0, 0.0)]), TrackV2Config(max_anchor_distance_px=100.0))
+    Track(state, obs_batch(1.0, [obs("far", 1000.0, 0.0)]))
 
     assert [track["track_id"] for track in state["tracks"]] == ["1", "2"]
     assert [len(track["path"]) for track in state["tracks"]] == [3, 1]
@@ -238,19 +200,14 @@ def test_best_crop_updates_only_on_higher_confidence():
     assert state["tracks"][0]["best_crop_confidence"] == 0.9
 
 
-def test_historical_anchor_uses_last_configured_path_points():
+def test_historical_anchor_uses_default_weighted_path_points():
     track = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
     append_point(track, 1.0, 10.0, 0.0)
     append_point(track, 2.0, 20.0, 0.0)
     append_point(track, 3.0, 30.0, 10.0)
 
-    anchor, points_used = historical_anchor(
-        track["path"],
-        TrackV2Config(location_history_window_frames=3, anchor_weight_exponent=0.0),
-    )
-
-    assert points_used == 3
-    assert anchor == {"x": 20.0, "y": 10.0 / 3.0}
+    anchor = _historical_anchor(track["path"])
+    assert anchor == {"x": 20.0, "y": 4.0}
 
 
 def test_historical_anchor_uses_recency_weighted_path_points():
@@ -259,25 +216,15 @@ def test_historical_anchor_uses_recency_weighted_path_points():
     append_point(track, 2.0, 20.0, 0.0)
     append_point(track, 3.0, 30.0, 10.0)
 
-    anchor, points_used = historical_anchor(
-        track["path"],
-        TrackV2Config(location_history_window_frames=3, anchor_weight_exponent=1.0),
-    )
-
-    assert points_used == 3
-    assert anchor == {"x": (10.0 + 40.0 + 90.0) / 6.0, "y": 30.0 / 6.0}
+    anchor = _historical_anchor(track["path"])
+    assert anchor == {"x": 20.0, "y": 4.0}
 
 
 def test_historical_anchor_weights_only_real_points_when_path_is_shorter_than_window():
     track = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
     append_point(track, 1.0, 9.0, 6.0)
 
-    anchor, points_used = historical_anchor(
-        track["path"],
-        TrackV2Config(location_history_window_frames=5, anchor_weight_exponent=1.0),
-    )
-
-    assert points_used == 2
+    anchor = _historical_anchor(track["path"])
     assert anchor == {"x": 18.0 / 3.0, "y": 12.0 / 3.0}
 
 
@@ -315,65 +262,43 @@ def test_repeated_identical_inputs_create_identical_outputs():
     assert all(output == outputs[0] for output in outputs)
 
 
-def test_partition_track_indices_compatibility_uses_new_lifecycle():
-    config = TrackV2Config(confirmation_hits=3, active_timeout_frames=2, tentative_timeout_frames=1)
-    confirmed = existing_track("1", timestamp=0.0, x=0.0, y=0.0)
-    append_point(confirmed, 0.1, 1.0, 0.0)
-    append_point(confirmed, 0.2, 2.0, 0.0)
-    tentative_recent = existing_track("2", timestamp=0.8, x=10.0, y=0.0)
-    tentative_stale = existing_track("3", timestamp=-1.0, x=20.0, y=0.0)
-
-    active_indices, tentative_indices = _partition_track_indices(
-        [confirmed, tentative_recent, tentative_stale], 1.0, config
-    )
-
-    assert active_indices == [0]
-    assert tentative_indices == [1]
-
-
 def test_matcher_ignores_exact_distance_inside_tie_window_for_continuity():
-    from track.lifecycle import classify_track
-    from track.matcher import Match, _best_for_observation
-
     long = active_track("1", timestamp=0.0, x=10.0, y=0.0)
     append_point(long, 0.1, 10.0, 0.0)
     short = active_track("2", timestamp=0.0, x=14.0, y=0.0)
     tracks = [long, short]
-    config = TrackV2Config(anchor_tie_distance_px=5.0)
-    statuses = [classify_track(track, 1.0, config) for track in tracks]
+    statuses = [_classify_track(track, 1.0) for track in tracks]
 
     chosen = _best_for_observation(
         [
-            Match(track_index=0, observation_index=0, distance=5.0),
-            Match(track_index=1, observation_index=0, distance=1.0),
+            (0, 0, 5.0),
+            (1, 0, 1.0),
         ],
-        tracks,
-        statuses,
-        config,
+        [
+            (0 if status == "active" else 1, -len(track["path"]), (0, int(track["track_id"]), track["track_id"]))
+            for track, status in zip(tracks, statuses)
+        ],
     )
 
-    assert chosen.track_index == 0
+    assert chosen[0] == 0
 
 
 def test_matcher_closest_candidate_wins_outside_tie_window():
-    from track.lifecycle import classify_track
-    from track.matcher import Match, _best_for_observation
-
     long = active_track("1", timestamp=0.0, x=10.0, y=0.0)
     append_point(long, 0.1, 10.0, 0.0)
     short = active_track("2", timestamp=0.0, x=30.0, y=0.0)
     tracks = [long, short]
-    config = TrackV2Config(anchor_tie_distance_px=5.0)
-    statuses = [classify_track(track, 1.0, config) for track in tracks]
+    statuses = [_classify_track(track, 1.0) for track in tracks]
 
     chosen = _best_for_observation(
         [
-            Match(track_index=0, observation_index=0, distance=7.0),
-            Match(track_index=1, observation_index=0, distance=1.0),
+            (0, 0, 22.0),
+            (1, 0, 1.0),
         ],
-        tracks,
-        statuses,
-        config,
+        [
+            (0 if status == "active" else 1, -len(track["path"]), (0, int(track["track_id"]), track["track_id"]))
+            for track, status in zip(tracks, statuses)
+        ],
     )
 
-    assert chosen.track_index == 1
+    assert chosen[0] == 1

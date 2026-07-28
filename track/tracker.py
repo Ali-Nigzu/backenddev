@@ -1,29 +1,13 @@
-"""Stateless deterministic Track V2 reducer."""
+"""Stateless deterministic Track reducer."""
 
 from math import isfinite
-
-from track.config import TrackV2Config
-from track.lifecycle import ACTIVE, TENTATIVE, append_observation, classify_track, create_track
-from track.matcher import match_tier, observation_sort_key, track_sort_key
-from track.models import (
-    REQUIRED_BBOX_FIELDS,
-    REQUIRED_BEST_CROP_FIELDS,
-    REQUIRED_CENTER_FIELDS,
-    REQUIRED_OBSERVATION_BATCH_FIELDS,
-    REQUIRED_OBSERVATION_FIELDS,
-    REQUIRED_POINT_FIELDS,
-    REQUIRED_TRACK_FIELDS,
-    REQUIRED_TRACKING_STATE_FIELDS,
-)
-
-
-def _require_mapping(value, name: str) -> None:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be an object")
+from track.config import _ACTIVE_TIMEOUT_FRAMES, _CONFIRMATION_HITS, _TENTATIVE_TIMEOUT_FRAMES
+from track.matcher import _match_tier, _track_sort_key
 
 
 def _require_fields(value, fields, name: str) -> None:
-    _require_mapping(value, name)
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
     for field in fields:
         if field not in value:
             raise ValueError(f"Missing required {name} field: {field}")
@@ -36,7 +20,7 @@ def _require_finite_number(value, name: str) -> float:
 
 
 def _validate_bbox(bbox, name: str) -> None:
-    _require_fields(bbox, REQUIRED_BBOX_FIELDS, name)
+    _require_fields(bbox, ("x1", "y1", "x2", "y2"), name)
     x1 = _require_finite_number(bbox["x1"], f"{name}.x1")
     y1 = _require_finite_number(bbox["y1"], f"{name}.y1")
     x2 = _require_finite_number(bbox["x2"], f"{name}.x2")
@@ -46,20 +30,20 @@ def _validate_bbox(bbox, name: str) -> None:
 
 
 def _validate_center(center, name: str) -> None:
-    _require_fields(center, REQUIRED_CENTER_FIELDS, name)
+    _require_fields(center, ("x", "y"), name)
     _require_finite_number(center["x"], f"{name}.x")
     _require_finite_number(center["y"], f"{name}.y")
 
 
 def _validate_tracking_state(state) -> None:
-    _require_fields(state, REQUIRED_TRACKING_STATE_FIELDS, "TrackingState")
+    _require_fields(state, ("tracks",), "TrackingState")
     if not isinstance(state["tracks"], list):
         raise ValueError("TrackingState.tracks must be a list")
 
     seen_ids = set()
     for track_index, track in enumerate(state["tracks"]):
         name = f"TrackingState.tracks[{track_index}]"
-        _require_fields(track, REQUIRED_TRACK_FIELDS, name)
+        _require_fields(track, ("track_id", "path", "best_crop", "best_crop_confidence"), name)
         track_id = track["track_id"]
         if not isinstance(track_id, str) or not track_id:
             raise ValueError(f"{name}.track_id must be a non-empty string")
@@ -72,14 +56,14 @@ def _validate_tracking_state(state) -> None:
         previous_timestamp = None
         for point_index, point in enumerate(track["path"]):
             point_name = f"{name}.path[{point_index}]"
-            _require_fields(point, REQUIRED_POINT_FIELDS, point_name)
+            _require_fields(point, ("timestamp", "center"), point_name)
             timestamp = _require_finite_number(point["timestamp"], f"{point_name}.timestamp")
             if previous_timestamp is not None and timestamp < previous_timestamp:
                 raise ValueError(f"{name}.path timestamps must be monotonic")
             previous_timestamp = timestamp
             _validate_center(point["center"], f"{point_name}.center")
 
-        _require_fields(track["best_crop"], REQUIRED_BEST_CROP_FIELDS, f"{name}.best_crop")
+        _require_fields(track["best_crop"], ("frame_id", "bbox", "embedding"), f"{name}.best_crop")
         if not isinstance(track["best_crop"]["frame_id"], str):
             raise ValueError(f"{name}.best_crop.frame_id must be a string")
         _validate_bbox(track["best_crop"]["bbox"], f"{name}.best_crop.bbox")
@@ -87,7 +71,7 @@ def _validate_tracking_state(state) -> None:
 
 
 def _validate_observation_batch(batch) -> None:
-    _require_fields(batch, REQUIRED_OBSERVATION_BATCH_FIELDS, "ObservationBatch")
+    _require_fields(batch, ("frame_id", "timestamp", "observations"), "ObservationBatch")
     if not isinstance(batch["frame_id"], str) or not batch["frame_id"]:
         raise ValueError("ObservationBatch.frame_id must be a non-empty string")
     _require_finite_number(batch["timestamp"], "ObservationBatch.timestamp")
@@ -97,7 +81,7 @@ def _validate_observation_batch(batch) -> None:
     seen_ids = set()
     for observation_index, observation in enumerate(batch["observations"]):
         name = f"ObservationBatch.observations[{observation_index}]"
-        _require_fields(observation, REQUIRED_OBSERVATION_FIELDS, name)
+        _require_fields(observation, ("detection_id", "bbox", "center", "embedding", "confidence"), name)
         detection_id = observation["detection_id"]
         if not isinstance(detection_id, str) or not detection_id:
             raise ValueError(f"{name}.detection_id must be a non-empty string")
@@ -109,6 +93,58 @@ def _validate_observation_batch(batch) -> None:
         _require_finite_number(observation["confidence"], f"{name}.confidence")
 
 
+def _classify_track(track: dict, current_frame_number: float) -> str:
+    frame_delta = float(current_frame_number) - float(track["path"][-1]["timestamp"])
+    if frame_delta < 0:
+        raise ValueError("Track path contains a frame newer than the observation batch")
+
+    if len(track["path"]) >= _CONFIRMATION_HITS:
+        return "active" if int(frame_delta) <= _ACTIVE_TIMEOUT_FRAMES else "inactive"
+
+    return "tentative" if int(frame_delta) <= _TENTATIVE_TIMEOUT_FRAMES else "inactive"
+
+
+def _append_observation(track, observation, frame_id: str, frame_number: float) -> None:
+    track["path"].append(
+        {
+            "timestamp": float(frame_number),
+            "center": {
+                "x": float(observation["center"]["x"]),
+                "y": float(observation["center"]["y"]),
+            },
+        }
+    )
+    confidence = float(observation["confidence"])
+    if confidence > float(track["best_crop_confidence"]):
+        track["best_crop"] = {
+            "frame_id": frame_id,
+            "bbox": dict(observation["bbox"]),
+            "embedding": observation["embedding"],
+        }
+        track["best_crop_confidence"] = confidence
+
+
+def _create_track(observation, frame_id: str, frame_number: float, track_id: str) -> dict:
+    return {
+        "track_id": str(track_id),
+        "path": [
+            {
+                "timestamp": float(frame_number),
+                "center": {
+                    "x": float(observation["center"]["x"]),
+                    "y": float(observation["center"]["y"]),
+                },
+            }
+        ],
+        "best_crop": {
+            "frame_id": frame_id,
+            "bbox": dict(observation["bbox"]),
+            "embedding": observation["embedding"],
+        },
+        "best_crop_confidence": float(observation["confidence"]),
+    }
+
+
 def _next_numeric_track_id(tracks) -> int:
     max_numeric_id = 0
     for track in tracks:
@@ -118,61 +154,46 @@ def _next_numeric_track_id(tracks) -> int:
     return max_numeric_id + 1
 
 
-def _reorder_state_tracks(state) -> None:
-    state["tracks"].sort(key=track_sort_key)
-
-
-def _partition_track_indices(tracks, frame_number: float, config: TrackV2Config):
-    """Compatibility helper returning active and tentative track indices."""
-
-    statuses = [classify_track(track, frame_number, config) for track in tracks]
-    active_indices = [index for index, status in enumerate(statuses) if status.state == ACTIVE]
-    tentative_indices = [index for index, status in enumerate(statuses) if status.state == TENTATIVE]
-    return active_indices, tentative_indices
-
-
-def Track(tracking_state, observation_batch, config: TrackV2Config | None = None):
+def Track(tracking_state, observation_batch):
     """Update ``tracking_state`` in place from one ``ObservationBatch`` and return it."""
 
-    config = config or TrackV2Config()
     _validate_tracking_state(tracking_state)
     _validate_observation_batch(observation_batch)
 
     frame_number = float(observation_batch["timestamp"])
     frame_id = observation_batch["frame_id"]
 
-    _reorder_state_tracks(tracking_state)
+    tracking_state["tracks"].sort(key=_track_sort_key)
     ordered_observations = [
         observation
         for _index, observation in sorted(
-            enumerate(observation_batch["observations"]), key=observation_sort_key
+            enumerate(observation_batch["observations"]),
+            key=lambda item: (str(item[1]["detection_id"]), item[0]),
         )
     ]
 
-    statuses = [classify_track(track, frame_number, config) for track in tracking_state["tracks"]]
-    active_track_indices = [index for index, status in enumerate(statuses) if status.state == ACTIVE]
-    tentative_track_indices = [index for index, status in enumerate(statuses) if status.state == TENTATIVE]
+    statuses = [_classify_track(track, frame_number) for track in tracking_state["tracks"]]
+    active_track_indices = [index for index, status in enumerate(statuses) if status == "active"]
+    tentative_track_indices = [index for index, status in enumerate(statuses) if status == "tentative"]
     all_observation_indices = list(range(len(ordered_observations)))
 
-    active_matches, remaining_observation_indices = match_tier(
+    active_matches, remaining_observation_indices = _match_tier(
         tracking_state["tracks"],
         ordered_observations,
         statuses,
         active_track_indices,
         all_observation_indices,
-        config,
     )
-    tentative_matches, remaining_observation_indices = match_tier(
+    tentative_matches, remaining_observation_indices = _match_tier(
         tracking_state["tracks"],
         ordered_observations,
         statuses,
         tentative_track_indices,
         remaining_observation_indices,
-        config,
     )
 
     for state_track_index, observation_index in sorted(active_matches + tentative_matches):
-        append_observation(
+        _append_observation(
             tracking_state["tracks"][state_track_index],
             ordered_observations[observation_index],
             frame_id,
@@ -181,22 +202,10 @@ def Track(tracking_state, observation_batch, config: TrackV2Config | None = None
 
     next_id = _next_numeric_track_id(tracking_state["tracks"])
     for observation_index in sorted(remaining_observation_indices):
-        observation = ordered_observations[observation_index]
-        tracking_state["tracks"].append(create_track(observation, frame_id, frame_number, str(next_id)))
+        tracking_state["tracks"].append(
+            _create_track(ordered_observations[observation_index], frame_id, frame_number, str(next_id))
+        )
         next_id += 1
 
-    _reorder_state_tracks(tracking_state)
-    _validate_tracking_state(tracking_state)
+    tracking_state["tracks"].sort(key=_track_sort_key)
     return tracking_state
-
-
-class TrackV2:
-    """Callable wrapper that stores configuration only, never analytics state."""
-
-    __slots__ = ("config",)
-
-    def __init__(self, config: TrackV2Config | None = None):
-        self.config = config or TrackV2Config()
-
-    def __call__(self, tracking_state, observation_batch):
-        return Track(tracking_state, observation_batch, self.config)
