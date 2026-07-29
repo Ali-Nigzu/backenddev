@@ -81,11 +81,11 @@ def current_frame_assignments(
         if float(latest_point["timestamp"]) != timestamp:
             continue
 
-        candidates = detections_by_centre.get(point_key(latest_point), [])
-        if not candidates:
+        matching_detections = detections_by_centre.get(point_key(latest_point), [])
+        if not matching_detections:
             continue
 
-        assignments.append((track, candidates.pop(0)))
+        assignments.append((track, matching_detections.pop(0)))
 
     return assignments
 
@@ -179,7 +179,7 @@ def event_label(event_type: int) -> str:
     return "ENTRY" if event_type == 1 else "EXIT"
 
 
-def _format_video_time(total_seconds: float) -> str:
+def format_elapsed_time(total_seconds: float) -> str:
     minutes = int(total_seconds // 60)
     seconds = total_seconds % 60
     return f"{minutes:02d}:{seconds:06.3f}"
@@ -199,20 +199,21 @@ def print_event_summary(event_batch: dict, fps: float) -> None:
         bbox = event["best_crop"]["bbox"]
         event_seconds = float(event["timestamp"]) / float(fps)
         print(
-            f"Track {event['track_id']} | "
-            f"{event_seconds:.3f}s | "
-            f"{_format_video_time(event_seconds)} | "
-            f"event_type={event['event_type']} | "
-            f"{event_label(event['event_type'])} | "
-            f"best_crop_frame={event['best_crop']['frame_id']} | "
+            f"track_id={event['track_id']} "
+            f"event_type={event['event_type']} "
+            f"label={event_label(event['event_type'])} "
+            f"raw_timestamp={float(event['timestamp']):.1f} "
+            f"elapsed={event_seconds:.3f}s "
+            f"time={format_elapsed_time(event_seconds)} "
+            f"best_crop_frame={event['best_crop']['frame_id']} "
             f"bbox=({float(bbox['x1']):.3f}, {float(bbox['y1']):.3f}, "
             f"{float(bbox['x2']):.3f}, {float(bbox['y2']):.3f})"
         )
 
     print(f"Total events: {len(events)}")
-    print(f"Entries: {entry_count}")
-    print(f"Exits: {exit_count}")
-    print(f"Tracks with events: {len(tracks_with_events)}")
+    print(f"Total entries: {entry_count}")
+    print(f"Total exits: {exit_count}")
+    print(f"Unique track IDs with events: {len(tracks_with_events)}")
 
 
 def print_track_summary(track_summary, frame_count: int) -> None:
@@ -337,7 +338,7 @@ def main():
     print("\nReplay complete")
     print(f"\nFrames processed: {frame_index}")
     print(f"Tracks created: {len(track_summary)}")
-    print(f"Annotated replay: {output_path}")
+    print(f"Output video path: {output_path}")
 
 
 if __name__ == "__main__":

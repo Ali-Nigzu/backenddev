@@ -2,6 +2,8 @@
 
 from math import hypot
 
+from .config import _ON_LINE_DISTANCE_PIXELS
+
 GEOMETRY_EPSILON = 1e-6
 
 Point = tuple[float, float]
@@ -16,8 +18,8 @@ def _signed_distance_to_line(point: Point, line_a: Point, line_b: Point) -> floa
 
 def _side(point: Point, line_a: Point, line_b: Point) -> int:
     signed_distance = _signed_distance_to_line(point, line_a, line_b)
-    if signed_distance > GEOMETRY_EPSILON:
+    if signed_distance > _ON_LINE_DISTANCE_PIXELS:
         return 1
-    if signed_distance < -GEOMETRY_EPSILON:
+    if signed_distance < -_ON_LINE_DISTANCE_PIXELS:
         return -1
     return 0

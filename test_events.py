@@ -10,10 +10,22 @@ BEST_CROP = {
     "frame_id": "frame_2",
     "bbox": {"x1": 1.0, "y1": 1.0, "x2": 10.0, "y2": 20.0},
 }
+NEG_Y = -3.0
+POS_Y = 3.0
+ON_Y = 0.0
 
 
 def point(timestamp, x, y):
     return {"timestamp": float(timestamp), "centre": {"x": float(x), "y": float(y)}}
+
+
+def side_point(timestamp, side, x=5.0):
+    y_by_side = {"A": NEG_Y, "B": POS_Y, "O": ON_Y}
+    return point(timestamp, x, y_by_side[side])
+
+
+def side_path(pattern, start=1, x=5.0):
+    return [side_point(start + index, side, x) for index, side in enumerate(pattern)]
 
 
 def track(track_id, points, best_crop=None, confidence=0.9):
@@ -33,6 +45,10 @@ def event_types(result):
     return [event["event_type"] for event in result["events"]]
 
 
+def event_timestamps(result):
+    return [event["timestamp"] for event in result["events"]]
+
+
 def test_public_surface_exports_only_event():
     import events
     from events import Event
@@ -40,6 +56,9 @@ def test_public_surface_exports_only_event():
     assert events.__all__ == ["Event"]
     assert callable(Event)
     assert len(inspect.signature(Event).parameters) == 2
+    assert not hasattr(events, "_MIN_STABLE_SIDE_POINTS")
+    assert not hasattr(events, "_MIN_EVENT_TRACK_POINTS")
+    assert not hasattr(events, "_ON_LINE_DISTANCE_PIXELS")
     assert not hasattr(events, "detect" + "_events")
     assert not hasattr(events, "Runtime" + "EventCandidate")
     assert not hasattr(events, "ENTRY")
@@ -48,8 +67,49 @@ def test_public_surface_exports_only_event():
 
 
 @pytest.mark.parametrize(
+    ("pattern", "expected_count"),
+    [
+        ("AA", 0),
+        ("AABB", 0),
+        ("AABBAA", 0),
+        ("AAA", 0),
+        ("AAABB", 0),
+        ("AABBBB", 0),
+        ("AAABBAAA", 0),
+        ("ABABAB", 0),
+        ("AABBAB", 0),
+        ("AAABBB", 1),
+        ("AAAABBBB", 1),
+        ("AAABBBAA", 1),
+        ("AAABBBBBB", 1),
+        ("AAABBBAAA", 2),
+        ("AAAABBBBBBAAAA", 2),
+        ("AAABBBAAABBB", 3),
+    ],
+)
+def test_stable_side_run_sequence_matrix(pattern, expected_count):
+    from events import Event
+
+    result = Event(state(track("1", side_path(pattern))), LINE)
+    assert len(result["events"]) == expected_count
+
+
+def test_stable_side_run_event_types_follow_direction():
+    from events import Event
+
+    assert event_types(Event(state(track("entry", side_path("AAABBB"))), LINE)) == [1]
+    assert event_types(Event(state(track("exit", side_path("BBBAAA"))), LINE)) == [0]
+    assert event_types(Event(state(track("multi", side_path("AAABBBAAABBB"))), LINE)) == [1, 0, 1]
+
+
+@pytest.mark.parametrize(
     "tracking_state",
-    [state(), state(track("1", [])), state(track("1", [point(1, 5, -1)]))],
+    [
+        state(),
+        state(track("1", [])),
+        state(track("1", [point(1, 5, -3)])),
+        state(track("1", side_path("ABBAA"))),
+    ],
 )
 def test_empty_and_short_paths_return_empty_event_batch(tracking_state):
     from events import Event
@@ -60,7 +120,7 @@ def test_empty_and_short_paths_return_empty_event_batch(tracking_state):
 def test_event_batch_and_event_shapes_are_locked():
     from events import Event
 
-    result = Event(state(track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, 2)])), LINE)
+    result = Event(state(track("1", side_path("AAABBB"))), LINE)
     assert set(result) == {"events"}
     assert len(result["events"]) == 1
     event = result["events"][0]
@@ -68,92 +128,36 @@ def test_event_batch_and_event_shapes_are_locked():
     assert "event_id" not in event
     assert "direction" not in event
     assert "supporting" + "_positions" not in event
-    assert "candidate_count" not in event
+    assert "run_count" not in event
+    assert "stable_side_points" not in event
+    assert "track_length" not in event
+    assert "on_line_width" not in event
     assert "best_crop_confidence" not in event
     assert event["event_type"] == 1
     assert not any(value in ("ENTRY", "EXIT") for value in event.values())
 
 
-def test_negative_to_positive_continuous_crossing_returns_one_entry():
+def test_minimum_track_length_boundaries_and_eligibility():
     from events import Event
 
-    result = Event(state(track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, 2)])), LINE)
-    assert event_types(result) == [1]
-    assert result["events"][0]["timestamp"] == 2.0
+    assert Event(state(track("below", side_path("ABBAA"))), LINE) == {"events": []}
+    assert event_types(Event(state(track("exact", side_path("AAABBB"))), LINE)) == [1]
+    assert event_types(Event(state(track("above", side_path("AAABBBB"))), LINE)) == [1]
+    assert Event(state(track("eligible_no_stable", side_path("AABBAA"))), LINE) == {"events": []}
 
 
-def test_positive_to_negative_continuous_crossing_returns_one_exit():
-    from events import Event
-
-    result = Event(state(track("1", [point(1, 5, 1), point(2, 5, -1), point(3, 5, -2)])), LINE)
-    assert event_types(result) == [0]
-    assert result["events"][0]["timestamp"] == 2.0
-
-
-def test_no_side_transition_returns_no_event():
-    from events import Event
-
-    assert Event(state(track("1", [point(1, 2, -1), point(2, 8, -2)])), LINE) == {
-        "events": []
-    }
-
-
-def test_duplicate_stationary_points_do_not_create_events():
-    from events import Event
-
-    assert Event(state(track("1", [point(1, 5, -1), point(2, 5, -1)])), LINE) == {
-        "events": []
-    }
-    result = Event(
-        state(
-            track(
-                "1",
-                [point(1, 5, -1), point(2, 5, -1), point(3, 5, 1), point(4, 5, 1)],
-            )
-        ),
-        LINE,
-    )
-    assert event_types(result) == [1]
-    assert Event(state(track("1", [point(1, 5, 0), point(2, 5, 0)])), LINE) == {
-        "events": []
-    }
-
-
-def test_multiple_crossings_by_one_track():
-    from events import Event
-
-    result = Event(
-        state(
-            track(
-                "1",
-                [
-                    point(1, 5, -1),
-                    point(2, 5, 1),
-                    point(3, 5, 2),
-                    point(4, 5, -1),
-                    point(5, 5, -2),
-                    point(6, 5, 1),
-                    point(7, 5, 2),
-                ],
-            )
-        ),
-        LINE,
-    )
-    assert event_types(result) == [1, 0, 1]
-    assert [event["timestamp"] for event in result["events"]] == [2.0, 4.0, 6.0]
-
-
-def test_multiple_tracks_and_existing_order_preserved():
+def test_mixed_track_eligibility_preserves_order_and_skips_do_not_affect_later_tracks():
     from events import Event
 
     tracking_state = state(
-        track("z", [point(1, 5, -1), point(3, 5, 1), point(4, 5, 2)]),
-        track("1", [point(1, 5, 1), point(2, 5, -1), point(3, 5, -2)]),
+        track("short", side_path("ABBAA")),
+        track("entry", side_path("AAABBB")),
+        track("exit", side_path("BBBAAA")),
     )
     result = Event(tracking_state, LINE)
     assert [(event["track_id"], event["event_type"]) for event in result["events"]] == [
-        ("z", 1),
-        ("1", 0),
+        ("entry", 1),
+        ("exit", 0),
     ]
 
 
@@ -161,203 +165,184 @@ def test_multiple_tracks_and_existing_order_preserved():
 def test_crossing_anywhere_on_continuous_line_counts(x):
     from events import Event
 
-    assert event_types(
-        Event(state(track("1", [point(1, x, -1), point(2, x, 1), point(3, x, 2)])), LINE)
-    ) == [1]
+    assert event_types(Event(state(track("1", side_path("AAABBB", x=x))), LINE)) == [1]
 
 
 @pytest.mark.parametrize("x", [0.0, 10.0])
 def test_crossing_through_anchor_points_has_no_special_endpoint_rule(x):
     from events import Event
 
-    assert event_types(
-        Event(
-            state(
-                track(
-                    "1",
-                    [point(1, x - 1, -1), point(2, x, 0), point(3, x + 1, 1), point(4, x + 1, 2)],
-                )
-            ),
-            LINE,
-        )
-    ) == [1]
+    points = [
+        point(1, x - 1, NEG_Y),
+        point(2, x - 0.5, NEG_Y),
+        point(3, x - 0.25, NEG_Y),
+        point(4, x, ON_Y),
+        point(5, x + 0.25, POS_Y),
+        point(6, x + 0.5, POS_Y),
+        point(7, x + 1, POS_Y),
+    ]
+    assert event_types(Event(state(track("1", points)), LINE)) == [1]
 
 
 @pytest.mark.parametrize("x", [0.0, 5.0, 10.0, 15.0])
 def test_touching_line_and_returning_same_side_does_not_count(x):
     from events import Event
 
-    assert Event(
-        state(track("1", [point(1, x - 1, -1), point(2, x, 0), point(3, x + 1, -1)])),
-        LINE,
-    ) == {"events": []}
+    points = [
+        point(1, x - 1, NEG_Y),
+        point(2, x - 0.5, NEG_Y),
+        point(3, x - 0.25, NEG_Y),
+        point(4, x, ON_Y),
+        point(5, x + 0.25, NEG_Y),
+        point(6, x + 0.5, NEG_Y),
+        point(7, x + 1, NEG_Y),
+    ]
+    assert Event(state(track("1", points)), LINE) == {"events": []}
 
 
-def test_isolated_one_point_jump_is_suppressed():
+def test_short_opposite_runs_do_not_replace_established_side():
     from events import Event
 
-    result = Event(
-        state(track("1", [point(1, 5, -1), point(2, 5, -2), point(3, 5, 1), point(4, 5, -1), point(5, 5, -2)])),
-        LINE,
-    )
-    assert result == {"events": []}
-
-
-def test_alternating_jitter_is_suppressed():
-    from events import Event
-
-    result = Event(
-        state(track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, -1), point(4, 5, 1), point(5, 5, -1)])),
-        LINE,
-    )
-    assert result == {"events": []}
-
-
-def test_candidate_rejection_preserves_confirmed_side_and_later_candidate_can_confirm():
-    from events import Event
-
-    result = Event(
-        state(track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, -1), point(4, 5, 1), point(5, 5, 2)])),
-        LINE,
-    )
+    assert Event(state(track("1", side_path("AAABAAA"))), LINE) == {"events": []}
+    assert Event(state(track("1", side_path("AAABBAAA"))), LINE) == {"events": []}
+    result = Event(state(track("1", side_path("AAABBAAABBB", start=10))), LINE)
     assert event_types(result) == [1]
-    assert result["events"][0]["timestamp"] == 4.0
+    assert event_timestamps(result) == [18.0]
 
 
 def test_additional_same_side_points_do_not_duplicate_event():
     from events import Event
 
-    result = Event(
-        state(track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, 2), point(4, 5, 3), point(5, 5, 4)])),
-        LINE,
-    )
+    result = Event(state(track("1", side_path("AAABBBBBB"))), LINE)
     assert event_types(result) == [1]
-
-
-def test_on_line_sequences():
-    from events import Event
-
-    assert event_types(
-        Event(
-            state(track("1", [point(1, 5, -1), point(2, 5, 0), point(3, 5, 1), point(4, 5, 2)])), LINE
-        )
-    ) == [1]
-    assert event_types(
-        Event(
-            state(track("1", [point(1, 5, 1), point(2, 5, 0), point(3, 5, -1), point(4, 5, -2)])), LINE
-        )
-    ) == [0]
-    assert Event(
-        state(track("1", [point(1, 5, -1), point(2, 5, 0), point(3, 5, -1)])), LINE
-    ) == {"events": []}
-    assert Event(
-        state(track("1", [point(1, 5, 1), point(2, 5, 0), point(3, 5, 1)])), LINE
-    ) == {"events": []}
-    assert Event(state(track("1", [point(1, 5, 0), point(2, 5, 1), point(3, 5, 2)])), LINE) == {
-        "events": []
-    }
-    assert Event(state(track("1", [point(1, 2, 0), point(2, 8, 0)])), LINE) == {
-        "events": []
-    }
-    assert event_types(
-        Event(
-            state(
-                track(
-                    "1",
-                    [point(1, 5, -1), point(2, 2, 0), point(3, 8, 0), point(4, 5, 1), point(5, 5, 2)],
-                )
-            ),
-            LINE,
-        )
-    ) == [1]
-
-
-def test_on_line_points_do_not_increment_or_reject_candidate():
-    from events import Event
-
-    result = Event(
-        state(track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, 0), point(4, 5, 2)])),
-        LINE,
-    )
-    assert event_types(result) == [1]
-    assert result["events"][0]["timestamp"] == 2.0
+    assert event_timestamps(result) == [4.0]
 
 
 @pytest.mark.parametrize(
-    ("points", "expected"),
+    ("pattern", "expected"),
     [
-        ([point(1, 5, -1), point(2, 5, -2), point(3, 5, 1)], []),
-        ([point(1, 5, 1), point(2, 5, 2), point(3, 5, -1)], []),
-        ([point(1, 5, -1), point(2, 5, -2), point(3, 5, 1), point(4, 5, 2)], [1]),
-        ([point(1, 5, 1), point(2, 5, 2), point(3, 5, -1), point(4, 5, -2)], [0]),
+        ("AAAOABBB", [1]),
+        ("AAOABBB", [1]),
+        ("AAOBBAA", []),
+        ("OAAABBB", [1]),
+        ("AAAOOBBB", [1]),
     ],
 )
-def test_track_end_candidate_behavior(points, expected):
+def test_on_line_points_pause_runs_without_incrementing_or_resetting(pattern, expected):
     from events import Event
 
-    assert event_types(Event(state(track("1", points)), LINE)) == expected
+    assert event_types(Event(state(track("1", side_path(pattern))), LINE)) == expected
+
+
+def test_on_line_points_do_not_change_run_start_timestamp():
+    from events import Event
+
+    points = [
+        point(1, 5, NEG_Y),
+        point(2, 5, NEG_Y),
+        point(3, 5, ON_Y),
+        point(4, 5, NEG_Y),
+        point(10, 5, POS_Y),
+        point(11, 5, ON_Y),
+        point(12, 5, POS_Y),
+        point(13, 5, POS_Y),
+    ]
+    result = Event(state(track("1", points)), LINE)
+    assert event_types(result) == [1]
+    assert event_timestamps(result) == [10.0]
+
+
+@pytest.mark.parametrize(
+    ("y", "expected"),
+    [
+        (0.0, 0),
+        (1.9, 0),
+        (-1.9, 0),
+        (2.0, 0),
+        (-2.0, 0),
+        (2.1, 1),
+        (-2.1, -1),
+    ],
+)
+def test_on_line_deadband_boundaries(y, expected):
+    from events.geometry import _side
+
+    assert _side((5.0, y), (0.0, 0.0), (10.0, 0.0)) == expected
+
+
+def test_geometry_deadband_uses_normalized_line_distance():
+    from events import Event
+    from events.geometry import _side
+
+    short_line = {"point_a": {"x": 0.0, "y": 0.0}, "point_b": {"x": 10.0, "y": 0.0}}
+    long_line = {"point_a": {"x": 0.0, "y": 0.0}, "point_b": {"x": 1000000.0, "y": 0.0}}
+    assert _side((5.0, 2.1), (0.0, 0.0), (10.0, 0.0)) == 1
+    assert _side((5.0, 2.1), (0.0, 0.0), (1000000.0, 0.0)) == 1
+    assert _side((5.0, 1.9), (0.0, 0.0), (10.0, 0.0)) == 0
+    assert _side((5.0, 1.9), (0.0, 0.0), (1000000.0, 0.0)) == 0
+
+    near_line_state = state(track("1", [point(i, 5, y) for i, y in enumerate([-3, -3, -3, 1.9, 3, 3], 1)]))
+    assert Event(near_line_state, short_line) == {"events": []}
+
+    clear_crossing = state(track("1", [point(i, 5, y) for i, y in enumerate([-3, -3, -3, 2.1, 2.2, 2.3], 1)]))
+    assert event_types(Event(clear_crossing, short_line)) == [1]
+    assert event_types(Event(clear_crossing, long_line)) == [1]
+
+
+def test_timestamp_uses_first_stable_run_point_not_confirmation_or_final_timestamp():
+    from events import Event
+
+    points = [
+        point(1, 5, NEG_Y),
+        point(2, 5, NEG_Y),
+        point(3, 5, NEG_Y),
+        point(10, 5, POS_Y),
+        point(11, 5, POS_Y),
+        point(12, 5, POS_Y),
+        point(99, 5, POS_Y),
+    ]
+    result = Event(state(track("1", points)), LINE)
+    assert event_timestamps(result) == [10.0]
+
+
+def test_reverse_crossings_use_each_stable_run_start_timestamp():
+    from events import Event
+
+    points = [
+        point(1, 5, NEG_Y),
+        point(2, 5, NEG_Y),
+        point(3, 5, NEG_Y),
+        point(10, 5, POS_Y),
+        point(11, 5, POS_Y),
+        point(12, 5, POS_Y),
+        point(20, 5, NEG_Y),
+        point(21, 5, NEG_Y),
+        point(22, 5, NEG_Y),
+    ]
+    result = Event(state(track("1", points)), LINE)
+    assert event_types(result) == [1, 0]
+    assert event_timestamps(result) == [10.0, 20.0]
 
 
 def test_swapping_line_endpoints_reverses_event_type():
     from events import Event
 
     reverse_line = {"point_a": {"x": 10.0, "y": 0.0}, "point_b": {"x": 0.0, "y": 0.0}}
-    tracking_state = state(track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, 2)]))
+    tracking_state = state(track("1", side_path("AAABBB")))
     assert event_types(Event(tracking_state, LINE)) == [1]
     assert event_types(Event(tracking_state, reverse_line)) == [0]
-
-
-def test_timestamp_uses_first_candidate_side_not_confirmation_or_final_timestamp():
-    from events import Event
-
-    result = Event(
-        state(
-            track(
-                "1",
-                [point(1, 5, -1), point(2, 5, 0), point(3, 5, 1), point(4, 5, 2), point(99, 6, 2)],
-            )
-        ),
-        LINE,
-    )
-    assert [event["timestamp"] for event in result["events"]] == [3.0]
-
-
-def test_multiple_crossings_use_each_candidate_start_timestamp():
-    from events import Event
-
-    result = Event(
-        state(track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, 2), point(4, 5, -1), point(5, 5, -2)])),
-        LINE,
-    )
-    assert [event["timestamp"] for event in result["events"]] == [2.0, 4.0]
-
-
-def test_geometry_epsilon_uses_normalized_line_distance():
-    from events import Event
-
-    near_line_state = state(track("1", [point(1, 5, -1), point(2, 5, 5e-7), point(3, 5, 2)]))
-    assert Event(near_line_state, LINE) == {"events": []}
-
-    long_line = {"point_a": {"x": 0.0, "y": 0.0}, "point_b": {"x": 1000000.0, "y": 0.0}}
-    clear_crossing = state(track("1", [point(1, 5, -1), point(2, 5, 1e-5), point(3, 5, 2e-5)]))
-    assert event_types(Event(clear_crossing, LINE)) == [1]
-    assert event_types(Event(clear_crossing, long_line)) == [1]
 
 
 def test_best_crop_copied_and_confidence_excluded_and_ignored():
     from events import Event
 
-    tracking_state = state(
-        track("1", [point(1, 5, -1), point(2, 5, 1), point(3, 5, 2), point(4, 5, -1), point(5, 5, -2)], confidence=0.1)
-    )
+    tracking_state = state(track("1", side_path("AAABBBAAA"), confidence=0.1))
     result = Event(tracking_state, LINE)
     assert len(result["events"]) == 2
     assert result["events"][0]["best_crop"] == BEST_CROP
     assert result["events"][1]["best_crop"] == BEST_CROP
     assert "best_crop_confidence" not in result["events"][0]
-    assert (
-        result["events"][0]["best_crop"] is not tracking_state["tracks"][0]["best_crop"]
-    )
+    assert result["events"][0]["best_crop"] is not tracking_state["tracks"][0]["best_crop"]
     assert (
         result["events"][0]["best_crop"]["bbox"]
         is not tracking_state["tracks"][0]["best_crop"]["bbox"]
@@ -370,8 +355,8 @@ def test_event_does_not_mutate_inputs_or_reorder():
     from events import Event
 
     tracking_state = state(
-        track("b", [point(2, 5, -1), point(3, 5, 1), point(4, 5, 2)]),
-        track("a", [point(1, 5, 1), point(4, 5, -1), point(5, 5, -2)]),
+        track("b", side_path("AAABBB", start=2)),
+        track("a", side_path("BBBAAA", start=1)),
     )
     line_config = copy.deepcopy(LINE)
     original_state = copy.deepcopy(tracking_state)
@@ -414,7 +399,7 @@ def test_event_does_not_mutate_inputs_or_reorder():
                 },
             }
         ),
-        state(track("1", [point(2, 5, -1), point(1, 5, 1)])),
+        state(track("1", [point(2, 5, -3), point(1, 5, 3)])),
     ],
 )
 def test_invalid_tracking_state_rejected(bad_state):

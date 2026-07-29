@@ -3,10 +3,9 @@
 from collections.abc import Mapping
 from math import isfinite
 
+from .config import _MIN_EVENT_TRACK_POINTS, _MIN_STABLE_SIDE_POINTS
 from .geometry import GEOMETRY_EPSILON, Point, _side
 from .models import EventBatch, EventRecord
-
-_MIN_CONFIRMING_SIDE_POINTS = 2
 
 
 def _require_mapping(value, name: str) -> Mapping:
@@ -134,11 +133,14 @@ def _events_for_track(
     track: Mapping, line_a: Point, line_b: Point
 ) -> list[EventRecord]:
     path = track["path"]
+    if len(path) < _MIN_EVENT_TRACK_POINTS:
+        return []
+
     events: list[EventRecord] = []
-    confirmed_side = None
-    candidate_side = None
-    candidate_start_timestamp = None
-    candidate_count = 0
+    established_side = None
+    run_side = None
+    run_count = 0
+    run_start_timestamp = None
 
     for path_point in path:
         timestamp, point = _path_point(path_point)
@@ -146,38 +148,31 @@ def _events_for_track(
         if observed_side == 0:
             continue
 
-        if confirmed_side is None:
-            confirmed_side = observed_side
-            candidate_side = None
-            candidate_start_timestamp = None
-            candidate_count = 0
+        if observed_side != run_side:
+            run_side = observed_side
+            run_count = 1
+            run_start_timestamp = timestamp
+        else:
+            run_count += 1
+
+        if run_count != _MIN_STABLE_SIDE_POINTS:
             continue
 
-        if observed_side == confirmed_side:
-            candidate_side = None
-            candidate_start_timestamp = None
-            candidate_count = 0
+        if established_side is None:
+            established_side = run_side
             continue
 
-        if observed_side != candidate_side:
-            candidate_side = observed_side
-            candidate_start_timestamp = timestamp
-            candidate_count = 1
+        if run_side == established_side:
             continue
 
-        candidate_count += 1
-        if candidate_count >= _MIN_CONFIRMING_SIDE_POINTS:
-            events.append(
-                _make_event(
-                    track,
-                    candidate_start_timestamp,
-                    1 if confirmed_side == -1 and candidate_side == 1 else 0,
-                )
+        events.append(
+            _make_event(
+                track,
+                run_start_timestamp,
+                1 if established_side == -1 and run_side == 1 else 0,
             )
-            confirmed_side = candidate_side
-            candidate_side = None
-            candidate_start_timestamp = None
-            candidate_count = 0
+        )
+        established_side = run_side
 
     return events
 
