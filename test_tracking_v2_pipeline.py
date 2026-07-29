@@ -1,11 +1,13 @@
 """Replay Detect -> Track over a video, then run Event once."""
 
 import argparse
+import json
 from pathlib import Path
 
 
 DEFAULT_VIDEO_PATH = "videoplayback.mp4"
 DEFAULT_OUTPUT_NAME = "tracking_replay.mp4"
+DEFAULT_EVENTS_OUTPUT = "output/events_with_demographics.json"
 LINE_CONFIG = {
     "point_a": {"x": 100.0, "y": 300.0},
     "point_b": {"x": 700.0, "y": 300.0},
@@ -26,6 +28,17 @@ def parse_args():
         "--output",
         default=None,
         help="Annotated replay output path",
+    )
+    parser.add_argument(
+        "--events-output",
+        default=DEFAULT_EVENTS_OUTPUT,
+        help="Enriched events JSON output path",
+    )
+    parser.add_argument(
+        "--demographics-device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Device for demographic inference",
     )
     return parser.parse_args()
 
@@ -315,12 +328,12 @@ def print_event_summary(event_batch: dict, fps: float) -> None:
         print("- none")
     for event in events:
         bbox = event["best_crop"]["bbox"]
-        event_seconds = float(event["timestamp"]) / float(fps)
+        event_seconds = float(event["timestamp"])
         print(
             f"track_id={event['track_id']} "
             f"event_type={event['event_type']} "
             f"label={event_label(event['event_type'])} "
-            f"raw_timestamp={float(event['timestamp']):.1f} "
+            f"timestamp_seconds={float(event['timestamp']):.3f} "
             f"elapsed={event_seconds:.3f}s "
             f"time={format_elapsed_time(event_seconds)} "
             f"best_crop_frame={event['best_crop']['frame_id']} "
@@ -359,6 +372,121 @@ def print_track_summary(track_summary, frame_count: int) -> None:
         )
 
 
+def _frame_index_from_id(frame_id: str) -> int:
+    prefix = "frame-"
+    if not isinstance(frame_id, str) or not frame_id.startswith(prefix):
+        raise ValueError(f"Unsupported frame_id format: {frame_id}")
+    value = frame_id[len(prefix) :]
+    if not value.isdecimal():
+        raise ValueError(f"Unsupported frame_id format: {frame_id}")
+    return int(value)
+
+
+def required_frame_ids(event_batch: dict) -> list[str]:
+    frame_ids = {
+        event["best_crop"]["frame_id"]
+        for event in event_batch["events"]
+    }
+    return sorted(frame_ids, key=_frame_index_from_id)
+
+
+def build_minimal_frame_batch(video_path: Path, fps: float, frame_ids: list[str]) -> dict:
+    import cv2
+
+    if not frame_ids:
+        return {"frames": []}
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Cannot reopen video for demographics: {video_path}")
+    frames = []
+    try:
+        for frame_id in frame_ids:
+            frame_index = _frame_index_from_id(frame_id)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, bgr_frame = cap.read()
+            if not ok:
+                raise ValueError(f"Cannot read required source frame {frame_id} from {video_path}")
+            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+            if not rgb_frame.flags.c_contiguous:
+                rgb_frame = rgb_frame.copy()
+            frames.append(
+                {
+                    "frame_id": frame_id,
+                    "timestamp": float(frame_index) / float(fps),
+                    "image": rgb_frame,
+                }
+            )
+    finally:
+        cap.release()
+    return {"frames": frames}
+
+
+def demographics_for_events(event_batch: dict, video_path: Path, fps: float, device: str, demographic_cls=None) -> dict:
+    if not event_batch["events"]:
+        return {"results": []}
+    if demographic_cls is None:
+        from demographics import Demographic as demographic_cls
+    frame_batch = build_minimal_frame_batch(video_path, fps, required_frame_ids(event_batch))
+    demographic = demographic_cls(device=device)
+    return demographic(event_batch, frame_batch)
+
+
+def build_enriched_events(event_batch: dict, demographics_batch: dict) -> dict:
+    event_track_ids = {event["track_id"] for event in event_batch["events"]}
+    demographics_by_track = {}
+    for result in demographics_batch["results"]:
+        track_id = result["track_id"]
+        if track_id in demographics_by_track:
+            raise ValueError(f"Duplicate demographic result for track_id={track_id}")
+        demographics_by_track[track_id] = result
+    extra_results = set(demographics_by_track) - event_track_ids
+    if extra_results:
+        raise ValueError(f"Demographic results without matching events: {sorted(extra_results)}")
+    enriched_events = []
+    for event in event_batch["events"]:
+        track_id = event["track_id"]
+        if track_id not in demographics_by_track:
+            raise ValueError(f"Missing demographic result for track_id={track_id}")
+        result = demographics_by_track[track_id]
+        enriched_events.append(
+            {
+                "track_id": track_id,
+                "timestamp": float(event["timestamp"]),
+                "event_type": int(event["event_type"]),
+                "age": int(result["age"]),
+                "sex": int(result["sex"]),
+            }
+        )
+    enriched_events.sort(key=lambda event: (float(event["timestamp"]), str(event["track_id"]), int(event["event_type"])))
+    return {"events": enriched_events}
+
+
+def write_enriched_events(enriched_event_batch: dict, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(enriched_event_batch, indent=2, sort_keys=True) + "\n")
+
+
+def sex_label(sex: int) -> str:
+    return "male" if sex == 1 else "female"
+
+
+def print_enriched_event_summary(enriched_event_batch: dict) -> None:
+    print("\nEVENTS WITH DEMOGRAPHICS")
+    print("========================")
+    if not enriched_event_batch["events"]:
+        print("- none")
+        return
+    for event in enriched_event_batch["events"]:
+        print(
+            f"track_id={event['track_id']} "
+            f"event_type={event['event_type']} "
+            f"label={event_label(event['event_type'])} "
+            f"timestamp_seconds={float(event['timestamp']):.3f} "
+            f"age={event['age']} "
+            f"sex={event['sex']} "
+            f"sex_label={sex_label(event['sex'])}"
+        )
+
 def main():
     args = parse_args()
     video_path = Path(args.input)
@@ -371,6 +499,7 @@ def main():
     import cv2
 
     from detect import Detect
+    from demographics import Demographic
     from events import Event
     from track import Track
 
@@ -383,6 +512,7 @@ def main():
         fps = 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
         str(output_path),
         cv2.VideoWriter_fourcc(*"mp4v"),
@@ -409,7 +539,7 @@ def main():
             if not ok:
                 break
 
-            timestamp = float(frame_index)
+            timestamp = float(frame_index) / float(fps)
             rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
             if not rgb_frame.flags.c_contiguous:
                 rgb_frame = rgb_frame.copy()
@@ -450,12 +580,19 @@ def main():
         writer.release()
 
     event_batch = Event(tracking_state, LINE_CONFIG)
+    demographics_batch = demographics_for_events(
+        event_batch, video_path, fps, args.demographics_device, Demographic
+    )
+    enriched_event_batch = build_enriched_events(event_batch, demographics_batch)
+    write_enriched_events(enriched_event_batch, Path(args.events_output))
     print_track_summary(track_summary, frame_index)
     print_event_summary(event_batch, fps)
+    print_enriched_event_summary(enriched_event_batch)
     print("\nReplay complete")
     print(f"\nFrames processed: {frame_index}")
     print(f"Tracks created: {len(track_summary)}")
     print(f"Output video path: {output_path}")
+    print(f"Events JSON path: {Path(args.events_output)}")
 
 
 if __name__ == "__main__":

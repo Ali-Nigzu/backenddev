@@ -1,3 +1,6 @@
-from .demographics_engine import DemographicsEngine
+"""Public demographics package API."""
 
-__all__ = ["DemographicsEngine"]
+from .demographic import Demographic
+from .exceptions import DemographicError, DemographicInputError, DemographicModelError
+
+__all__ = ["Demographic", "DemographicError", "DemographicInputError", "DemographicModelError"]
