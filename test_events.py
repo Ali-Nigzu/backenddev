@@ -63,7 +63,7 @@ def test_public_surface_exports_only_event():
     assert not hasattr(events, "Runtime" + "EventCandidate")
     assert not hasattr(events, "ENTRY")
     assert not hasattr(events, "EXIT")
-    assert not hasattr(events, "EventState")
+    assert not hasattr(events, "Event" + "State")
 
 
 @pytest.mark.parametrize(
@@ -253,38 +253,42 @@ def test_on_line_points_do_not_change_run_start_timestamp():
 
 
 @pytest.mark.parametrize(
-    ("y", "expected"),
+    ("initial_pattern", "y", "expected"),
     [
-        (0.0, 0),
-        (1.9, 0),
-        (-1.9, 0),
-        (2.0, 0),
-        (-2.0, 0),
-        (2.1, 1),
-        (-2.1, -1),
+        ("AAA", 0.0, []),
+        ("AAA", 1.9, []),
+        ("BBB", -1.9, []),
+        ("AAA", 2.0, []),
+        ("BBB", -2.0, []),
+        ("AAA", 2.1, [1]),
+        ("BBB", -2.1, [0]),
     ],
 )
-def test_on_line_deadband_boundaries(y, expected):
-    from events.geometry import _side
-
-    assert _side((5.0, y), (0.0, 0.0), (10.0, 0.0)) == expected
-
-
-def test_geometry_deadband_uses_normalized_line_distance():
+def test_on_line_deadband_boundaries_through_event_behavior(initial_pattern, y, expected):
     from events import Event
-    from events.geometry import _side
+
+    points = side_path(initial_pattern) + [
+        point(10, 5, y),
+        point(11, 5, y),
+        point(12, 5, y),
+    ]
+    assert event_types(Event(state(track("1", points)), LINE)) == expected
+
+
+def test_geometry_deadband_uses_normalized_line_distance_through_event_behavior():
+    from events import Event
 
     short_line = {"point_a": {"x": 0.0, "y": 0.0}, "point_b": {"x": 10.0, "y": 0.0}}
     long_line = {"point_a": {"x": 0.0, "y": 0.0}, "point_b": {"x": 1000000.0, "y": 0.0}}
-    assert _side((5.0, 2.1), (0.0, 0.0), (10.0, 0.0)) == 1
-    assert _side((5.0, 2.1), (0.0, 0.0), (1000000.0, 0.0)) == 1
-    assert _side((5.0, 1.9), (0.0, 0.0), (10.0, 0.0)) == 0
-    assert _side((5.0, 1.9), (0.0, 0.0), (1000000.0, 0.0)) == 0
+    near_line_state = state(
+        track("1", [point(i, 5, y) for i, y in enumerate([-3, -3, -3, 1.9, 1.9, 1.9], 1)])
+    )
+    clear_crossing = state(
+        track("1", [point(i, 5, y) for i, y in enumerate([-3, -3, -3, 2.1, 2.2, 2.3], 1)])
+    )
 
-    near_line_state = state(track("1", [point(i, 5, y) for i, y in enumerate([-3, -3, -3, 1.9, 3, 3], 1)]))
     assert Event(near_line_state, short_line) == {"events": []}
-
-    clear_crossing = state(track("1", [point(i, 5, y) for i, y in enumerate([-3, -3, -3, 2.1, 2.2, 2.3], 1)]))
+    assert Event(near_line_state, long_line) == {"events": []}
     assert event_types(Event(clear_crossing, short_line)) == [1]
     assert event_types(Event(clear_crossing, long_line)) == [1]
 

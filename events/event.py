@@ -1,14 +1,20 @@
-"""Final TrackingState -> EventBatch reducer."""
+"""Production Event stage for line-crossing detection."""
 
 from collections.abc import Mapping
-from math import isfinite
+from math import hypot, isfinite
+from typing import Any
 
-from .config import _MIN_EVENT_TRACK_POINTS, _MIN_STABLE_SIDE_POINTS
-from .geometry import GEOMETRY_EPSILON, Point, _side
-from .models import EventBatch, EventRecord
+_MIN_STABLE_SIDE_POINTS = 3
+_MIN_EVENT_TRACK_POINTS = 6
+_ON_LINE_DISTANCE_PIXELS = 2.0
+_GEOMETRY_EPSILON = 1e-6
+
+_Point = tuple[float, float]
+_EventRecord = dict[str, Any]
+_EventBatch = dict[str, list[_EventRecord]]
 
 
-def _require_mapping(value, name: str) -> Mapping:
+def _require_mapping(value: Any, name: str) -> Mapping:
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be an object")
     return value
@@ -20,7 +26,7 @@ def _require_fields(value: Mapping, fields: tuple[str, ...], name: str) -> None:
             raise ValueError(f"Missing required {name} field: {field}")
 
 
-def _finite_number(value, name: str) -> float:
+def _finite_number(value: Any, name: str) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
@@ -30,7 +36,7 @@ def _finite_number(value, name: str) -> float:
     return float(value)
 
 
-def _point_from_mapping(value, name: str) -> Point:
+def _point_from_mapping(value: Any, name: str) -> _Point:
     point = _require_mapping(value, name)
     _require_fields(point, ("x", "y"), name)
     return (
@@ -39,7 +45,7 @@ def _point_from_mapping(value, name: str) -> Point:
     )
 
 
-def _validate_bbox(value, name: str) -> dict[str, float]:
+def _validate_bbox(value: Any, name: str) -> dict[str, float]:
     bbox = _require_mapping(value, name)
     _require_fields(bbox, ("x1", "y1", "x2", "y2"), name)
     copied = {
@@ -53,7 +59,7 @@ def _validate_bbox(value, name: str) -> dict[str, float]:
     return copied
 
 
-def _copy_best_crop(value, name: str) -> dict:
+def _copy_best_crop(value: Any, name: str) -> dict[str, Any]:
     best_crop = _require_mapping(value, name)
     _require_fields(best_crop, ("frame_id", "bbox"), name)
     frame_id = best_crop["frame_id"]
@@ -65,7 +71,7 @@ def _copy_best_crop(value, name: str) -> dict:
     }
 
 
-def _validate_track_point(value, name: str) -> tuple[float, Point]:
+def _validate_track_point(value: Any, name: str) -> tuple[float, _Point]:
     point = _require_mapping(value, name)
     _require_fields(point, ("timestamp", "centre"), name)
     return (
@@ -74,7 +80,7 @@ def _validate_track_point(value, name: str) -> tuple[float, Point]:
     )
 
 
-def _validate_inputs(tracking_state, line_config) -> tuple[list[dict], Point, Point]:
+def _validate_inputs(tracking_state: Any, line_config: Any) -> tuple[list, _Point, _Point]:
     state = _require_mapping(tracking_state, "TrackingState")
     _require_fields(state, ("tracks",), "TrackingState")
     tracks = state["tracks"]
@@ -84,12 +90,20 @@ def _validate_inputs(tracking_state, line_config) -> tuple[list[dict], Point, Po
     for track_index, track in enumerate(tracks):
         track_name = f"TrackingState.tracks[{track_index}]"
         track_mapping = _require_mapping(track, track_name)
-        _require_fields(track_mapping, ("track_id", "path", "best_crop"), track_name)
+        _require_fields(
+            track_mapping,
+            ("track_id", "path", "best_crop", "best_crop_confidence"),
+            track_name,
+        )
         track_id = track_mapping["track_id"]
         if not isinstance(track_id, str) or not track_id:
             raise ValueError(f"{track_name}.track_id must be a non-empty string")
         if not isinstance(track_mapping["path"], list):
             raise ValueError(f"{track_name}.path must be a list")
+        _finite_number(
+            track_mapping["best_crop_confidence"],
+            f"{track_name}.best_crop_confidence",
+        )
         previous_timestamp = None
         for point_index, path_point in enumerate(track_mapping["path"]):
             timestamp, _centre = _validate_track_point(
@@ -106,21 +120,35 @@ def _validate_inputs(tracking_state, line_config) -> tuple[list[dict], Point, Po
     point_b = _point_from_mapping(config["point_b"], "LineConfig.point_b")
     if (point_a[0] - point_b[0]) ** 2 + (
         point_a[1] - point_b[1]
-    ) ** 2 <= GEOMETRY_EPSILON**2:
-        raise ValueError(
-            "LineConfig point_a and point_b must define a non-zero line"
-        )
+    ) ** 2 <= _GEOMETRY_EPSILON**2:
+        raise ValueError("LineConfig point_a and point_b must define a non-zero line")
     return tracks, point_a, point_b
 
 
-def _path_point(value) -> tuple[float, Point]:
+def _signed_distance_to_line(point: _Point, line_a: _Point, line_b: _Point) -> float:
+    dx = line_b[0] - line_a[0]
+    dy = line_b[1] - line_a[1]
+    line_length = hypot(dx, dy)
+    return (dx * (point[1] - line_a[1]) - dy * (point[0] - line_a[0])) / line_length
+
+
+def _side(point: _Point, line_a: _Point, line_b: _Point) -> int:
+    signed_distance = _signed_distance_to_line(point, line_a, line_b)
+    if signed_distance > _ON_LINE_DISTANCE_PIXELS:
+        return 1
+    if signed_distance < -_ON_LINE_DISTANCE_PIXELS:
+        return -1
+    return 0
+
+
+def _path_point(value: Mapping) -> tuple[float, _Point]:
     return (
         float(value["timestamp"]),
         (float(value["centre"]["x"]), float(value["centre"]["y"])),
     )
 
 
-def _make_event(track: Mapping, timestamp: float, event_type: int) -> EventRecord:
+def _make_event(track: Mapping, timestamp: float, event_type: int) -> _EventRecord:
     return {
         "track_id": track["track_id"],
         "timestamp": timestamp,
@@ -130,13 +158,13 @@ def _make_event(track: Mapping, timestamp: float, event_type: int) -> EventRecor
 
 
 def _events_for_track(
-    track: Mapping, line_a: Point, line_b: Point
-) -> list[EventRecord]:
+    track: Mapping, line_a: _Point, line_b: _Point
+) -> list[_EventRecord]:
     path = track["path"]
     if len(path) < _MIN_EVENT_TRACK_POINTS:
         return []
 
-    events: list[EventRecord] = []
+    events: list[_EventRecord] = []
     established_side = None
     run_side = None
     run_count = 0
@@ -177,11 +205,11 @@ def _events_for_track(
     return events
 
 
-def Event(tracking_state, line_config) -> EventBatch:
+def Event(tracking_state, line_config) -> _EventBatch:
     """Return all confirmed continuous-line crossing events from final TrackingState."""
 
     tracks, line_a, line_b = _validate_inputs(tracking_state, line_config)
-    events: list[EventRecord] = []
+    events: list[_EventRecord] = []
     for track in tracks:
         for event in _events_for_track(track, line_a, line_b):
             events.append(event)
