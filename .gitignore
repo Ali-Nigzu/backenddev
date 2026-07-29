@@ -5,3 +5,5 @@ __pycache__/
 output/
 *.mp4
 *.png
+
+demographics/demographicweights.pth
