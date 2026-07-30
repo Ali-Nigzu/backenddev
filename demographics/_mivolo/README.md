@@ -1,9 +1,22 @@
-# MiVOLO source attribution
+# Vendored MiVOLO inference model
 
-The production demographic stage is designed for the MiVOLO v1 `mivolo_d1_224`
-body+face checkpoint assembled at `demographics/demographicweights.pth`.
+This package vendors the minimum MiVOLO model architecture needed for local
+checkpoint inference in `demographics.model`.
 
-Source inspected for compatibility: <https://github.com/WildChlamydia/MiVOLO>.
-Only the required public contract, metadata validation, preprocessing policy, and
-output conversion are implemented locally. MiVOLO's YOLO detector, training code,
-dataset tooling, and face detection flow are intentionally not vendored or used.
+Upstream repository: <https://github.com/WildChlamydia/MiVOLO>
+
+Upstream commit: `37475e3f8818b5f22448003feec3e64b01bfb188`
+
+Vendored files:
+
+- `mivolo/model/mi_volo.py`
+- `mivolo/model/mivolo_model.py`
+- `mivolo/model/create_timm_model.py`
+- `mivolo/model/cross_bottleneck_attn.py`
+- `mivolo/model/__init__.py`
+- `mivolo/__init__.py`
+
+The detector, YOLO integration, training code, datasets, demo applications, and
+evaluation applications are intentionally not vendored. Runtime code must not
+clone or download MiVOLO source; this vendored package is the only model source
+used by production demographic inference.

@@ -421,13 +421,13 @@ def build_minimal_frame_batch(video_path: Path, fps: float, frame_ids: list[str]
     return {"frames": frames}
 
 
-def demographics_for_events(event_batch: dict, video_path: Path, fps: float, device: str, demographic_cls=None) -> dict:
+def demographics_for_events(event_batch: dict, video_path: Path, fps: float, device: str) -> dict:
     if not event_batch["events"]:
         return {"results": []}
-    if demographic_cls is None:
-        from demographics import Demographic as demographic_cls
+    from demographics import Demographic
+
     frame_batch = build_minimal_frame_batch(video_path, fps, required_frame_ids(event_batch))
-    demographic = demographic_cls(device=device)
+    demographic = Demographic(checkpoint_path=None, device=device)
     return demographic(event_batch, frame_batch)
 
 
@@ -466,8 +466,11 @@ def write_enriched_events(enriched_event_batch: dict, output_path: Path) -> None
     output_path.write_text(json.dumps(enriched_event_batch, indent=2, sort_keys=True) + "\n")
 
 
-def sex_label(sex: int) -> str:
-    return "male" if sex == 1 else "female"
+def format_sex(sex: int) -> str:
+    labels = {0: "female", 1: "male"}
+    if sex not in labels:
+        raise ValueError(f"Invalid sex value: {sex}")
+    return f"{sex}({labels[sex]})"
 
 
 def print_enriched_event_summary(enriched_event_batch: dict) -> None:
@@ -483,8 +486,7 @@ def print_enriched_event_summary(enriched_event_batch: dict) -> None:
             f"label={event_label(event['event_type'])} "
             f"timestamp_seconds={float(event['timestamp']):.3f} "
             f"age={event['age']} "
-            f"sex={event['sex']} "
-            f"sex_label={sex_label(event['sex'])}"
+            f"sex={format_sex(event['sex'])}"
         )
 
 def main():
@@ -499,7 +501,6 @@ def main():
     import cv2
 
     from detect import Detect
-    from demographics import Demographic
     from events import Event
     from track import Track
 
@@ -581,7 +582,7 @@ def main():
 
     event_batch = Event(tracking_state, LINE_CONFIG)
     demographics_batch = demographics_for_events(
-        event_batch, video_path, fps, args.demographics_device, Demographic
+        event_batch, video_path, fps, args.demographics_device
     )
     enriched_event_batch = build_enriched_events(event_batch, demographics_batch)
     write_enriched_events(enriched_event_batch, Path(args.events_output))
