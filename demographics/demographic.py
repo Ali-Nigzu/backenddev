@@ -126,8 +126,8 @@ class Demographic:
     never resolves, hashes, or loads the checkpoint.
     """
 
-    def __init__(self, checkpoint_path: str | Path | None = None, device: str = "auto", backend: Any | None = None) -> None:
-        self._backend = backend if backend is not None else MiVOLOBackend(checkpoint_path=checkpoint_path, device=device)
+    def __init__(self, checkpoint_path: str | Path | None = None, device: str = "auto") -> None:
+        self._backend = MiVOLOBackend(checkpoint_path=checkpoint_path, device=device)
 
     def __call__(self, event_batch: dict, frame_batch: dict) -> dict:
         events = _validate_event_batch(event_batch)
@@ -136,6 +136,7 @@ class Demographic:
 
         frames_by_id = _validate_frame_batch(frame_batch)
         selected_crops = _group_selected_crops(events)
+        self._backend.load()
         tensors: list[np.ndarray] = []
         track_ids: list[str] = []
         for selected in selected_crops:
