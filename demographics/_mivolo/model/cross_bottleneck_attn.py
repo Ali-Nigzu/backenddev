@@ -1,7 +1,9 @@
-"""
-Code based on timm https://github.com/huggingface/pytorch-image-models
+"""Cross-bottleneck attention retained for MiVOLO D1-224 inference.
 
-Modifications and additions for mivolo by / Copyright 2023, Irina Tolstykh, Maxim Kuprashevich
+Based on timm https://github.com/huggingface/pytorch-image-models with
+MiVOLO modifications by Copyright 2023 Irina Tolstykh and Maxim Kuprashevich.
+The upstream MiVOLO repository is licensed under Apache-2.0. Local changes are
+limited to retaining the runtime code path needed by `Demographic()`.
 """
 
 import torch

@@ -1,28 +1,33 @@
-"""Production Demographic stage using body-only MiVOLO-compatible inference."""
+"""Production Demographic stage orchestration."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from math import isfinite
-from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from .exceptions import DemographicInputError
-from .model import MiVOLOBackend
-from .preprocessing import body_crop_to_mivolo_input, crop_body, validate_frame_image
+from .model import _MiVOLOModelRunner
 
 BBox = dict[str, float]
 
 
-def _require_mapping(value: Any, name: str) -> Mapping:
+@dataclass(frozen=True)
+class _CropDescriptor:
+    track_id: str
+    timestamp: float
+    frame_id: str
+    bbox: BBox
+
+
+def _require_mapping(value: Any, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise DemographicInputError(f"{name} must be an object")
     return value
 
 
-def _require_fields(value: Mapping, fields: tuple[str, ...], name: str) -> None:
+def _require_fields(value: Mapping[str, Any], fields: tuple[str, ...], name: str) -> None:
     for field in fields:
         if field not in value:
             raise DemographicInputError(f"Missing required {name} field: {field}")
@@ -30,7 +35,7 @@ def _require_fields(value: Mapping, fields: tuple[str, ...], name: str) -> None:
 
 def _finite_number(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(float(value)):
-        raise DemographicInputError(f"{name} must be finite")
+        raise DemographicInputError(f"{name} must be a finite number")
     return float(value)
 
 
@@ -58,107 +63,104 @@ def _validate_event_batch(event_batch: Any) -> list[dict[str, Any]]:
             raise DemographicInputError(f"{name}.track_id must be a non-empty string")
         timestamp = _finite_number(event["timestamp"], f"{name}.timestamp")
         event_type = event["event_type"]
-        if event_type not in (0, 1) or isinstance(event_type, bool):
-            raise DemographicInputError(f"{name}.event_type must be exactly 0 or 1")
+        if isinstance(event_type, bool) or not isinstance(event_type, int) or event_type not in (0, 1):
+            raise DemographicInputError(f"{name}.event_type must be exactly integer 0 or 1")
         best_crop = _require_mapping(event["best_crop"], f"{name}.best_crop")
         _require_fields(best_crop, ("frame_id", "bbox"), f"{name}.best_crop")
         frame_id = best_crop["frame_id"]
         if not isinstance(frame_id, str) or not frame_id:
             raise DemographicInputError(f"{name}.best_crop.frame_id must be a non-empty string")
         bbox = _validate_bbox(best_crop["bbox"], f"{name}.best_crop.bbox")
-        events.append(
-            {
-                "track_id": track_id,
-                "timestamp": timestamp,
-                "event_type": int(event_type),
-                "best_crop": {"frame_id": frame_id, "bbox": bbox},
-            }
-        )
+        events.append({"track_id": track_id, "timestamp": timestamp, "frame_id": frame_id, "bbox": bbox})
     return events
 
 
-def _validate_frame_batch(frame_batch: Any) -> dict[str, Mapping[str, Any]]:
+def _select_unique_tracks(events: list[dict[str, Any]]) -> list[_CropDescriptor]:
+    by_track: dict[str, _CropDescriptor] = {}
+    for event in events:
+        descriptor = _CropDescriptor(
+            track_id=event["track_id"],
+            timestamp=event["timestamp"],
+            frame_id=event["frame_id"],
+            bbox=event["bbox"],
+        )
+        existing = by_track.get(descriptor.track_id)
+        if existing is None:
+            by_track[descriptor.track_id] = descriptor
+            continue
+        if existing.frame_id != descriptor.frame_id or existing.bbox != descriptor.bbox:
+            raise DemographicInputError(
+                "Conflicting best_crop records for "
+                f"track_id={descriptor.track_id}; existing frame_id={existing.frame_id} bbox={existing.bbox}; "
+                f"new frame_id={descriptor.frame_id} bbox={descriptor.bbox}"
+            )
+        if descriptor.timestamp < existing.timestamp:
+            by_track[descriptor.track_id] = _CropDescriptor(
+                track_id=existing.track_id,
+                timestamp=descriptor.timestamp,
+                frame_id=existing.frame_id,
+                bbox=existing.bbox,
+            )
+    return sorted(by_track.values(), key=lambda item: (item.timestamp, item.track_id))
+
+
+def _build_required_frame_lookup(frame_batch: Any, descriptors: list[_CropDescriptor]) -> dict[str, Mapping[str, Any]]:
+    required = {descriptor.frame_id for descriptor in descriptors}
     batch = _require_mapping(frame_batch, "FrameBatch")
     _require_fields(batch, ("frames",), "FrameBatch")
     if not isinstance(batch["frames"], list):
         raise DemographicInputError("FrameBatch.frames must be a list")
+
     frames_by_id: dict[str, Mapping[str, Any]] = {}
+    seen: set[str] = set()
     for index, frame_value in enumerate(batch["frames"]):
         name = f"FrameBatch.frames[{index}]"
         frame = _require_mapping(frame_value, name)
-        _require_fields(frame, ("frame_id", "timestamp", "image"), name)
+        _require_fields(frame, ("frame_id",), name)
         frame_id = frame["frame_id"]
         if not isinstance(frame_id, str) or not frame_id:
             raise DemographicInputError(f"{name}.frame_id must be a non-empty string")
-        if frame_id in frames_by_id:
+        if frame_id in seen:
             raise DemographicInputError(f"Duplicate frame_id in FrameBatch: {frame_id}")
+        seen.add(frame_id)
+        if frame_id not in required:
+            continue
+        _require_fields(frame, ("timestamp", "image"), name)
         _finite_number(frame["timestamp"], f"{name}.timestamp")
-        validate_frame_image(frame["image"], frame_id)
         frames_by_id[frame_id] = frame
+
+    for descriptor in descriptors:
+        if descriptor.frame_id not in frames_by_id:
+            raise DemographicInputError(
+                f"Missing source frame: track_id={descriptor.track_id} "
+                f"frame_id={descriptor.frame_id} bbox={descriptor.bbox}"
+            )
     return frames_by_id
 
 
-def _group_selected_crops(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_track: dict[str, dict[str, Any]] = {}
-    for event in events:
-        track_id = event["track_id"]
-        crop = event["best_crop"]
-        if track_id not in by_track:
-            by_track[track_id] = {
-                "track_id": track_id,
-                "timestamp": event["timestamp"],
-                "best_crop": crop,
-            }
-            continue
-        selected = by_track[track_id]
-        selected["timestamp"] = min(float(selected["timestamp"]), float(event["timestamp"]))
-        if selected["best_crop"] != crop:
-            raise DemographicInputError(
-                f"Conflicting best_crop records for track_id={track_id}; EventBatch has no crop-quality field"
-            )
-    return sorted(by_track.values(), key=lambda item: (float(item["timestamp"]), str(item["track_id"])))
-
-
 class Demographic:
-    """Callable Demographic stage.
+    """Callable production demographic stage."""
 
-    The model backend is lazy: empty EventBatch validation returns immediately and
-    never resolves, hashes, or loads the checkpoint.
-    """
+    def __init__(self) -> None:
+        self._model = _MiVOLOModelRunner()
 
-    def __init__(self, checkpoint_path: str | Path | None = None, device: str = "auto") -> None:
-        self._backend = MiVOLOBackend(checkpoint_path=checkpoint_path, device=device)
-
-    def __call__(self, event_batch: dict, frame_batch: dict) -> dict:
+    def __call__(self, event_batch: Any, frame_batch: Any) -> dict[str, list[dict[str, int | str]]]:
         events = _validate_event_batch(event_batch)
         if not events:
             return {"results": []}
 
-        frames_by_id = _validate_frame_batch(frame_batch)
-        selected_crops = _group_selected_crops(events)
-        self._backend.load()
-        tensors: list[np.ndarray] = []
-        track_ids: list[str] = []
-        for selected in selected_crops:
-            track_id = selected["track_id"]
-            best_crop = selected["best_crop"]
-            frame_id = best_crop["frame_id"]
-            bbox = best_crop["bbox"]
-            if frame_id not in frames_by_id:
-                raise DemographicInputError(f"Missing source frame: track_id={track_id} frame_id={frame_id} bbox={bbox}")
-            frame = frames_by_id[frame_id]
-            image = validate_frame_image(frame["image"], frame_id)
-            crop = crop_body(image, bbox, track_id, frame_id)
-            tensors.append(body_crop_to_mivolo_input(crop))
-            track_ids.append(track_id)
+        descriptors = _select_unique_tracks(events)
+        frames_by_id = _build_required_frame_lookup(frame_batch, descriptors)
+        from .preprocessing import frame_image
 
-        batch = np.ascontiguousarray(np.stack(tensors, axis=0).astype(np.float32, copy=False))
-        predictions = self._backend.predict(batch)
-        if len(predictions) != len(track_ids):
-            raise DemographicInputError("Demographic backend returned an unexpected number of results")
+        for descriptor in descriptors:
+            frame_image(frames_by_id[descriptor.frame_id]["image"], descriptor.frame_id)
+        predictions = self._model.predict(descriptors, frames_by_id)
+        if len(predictions) != len(descriptors):
+            raise DemographicInputError("Demographic model returned an unexpected number of results")
         return {
             "results": [
-                {"track_id": track_id, "age": int(prediction["age"]), "sex": int(prediction["sex"])}
-                for track_id, prediction in zip(track_ids, predictions, strict=True)
+                {"track_id": descriptor.track_id, "age": int(prediction["age"]), "sex": int(prediction["sex"])}
+                for descriptor, prediction in zip(descriptors, predictions, strict=True)
             ]
         }

@@ -1,85 +1,20 @@
-"""
-Code adapted from timm https://github.com/huggingface/pytorch-image-models
+"""Minimal MiVOLO D1-224 architecture for demographic inference.
 
-Modifications and additions for mivolo by / Copyright 2023, Irina Tolstykh, Maxim Kuprashevich
+Adapted from MiVOLO (Copyright 2023 Irina Tolstykh, Maxim Kuprashevich)
+and timm / pytorch-image-models. The upstream MiVOLO repository is licensed
+under Apache-2.0. Local changes are limited to package-relative imports, fixed
+D1-224 specialisation, unused-code removal, and the VOLO constructor
+compatibility correction required by the validated timm version.
 """
 
 import torch
 import torch.nn as nn
-from .cross_bottleneck_attn import CrossBottleneckAttn
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import trunc_normal_
-from timm.models._builder import build_model_with_cfg
-from timm.models._registry import register_model
 from timm.models.volo import VOLO
 
-__all__ = ["MiVOLOModel"]  # model_registry will add each entrypoint fn to this
+from .cross_bottleneck_attn import CrossBottleneckAttn
 
-
-def _cfg(url="", **kwargs):
-    return {
-        "url": url,
-        "num_classes": 1000,
-        "input_size": (3, 224, 224),
-        "pool_size": None,
-        "crop_pct": 0.96,
-        "interpolation": "bicubic",
-        "fixed_input_size": True,
-        "mean": IMAGENET_DEFAULT_MEAN,
-        "std": IMAGENET_DEFAULT_STD,
-        "first_conv": None,
-        "classifier": ("head", "aux_head"),
-        **kwargs,
-    }
-
-
-default_cfgs = {
-    "mivolo_d1_224": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d1_224_84.2.pth.tar", crop_pct=0.96
-    ),
-    "mivolo_d1_384": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d1_384_85.2.pth.tar",
-        crop_pct=1.0,
-        input_size=(3, 384, 384),
-    ),
-    "mivolo_d2_224": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d2_224_85.2.pth.tar", crop_pct=0.96
-    ),
-    "mivolo_d2_384": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d2_384_86.0.pth.tar",
-        crop_pct=1.0,
-        input_size=(3, 384, 384),
-    ),
-    "mivolo_d3_224": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d3_224_85.4.pth.tar", crop_pct=0.96
-    ),
-    "mivolo_d3_448": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d3_448_86.3.pth.tar",
-        crop_pct=1.0,
-        input_size=(3, 448, 448),
-    ),
-    "mivolo_d4_224": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d4_224_85.7.pth.tar", crop_pct=0.96
-    ),
-    "mivolo_d4_448": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d4_448_86.79.pth.tar",
-        crop_pct=1.15,
-        input_size=(3, 448, 448),
-    ),
-    "mivolo_d5_224": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d5_224_86.10.pth.tar", crop_pct=0.96
-    ),
-    "mivolo_d5_448": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d5_448_87.0.pth.tar",
-        crop_pct=1.15,
-        input_size=(3, 448, 448),
-    ),
-    "mivolo_d5_512": _cfg(
-        url="https://github.com/sail-sg/volo/releases/download/volo_1/d5_512_87.07.pth.tar",
-        crop_pct=1.15,
-        input_size=(3, 512, 512),
-    ),
-}
+__all__ = ["MiVOLOModel", "create_mivolo_d1_224"]
 
 
 def get_output_size(input_shape, conv_layer):
@@ -234,7 +169,6 @@ class MiVOLOModel(VOLO):
             mlp_ratio,
             qkv_bias,
             drop_rate,
-            0.0,
             attn_drop_rate,
             drop_path_rate,
             norm_layer,
@@ -300,106 +234,13 @@ class MiVOLOModel(VOLO):
         return x
 
 
-def _create_mivolo(variant, pretrained=False, **kwargs):
-    if kwargs.get("features_only", None):
-        raise RuntimeError("features_only not implemented for Vision Transformer models.")
-    return build_model_with_cfg(MiVOLOModel, variant, pretrained, **kwargs)
 
-
-@register_model
-def mivolo_d1_224(pretrained=False, **kwargs):
-    model_args = dict(layers=(4, 4, 8, 2), embed_dims=(192, 384, 384, 384), num_heads=(6, 12, 12, 12), **kwargs)
-    model = _create_mivolo("mivolo_d1_224", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d1_384(pretrained=False, **kwargs):
-    model_args = dict(layers=(4, 4, 8, 2), embed_dims=(192, 384, 384, 384), num_heads=(6, 12, 12, 12), **kwargs)
-    model = _create_mivolo("mivolo_d1_384", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d2_224(pretrained=False, **kwargs):
-    model_args = dict(layers=(6, 4, 10, 4), embed_dims=(256, 512, 512, 512), num_heads=(8, 16, 16, 16), **kwargs)
-    model = _create_mivolo("mivolo_d2_224", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d2_384(pretrained=False, **kwargs):
-    model_args = dict(layers=(6, 4, 10, 4), embed_dims=(256, 512, 512, 512), num_heads=(8, 16, 16, 16), **kwargs)
-    model = _create_mivolo("mivolo_d2_384", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d3_224(pretrained=False, **kwargs):
-    model_args = dict(layers=(8, 8, 16, 4), embed_dims=(256, 512, 512, 512), num_heads=(8, 16, 16, 16), **kwargs)
-    model = _create_mivolo("mivolo_d3_224", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d3_448(pretrained=False, **kwargs):
-    model_args = dict(layers=(8, 8, 16, 4), embed_dims=(256, 512, 512, 512), num_heads=(8, 16, 16, 16), **kwargs)
-    model = _create_mivolo("mivolo_d3_448", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d4_224(pretrained=False, **kwargs):
-    model_args = dict(layers=(8, 8, 16, 4), embed_dims=(384, 768, 768, 768), num_heads=(12, 16, 16, 16), **kwargs)
-    model = _create_mivolo("mivolo_d4_224", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d4_448(pretrained=False, **kwargs):
-    """VOLO-D4 model, Params: 193M"""
-    model_args = dict(layers=(8, 8, 16, 4), embed_dims=(384, 768, 768, 768), num_heads=(12, 16, 16, 16), **kwargs)
-    model = _create_mivolo("mivolo_d4_448", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d5_224(pretrained=False, **kwargs):
-    model_args = dict(
-        layers=(12, 12, 20, 4),
-        embed_dims=(384, 768, 768, 768),
-        num_heads=(12, 16, 16, 16),
-        mlp_ratio=4,
-        stem_hidden_dim=128,
-        **kwargs
+def create_mivolo_d1_224(num_classes=3, in_chans=6):
+    return MiVOLOModel(
+        layers=(4, 4, 8, 2),
+        img_size=224,
+        in_chans=in_chans,
+        num_classes=num_classes,
+        embed_dims=(192, 384, 384, 384),
+        num_heads=(6, 12, 12, 12),
     )
-    model = _create_mivolo("mivolo_d5_224", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d5_448(pretrained=False, **kwargs):
-    model_args = dict(
-        layers=(12, 12, 20, 4),
-        embed_dims=(384, 768, 768, 768),
-        num_heads=(12, 16, 16, 16),
-        mlp_ratio=4,
-        stem_hidden_dim=128,
-        **kwargs
-    )
-    model = _create_mivolo("mivolo_d5_448", pretrained=pretrained, **model_args)
-    return model
-
-
-@register_model
-def mivolo_d5_512(pretrained=False, **kwargs):
-    model_args = dict(
-        layers=(12, 12, 20, 4),
-        embed_dims=(384, 768, 768, 768),
-        num_heads=(12, 16, 16, 16),
-        mlp_ratio=4,
-        stem_hidden_dim=128,
-        **kwargs
-    )
-    model = _create_mivolo("mivolo_d5_512", pretrained=pretrained, **model_args)
-    return model
