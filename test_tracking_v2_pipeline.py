@@ -34,12 +34,6 @@ def parse_args():
         default=DEFAULT_EVENTS_OUTPUT,
         help="Enriched events JSON output path",
     )
-    parser.add_argument(
-        "--demographics-device",
-        choices=("auto", "cpu", "cuda"),
-        default="auto",
-        help="Device for demographic inference",
-    )
     return parser.parse_args()
 
 
@@ -421,13 +415,13 @@ def build_minimal_frame_batch(video_path: Path, fps: float, frame_ids: list[str]
     return {"frames": frames}
 
 
-def demographics_for_events(event_batch: dict, video_path: Path, fps: float, device: str) -> dict:
+def demographics_for_events(event_batch: dict, video_path: Path, fps: float) -> dict:
     if not event_batch["events"]:
         return {"results": []}
     from demographics import Demographic
 
     frame_batch = build_minimal_frame_batch(video_path, fps, required_frame_ids(event_batch))
-    demographic = Demographic(checkpoint_path=None, device=device)
+    demographic = Demographic()
     return demographic(event_batch, frame_batch)
 
 
@@ -581,9 +575,7 @@ def main():
         writer.release()
 
     event_batch = Event(tracking_state, LINE_CONFIG)
-    demographics_batch = demographics_for_events(
-        event_batch, video_path, fps, args.demographics_device
-    )
+    demographics_batch = demographics_for_events(event_batch, video_path, fps)
     enriched_event_batch = build_enriched_events(event_batch, demographics_batch)
     write_enriched_events(enriched_event_batch, Path(args.events_output))
     print_track_summary(track_summary, frame_index)

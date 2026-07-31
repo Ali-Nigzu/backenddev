@@ -1,4 +1,4 @@
-"""Demographic stage exception types."""
+"""Internal demographic stage exception types."""
 
 
 class DemographicError(Exception):
@@ -10,4 +10,4 @@ class DemographicInputError(DemographicError):
 
 
 class DemographicModelError(DemographicError):
-    """Raised when model loading, checkpoint validation, or outputs are invalid."""
+    """Raised when model loading, checkpoint validation, or inference fails."""
