@@ -103,47 +103,61 @@ def validate_detection_batch(detection_batch: dict[str, Any], frame_batch: dict[
             raise ValueError(f"DetectionBatch.detections[{index}].timestamp does not match FrameBatch")
 
 
-def draw_and_write_tracking_frame(
-    writer: cv2.VideoWriter,
-    frame: dict[str, Any],
-    frame_detections: dict[str, Any],
+def draw_replay(
+    frame_batch: dict[str, Any],
+    detection_batch: dict[str, Any],
     tracking_state: dict[str, Any],
+    output_path: Path,
+    fps: float,
+    frame_size: tuple[int, int],
 ) -> None:
-    bgr_output = cv2.cvtColor(frame["image"], cv2.COLOR_RGB2BGR)
-    timestamp = float(frame_detections["timestamp"])
-    latest_tracks = {
+    track_ids_by_timestamp_centre = {
         (
-            round(float(track["path"][-1]["centre"]["x"]), 6),
-            round(float(track["path"][-1]["centre"]["y"]), 6),
+            float(point["timestamp"]),
+            round(float(point["centre"]["x"]), 6),
+            round(float(point["centre"]["y"]), 6),
         ): str(track["track_id"])
         for track in tracking_state["tracks"]
-        if float(track["path"][-1]["timestamp"]) == timestamp
+        for point in track["path"]
     }
-    for detection in frame_detections["detections"]:
-        bbox = detection["bbox"]
-        x1, y1, x2, y2 = (int(round(float(bbox[key]))) for key in ("x1", "y1", "x2", "y2"))
-        centre = detection["centre"]
-        track_id = latest_tracks.get((round(float(centre["x"]), 6), round(float(centre["y"]), 6)), "?")
-        cv2.rectangle(bgr_output, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(
-            bgr_output,
-            f"Track {track_id}",
-            (x1, max(20, y1 - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-    cv2.line(
-        bgr_output,
-        (int(LINE_CONFIG["point_a"]["x"]), int(LINE_CONFIG["point_a"]["y"])),
-        (int(LINE_CONFIG["point_b"]["x"]), int(LINE_CONFIG["point_b"]["y"])),
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
-    writer.write(bgr_output)
+    writer = create_video_writer(output_path, fps, frame_size)
+    try:
+        for frame, frame_detections in zip(
+            frame_batch["frames"], detection_batch["detections"], strict=True
+        ):
+            bgr_output = cv2.cvtColor(frame["image"], cv2.COLOR_RGB2BGR)
+            timestamp = float(frame_detections["timestamp"])
+            for detection in frame_detections["detections"]:
+                bbox = detection["bbox"]
+                x1, y1, x2, y2 = (
+                    int(round(float(bbox[key]))) for key in ("x1", "y1", "x2", "y2")
+                )
+                centre = detection["centre"]
+                track_id = track_ids_by_timestamp_centre.get(
+                    (timestamp, round(float(centre["x"]), 6), round(float(centre["y"]), 6)), "?"
+                )
+                cv2.rectangle(bgr_output, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    bgr_output,
+                    f"Track {track_id}",
+                    (x1, max(20, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+            cv2.line(
+                bgr_output,
+                (int(LINE_CONFIG["point_a"]["x"]), int(LINE_CONFIG["point_a"]["y"])),
+                (int(LINE_CONFIG["point_b"]["x"]), int(LINE_CONFIG["point_b"]["y"])),
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            writer.write(bgr_output)
+    finally:
+        writer.release()
 
 
 def validate_event_best_crops(event_batch: dict[str, Any], frame_batch: dict[str, Any]) -> None:
@@ -189,21 +203,14 @@ def main() -> None:
     validate_detection_batch(detection_batch, frame_batch)
 
     tracking_state = {"tracks": []}
-    writer = create_video_writer(replay_path, fps, frame_size)
-    try:
-        for frame, frame_detections in zip(
-            frame_batch["frames"], detection_batch["detections"], strict=True
-        ):
-            tracking_state = Track(tracking_state, frame_detections)
-            draw_and_write_tracking_frame(writer, frame, frame_detections, tracking_state)
-    finally:
-        writer.release()
+    tracking_state = Track(tracking_state, detection_batch)
 
     event_batch = Event(tracking_state, LINE_CONFIG)
     validate_event_best_crops(event_batch, frame_batch)
 
     demographics_batch = Demographic()(event_batch, frame_batch)
     final_output = join_events_and_demographics(event_batch, demographics_batch)
+    draw_replay(frame_batch, detection_batch, tracking_state, replay_path, fps, frame_size)
     write_json(final_output, events_output_path)
 
     runtime_seconds = time.perf_counter() - started_at

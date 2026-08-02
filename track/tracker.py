@@ -1,12 +1,13 @@
 """Stateless deterministic Track reducer."""
 
+from collections.abc import Mapping
 from math import isfinite
 from track.config import _ACTIVE_TIMEOUT_FRAMES, _CONFIRMATION_HITS, _TENTATIVE_TIMEOUT_FRAMES
 from track.matcher import _match_tier, _track_sort_key
 
 
 def _require_fields(value, fields, name: str) -> None:
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be an object")
     for field in fields:
         if field not in value:
@@ -70,27 +71,27 @@ def _validate_tracking_state(state) -> None:
         _require_finite_number(track["best_crop_confidence"], f"{name}.best_crop_confidence")
 
 
-def _validate_frame_detections(batch) -> None:
-    _require_fields(batch, ("frame_id", "timestamp", "detections"), "Detections")
+def _validate_frame_detections(batch, name: str = "Detections") -> None:
+    _require_fields(batch, ("frame_id", "timestamp", "detections"), name)
     if not isinstance(batch["frame_id"], str) or not batch["frame_id"]:
-        raise ValueError("Detections.frame_id must be a non-empty string")
-    _require_finite_number(batch["timestamp"], "Detections.timestamp")
+        raise ValueError(f"{name}.frame_id must be a non-empty string")
+    _require_finite_number(batch["timestamp"], f"{name}.timestamp")
     if not isinstance(batch["detections"], list):
-        raise ValueError("Detections.detections must be a list")
+        raise ValueError(f"{name}.detections must be a list")
 
     seen_ids = set()
     for detection_index, detection in enumerate(batch["detections"]):
-        name = f"Detections.detections[{detection_index}]"
-        _require_fields(detection, ("detection_id", "bbox", "centre", "confidence"), name)
+        detection_name = f"{name}.detections[{detection_index}]"
+        _require_fields(detection, ("detection_id", "bbox", "centre", "confidence"), detection_name)
         detection_id = detection["detection_id"]
         if not isinstance(detection_id, str) or not detection_id:
-            raise ValueError(f"{name}.detection_id must be a non-empty string")
+            raise ValueError(f"{detection_name}.detection_id must be a non-empty string")
         if detection_id in seen_ids:
             raise ValueError(f"Duplicate detection_id: {detection_id}")
         seen_ids.add(detection_id)
-        _validate_bbox(detection["bbox"], f"{name}.bbox")
-        _validate_centre(detection["centre"], f"{name}.centre")
-        _require_finite_number(detection["confidence"], f"{name}.confidence")
+        _validate_bbox(detection["bbox"], f"{detection_name}.bbox")
+        _validate_centre(detection["centre"], f"{detection_name}.centre")
+        _require_finite_number(detection["confidence"], f"{detection_name}.confidence")
 
 
 def _classify_track(track: dict, current_frame_number: float) -> str:
@@ -130,20 +131,23 @@ def _next_numeric_track_id(tracks) -> int:
     return max_numeric_id + 1
 
 
-def Track(tracking_state, detection_batch):
-    """Update ``tracking_state`` in place from one per-frame ``Detections`` object and return it."""
+def _validate_detection_batch(detection_batch) -> list:
+    _require_fields(detection_batch, ("detections",), "DetectionBatch")
+    detections = detection_batch["detections"]
+    if not isinstance(detections, list):
+        raise ValueError("DetectionBatch.detections must be a list")
+    return detections
 
-    _validate_tracking_state(tracking_state)
-    _validate_frame_detections(detection_batch)
 
-    frame_number = float(detection_batch["timestamp"])
-    frame_id = detection_batch["frame_id"]
+def _process_frame(tracking_state, frame_detections):
+    frame_number = float(frame_detections["timestamp"])
+    frame_id = frame_detections["frame_id"]
 
     tracking_state["tracks"].sort(key=_track_sort_key)
     ordered_detections = [
         detection
         for _index, detection in sorted(
-            enumerate(detection_batch["detections"]),
+            enumerate(frame_detections["detections"]),
             key=lambda item: (str(item[1]["detection_id"]), item[0]),
         )
     ]
@@ -169,4 +173,15 @@ def Track(tracking_state, detection_batch):
         next_id += 1
 
     tracking_state["tracks"].sort(key=_track_sort_key)
+    return tracking_state
+
+
+def Track(tracking_state, detection_batch):
+    """Update ``tracking_state`` in place from one complete ``DetectionBatch`` and return it."""
+
+    _validate_tracking_state(tracking_state)
+    frame_detections_batch = _validate_detection_batch(detection_batch)
+    for index, frame_detections in enumerate(frame_detections_batch):
+        _validate_frame_detections(frame_detections, f"DetectionBatch.detections[{index}]")
+        tracking_state = _process_frame(tracking_state, frame_detections)
     return tracking_state
