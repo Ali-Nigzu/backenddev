@@ -366,61 +366,66 @@ def print_track_summary(track_summary, frame_count: int) -> None:
         )
 
 
-def _frame_index_from_id(frame_id: str) -> int:
-    prefix = "frame-"
-    if not isinstance(frame_id, str) or not frame_id.startswith(prefix):
-        raise ValueError(f"Unsupported frame_id format: {frame_id}")
-    value = frame_id[len(prefix) :]
-    if not value.isdecimal():
-        raise ValueError(f"Unsupported frame_id format: {frame_id}")
-    return int(value)
-
-
-def required_frame_ids(event_batch: dict) -> list[str]:
-    frame_ids = {
-        event["best_crop"]["frame_id"]
-        for event in event_batch["events"]
-    }
-    return sorted(frame_ids, key=_frame_index_from_id)
-
-
-def build_minimal_frame_batch(video_path: Path, fps: float, frame_ids: list[str]) -> dict:
+def make_frame_record(frame_index: int, fps: float, bgr_frame) -> dict:
     import cv2
+    import numpy as np
 
-    if not frame_ids:
-        return {"frames": []}
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise ValueError(f"Cannot reopen video for demographics: {video_path}")
-    frames = []
-    try:
-        for frame_id in frame_ids:
-            frame_index = _frame_index_from_id(frame_id)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, bgr_frame = cap.read()
-            if not ok:
-                raise ValueError(f"Cannot read required source frame {frame_id} from {video_path}")
-            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-            if not rgb_frame.flags.c_contiguous:
-                rgb_frame = rgb_frame.copy()
-            frames.append(
-                {
-                    "frame_id": frame_id,
-                    "timestamp": float(frame_index) / float(fps),
-                    "image": rgb_frame,
-                }
+    timestamp = float(frame_index) / float(fps)
+    rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+    if rgb_frame.dtype != np.uint8:
+        raise ValueError(f"Frame frame-{frame_index} image must have dtype uint8")
+    if rgb_frame.ndim != 3 or rgb_frame.shape[2] != 3:
+        raise ValueError(f"Frame frame-{frame_index} image must have shape H x W x 3")
+    if rgb_frame.shape[0] <= 0 or rgb_frame.shape[1] <= 0:
+        raise ValueError(f"Frame frame-{frame_index} image must have positive dimensions")
+    if not rgb_frame.flags.c_contiguous:
+        rgb_frame = np.ascontiguousarray(rgb_frame)
+    return {
+        "frame_id": f"frame-{frame_index}",
+        "timestamp": float(timestamp),
+        "image": rgb_frame,
+    }
+
+
+def validate_detection_batch_matches_frame_batch(detection_batch: dict, frame_batch: dict) -> None:
+    if not isinstance(detection_batch, dict):
+        raise ValueError("DetectionBatch must be an object")
+    if "detections" not in detection_batch or not isinstance(detection_batch["detections"], list):
+        raise ValueError("DetectionBatch.detections must be a list")
+    frames = frame_batch["frames"]
+    detections = detection_batch["detections"]
+    if len(detections) != len(frames):
+        raise ValueError("DetectionBatch.detections length does not match FrameBatch.frames")
+    for index, (frame, frame_detections) in enumerate(zip(frames, detections, strict=True)):
+        if frame_detections["frame_id"] != frame["frame_id"]:
+            raise ValueError(
+                f"Detection result {index} frame_id does not match FrameBatch frame_id: "
+                f"{frame_detections['frame_id']} != {frame['frame_id']}"
             )
-    finally:
-        cap.release()
-    return {"frames": frames}
+        if float(frame_detections["timestamp"]) != float(frame["timestamp"]):
+            raise ValueError(
+                f"Detection result {index} timestamp does not match FrameBatch timestamp: "
+                f"{frame_detections['timestamp']} != {frame['timestamp']}"
+            )
 
 
-def demographics_for_events(event_batch: dict, video_path: Path, fps: float) -> dict:
+def validate_event_best_crop_frames(event_batch: dict, frame_batch: dict) -> None:
+    frame_ids = {frame["frame_id"] for frame in frame_batch["frames"]}
+    for event in event_batch["events"]:
+        frame_id = event["best_crop"]["frame_id"]
+        if frame_id not in frame_ids:
+            raise ValueError(
+                f"Event track_id={event['track_id']} references missing frame_id {frame_id} "
+                f"bbox={event['best_crop']['bbox']}"
+            )
+
+
+def demographics_for_events(event_batch: dict, frame_batch: dict) -> dict:
     if not event_batch["events"]:
         return {"results": []}
     from demographics import Demographic
 
-    frame_batch = build_minimal_frame_batch(video_path, fps, required_frame_ids(event_batch))
+    validate_event_best_crop_frames(event_batch, frame_batch)
     demographic = Demographic()
     return demographic(event_batch, frame_batch)
 
@@ -494,10 +499,6 @@ def main():
 
     import cv2
 
-    from detect import Detect
-    from events import Event
-    from track import Track
-
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
@@ -507,20 +508,8 @@ def main():
         fps = 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(
-        str(output_path),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-    )
-    if not writer.isOpened():
-        cap.release()
-        raise ValueError(f"Cannot open replay output: {output_path}")
 
-    detect = Detect()
-    tracking_state = {"tracks": []}
-    track_summary = {}
+    frames = []
     frame_index = 0
 
     print("DETECT -> TRACK REPLAY")
@@ -533,49 +522,71 @@ def main():
             ok, bgr_frame = cap.read()
             if not ok:
                 break
+            frames.append(make_frame_record(frame_index, fps, bgr_frame))
+            frame_index += 1
+            print(f"\rdecoded frames: {frame_index}", end="", flush=True)
+    finally:
+        cap.release()
 
-            timestamp = float(frame_index) / float(fps)
-            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-            if not rgb_frame.flags.c_contiguous:
-                rgb_frame = rgb_frame.copy()
+    frame_batch = {"frames": frames}
+    frame_batch_memory = sum(frame["image"].nbytes for frame in frames)
 
-            frame = {
-                "frame_id": f"frame-{frame_index}",
-                "timestamp": float(timestamp),
-                "image": rgb_frame,
-            }
+    from detect import Detect
 
-            detection_batch = detect(frame)
-            active_ids = active_track_ids(tracking_state, detection_batch)
+    detect = Detect()
+    detection_batch = detect(frame_batch)
+    validate_detection_batch_matches_frame_batch(detection_batch, frame_batch)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        raise ValueError(f"Cannot open replay output: {output_path}")
+
+    from track import Track
+
+    tracking_state = {"tracks": []}
+    track_summary = {}
+
+    try:
+        for index, (frame, frame_detections) in enumerate(
+            zip(frame_batch["frames"], detection_batch["detections"], strict=True)
+        ):
+            bgr_frame = cv2.cvtColor(frame["image"], cv2.COLOR_RGB2BGR)
+            active_ids = active_track_ids(tracking_state, frame_detections)
             previous_track_ids = {
                 str(track["track_id"]) for track in tracking_state["tracks"]
             }
-            tracking_state = Track(tracking_state, detection_batch)
+            tracking_state = Track(tracking_state, frame_detections)
             update_track_summary(track_summary, tracking_state)
             debug = draw_tracking_state(
                 bgr_frame,
                 tracking_state,
-                detection_batch,
+                frame_detections,
                 active_ids,
                 previous_track_ids,
             )
             draw_line_overlay(bgr_frame, LINE_CONFIG)
             if debug["births"] or debug["unmatched_active"]:
                 print(
-                    f"\nframe {frame_index}: active={debug['active']} det={debug['detections']} "
+                    f"\nframe {index}: active={debug['active']} det={debug['detections']} "
                     f"matched={debug['matched']} births={debug['births']} "
                     f"unmatched_active={debug['unmatched_active']}"
                 )
             writer.write(bgr_frame)
-
-            frame_index += 1
-            print(f"\rprocessed frames: {frame_index}", end="", flush=True)
+            print(f"\rprocessed frames: {index + 1}", end="", flush=True)
     finally:
-        cap.release()
         writer.release()
 
+    from events import Event
+
     event_batch = Event(tracking_state, LINE_CONFIG)
-    demographics_batch = demographics_for_events(event_batch, video_path, fps)
+    validate_event_best_crop_frames(event_batch, frame_batch)
+    demographics_batch = demographics_for_events(event_batch, frame_batch)
     enriched_event_batch = build_enriched_events(event_batch, demographics_batch)
     write_enriched_events(enriched_event_batch, Path(args.events_output))
     print_track_summary(track_summary, frame_index)
@@ -583,7 +594,11 @@ def main():
     print_enriched_event_summary(enriched_event_batch)
     print("\nReplay complete")
     print(f"\nFrames processed: {frame_index}")
+    print(f"DetectionBatch per-frame objects: {len(detection_batch['detections'])}")
     print(f"Tracks created: {len(track_summary)}")
+    print(f"Events produced: {len(event_batch['events'])}")
+    print(f"Demographic results: {len(demographics_batch['results'])}")
+    print(f"FrameBatch image memory bytes: {frame_batch_memory}")
     print(f"Output video path: {output_path}")
     print(f"Events JSON path: {Path(args.events_output)}")
 
