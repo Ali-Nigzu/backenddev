@@ -1,17 +1,16 @@
-"""Minimal real integration runner for Detect -> Track -> Event -> Demographic."""
+"""Minimal real integration runner for Detect -> Track -> Event -> Demographic -> Assemble."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import resource
-import time
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 
+from assemble import Assemble
 from demographics import Demographic
 from detect import Detect
 from events import Event
@@ -19,7 +18,7 @@ from track import Track
 
 DEFAULT_VIDEO_PATH = "videoplayback.mp4"
 DEFAULT_REPLAY_PATH = "output/tracking_replay.mp4"
-DEFAULT_EVENTS_OUTPUT = "output/events_with_demographics.json"
+DEFAULT_OUTPUT_BATCH_PATH = "output/output_batch.json"
 LINE_CONFIG = {
     "point_a": {"x": 100.0, "y": 300.0},
     "point_b": {"x": 700.0, "y": 300.0},
@@ -28,14 +27,14 @@ LINE_CONFIG = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the real Detect -> Track -> Event -> Demographic pipeline."
+        description="Run the real Detect -> Track -> Event -> Demographic -> Assemble pipeline."
     )
     parser.add_argument("input", nargs="?", default=DEFAULT_VIDEO_PATH, help="Input video path")
     parser.add_argument("--output", default=DEFAULT_REPLAY_PATH, help="Annotated replay path")
     parser.add_argument(
-        "--events-output",
-        default=DEFAULT_EVENTS_OUTPUT,
-        help="Events-with-demographics JSON path",
+        "--output-batch",
+        default=DEFAULT_OUTPUT_BATCH_PATH,
+        help="OutputBatch JSON path",
     )
     return parser.parse_args()
 
@@ -168,22 +167,6 @@ def validate_event_best_crops(event_batch: dict[str, Any], frame_batch: dict[str
             raise ValueError(f"Event track_id={event['track_id']} references missing frame_id={frame_id}")
 
 
-def join_events_and_demographics(event_batch: dict[str, Any], demographics_batch: dict[str, Any]) -> dict[str, Any]:
-    demographics_by_track = {result["track_id"]: result for result in demographics_batch["results"]}
-    return {
-        "events": [
-            {
-                "track_id": event["track_id"],
-                "timestamp": float(event["timestamp"]),
-                "event_type": int(event["event_type"]),
-                "age": int(demographics_by_track[event["track_id"]]["age"]),
-                "sex": int(demographics_by_track[event["track_id"]]["sex"]),
-            }
-            for event in event_batch["events"]
-        ]
-    }
-
-
 def write_json(payload: dict[str, Any], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -193,11 +176,9 @@ def main() -> None:
     args = parse_args()
     video_path = Path(args.input)
     replay_path = Path(args.output)
-    events_output_path = Path(args.events_output)
-    started_at = time.perf_counter()
+    output_batch_path = Path(args.output_batch)
 
     frame_batch, fps, frame_size = build_frame_batch_from_video(video_path)
-    frame_batch_memory = sum(frame["image"].nbytes for frame in frame_batch["frames"])
 
     detection_batch = Detect()(frame_batch)
     validate_detection_batch(detection_batch, frame_batch)
@@ -209,25 +190,10 @@ def main() -> None:
     validate_event_best_crops(event_batch, frame_batch)
 
     demographics_batch = Demographic()(event_batch, frame_batch)
-    final_output = join_events_and_demographics(event_batch, demographics_batch)
+    output_batch = Assemble()(event_batch, demographics_batch)
     draw_replay(frame_batch, detection_batch, tracking_state, replay_path, fps, frame_size)
-    write_json(final_output, events_output_path)
-
-    runtime_seconds = time.perf_counter() - started_at
-    peak_memory_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    print("Pipeline complete")
-    print(f"Frames processed: {len(frame_batch['frames'])}")
-    print(f"DetectionBatch Detections count: {len(detection_batch['detections'])}")
-    print(f"Tracks produced: {len(tracking_state['tracks'])}")
-    print(f"Events produced: {len(event_batch['events'])}")
-    print(f"Demographics produced: {len(demographics_batch['results'])}")
-    print(f"Replay path: {replay_path}")
-    print(f"JSON path: {events_output_path}")
-    print(f"Pipeline runtime seconds: {runtime_seconds:.3f}")
-    print(f"FrameBatch memory bytes: {frame_batch_memory}")
-    print(f"Peak memory KiB: {peak_memory_kib}")
-    print("Source video open count: 1")
-    print("Second decode: no")
+    write_json(output_batch, output_batch_path)
+    print(json.dumps(output_batch, sort_keys=True))
 
 
 if __name__ == "__main__":
