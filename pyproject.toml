@@ -11,4 +11,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["contracts", "detect", "track", "events", "demographics", "demographics._mivolo", "demographics._mivolo.model"]
+packages = ["assemble", "contracts", "detect", "track", "events", "demographics", "demographics._mivolo", "demographics._mivolo.model"]
