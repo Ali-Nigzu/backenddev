@@ -1,9 +1,9 @@
-"""Frame -> DetectionBatch."""
+"""FrameBatch -> DetectionBatch."""
 
-from math import isfinite
 from pathlib import Path
 
 import numpy as np
+from contracts import validate_frame_batch
 from ultralytics import YOLO
 
 __all__ = ["Detect"]
@@ -15,29 +15,14 @@ class Detect:
     def __init__(self) -> None:
         self._model = YOLO(str(Path(__file__).with_name("yolov10n.pt")))
 
-    def __call__(self, frame):
-        for field in ("frame_id", "timestamp", "image"):
-            if field not in frame:
-                raise ValueError(f"Missing required Frame field: {field}")
+    def __call__(self, frame_batch):
+        frames = validate_frame_batch(frame_batch)
+        return {"detections": [self._detect_frame(frame) for frame in frames]}
 
+    def _detect_frame(self, frame):
         frame_id = frame["frame_id"]
         timestamp = frame["timestamp"]
         image = frame["image"]
-
-        if not isinstance(frame_id, str) or not frame_id:
-            raise ValueError("Frame.frame_id must be a non-empty string")
-        if not isinstance(timestamp, (float, int)) or not isfinite(float(timestamp)):
-            raise ValueError("Frame.timestamp must be finite")
-        if (
-            not isinstance(image, np.ndarray)
-            or image.dtype != np.uint8
-            or image.ndim != 3
-            or image.shape[2] != 3
-            or image.shape[0] == 0
-            or image.shape[1] == 0
-            or not image.flags.c_contiguous
-        ):
-            raise ValueError("Frame.image must be contiguous uint8 [H, W, 3]")
 
         detections = []
         width = float(image.shape[1])

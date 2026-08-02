@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Any
 
+from contracts import FrameBatchError, build_frame_lookup
+
 from .exceptions import DemographicInputError
 from .model import _MiVOLOModelRunner
 
@@ -106,35 +108,19 @@ def _select_unique_tracks(events: list[dict[str, Any]]) -> list[_CropDescriptor]
 
 def _build_required_frame_lookup(frame_batch: Any, descriptors: list[_CropDescriptor]) -> dict[str, Mapping[str, Any]]:
     required = {descriptor.frame_id for descriptor in descriptors}
-    batch = _require_mapping(frame_batch, "FrameBatch")
-    _require_fields(batch, ("frames",), "FrameBatch")
-    if not isinstance(batch["frames"], list):
-        raise DemographicInputError("FrameBatch.frames must be a list")
-
-    frames_by_id: dict[str, Mapping[str, Any]] = {}
-    seen: set[str] = set()
-    for index, frame_value in enumerate(batch["frames"]):
-        name = f"FrameBatch.frames[{index}]"
-        frame = _require_mapping(frame_value, name)
-        _require_fields(frame, ("frame_id",), name)
-        frame_id = frame["frame_id"]
-        if not isinstance(frame_id, str) or not frame_id:
-            raise DemographicInputError(f"{name}.frame_id must be a non-empty string")
-        if frame_id in seen:
-            raise DemographicInputError(f"Duplicate frame_id in FrameBatch: {frame_id}")
-        seen.add(frame_id)
-        if frame_id not in required:
-            continue
-        _require_fields(frame, ("timestamp", "image"), name)
-        _finite_number(frame["timestamp"], f"{name}.timestamp")
-        frames_by_id[frame_id] = frame
-
-    for descriptor in descriptors:
-        if descriptor.frame_id not in frames_by_id:
-            raise DemographicInputError(
-                f"Missing source frame: track_id={descriptor.track_id} "
-                f"frame_id={descriptor.frame_id} bbox={descriptor.bbox}"
-            )
+    try:
+        frames_by_id = build_frame_lookup(frame_batch, required_ids=required)
+    except FrameBatchError as exc:
+        message = str(exc)
+        if message.startswith("Missing frame_id in FrameBatch: "):
+            missing_frame_id = message.rsplit(": ", 1)[1]
+            for descriptor in descriptors:
+                if descriptor.frame_id == missing_frame_id:
+                    raise DemographicInputError(
+                        f"Missing source frame: track_id={descriptor.track_id} "
+                        f"frame_id={descriptor.frame_id} bbox={descriptor.bbox}"
+                    ) from exc
+        raise DemographicInputError(message) from exc
     return frames_by_id
 
 

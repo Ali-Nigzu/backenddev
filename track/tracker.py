@@ -70,17 +70,17 @@ def _validate_tracking_state(state) -> None:
         _require_finite_number(track["best_crop_confidence"], f"{name}.best_crop_confidence")
 
 
-def _validate_detection_batch(batch) -> None:
-    _require_fields(batch, ("frame_id", "timestamp", "detections"), "DetectionBatch")
+def _validate_frame_detections(batch) -> None:
+    _require_fields(batch, ("frame_id", "timestamp", "detections"), "Detections")
     if not isinstance(batch["frame_id"], str) or not batch["frame_id"]:
-        raise ValueError("DetectionBatch.frame_id must be a non-empty string")
-    _require_finite_number(batch["timestamp"], "DetectionBatch.timestamp")
+        raise ValueError("Detections.frame_id must be a non-empty string")
+    _require_finite_number(batch["timestamp"], "Detections.timestamp")
     if not isinstance(batch["detections"], list):
-        raise ValueError("DetectionBatch.detections must be a list")
+        raise ValueError("Detections.detections must be a list")
 
     seen_ids = set()
     for detection_index, detection in enumerate(batch["detections"]):
-        name = f"DetectionBatch.detections[{detection_index}]"
+        name = f"Detections.detections[{detection_index}]"
         _require_fields(detection, ("detection_id", "bbox", "centre", "confidence"), name)
         detection_id = detection["detection_id"]
         if not isinstance(detection_id, str) or not detection_id:
@@ -96,7 +96,7 @@ def _validate_detection_batch(batch) -> None:
 def _classify_track(track: dict, current_frame_number: float) -> str:
     frame_delta = float(current_frame_number) - float(track["path"][-1]["timestamp"])
     if frame_delta < 0:
-        raise ValueError("Track path contains a frame newer than the detection batch")
+        raise ValueError("Track path contains a frame newer than the Detections object")
 
     if len(track["path"]) >= _CONFIRMATION_HITS:
         return "active" if int(frame_delta) <= _ACTIVE_TIMEOUT_FRAMES else "inactive"
@@ -131,10 +131,10 @@ def _next_numeric_track_id(tracks) -> int:
 
 
 def Track(tracking_state, detection_batch):
-    """Update ``tracking_state`` in place from one ``DetectionBatch`` and return it."""
+    """Update ``tracking_state`` in place from one per-frame ``Detections`` object and return it."""
 
     _validate_tracking_state(tracking_state)
-    _validate_detection_batch(detection_batch)
+    _validate_frame_detections(detection_batch)
 
     frame_number = float(detection_batch["timestamp"])
     frame_id = detection_batch["frame_id"]

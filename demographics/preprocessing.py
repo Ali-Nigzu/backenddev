@@ -24,6 +24,8 @@ def frame_image(image: Any, frame_id: str) -> np.ndarray:
         raise DemographicInputError(f"Frame {frame_id} image must have shape H x W x 3")
     if image.shape[0] <= 0 or image.shape[1] <= 0:
         raise DemographicInputError(f"Frame {frame_id} image must have positive dimensions")
+    if not image.flags.c_contiguous:
+        raise DemographicInputError(f"Frame {frame_id} image must be C-contiguous")
     return image
 
 
