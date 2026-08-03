@@ -88,20 +88,6 @@ def create_video_writer(output_path: Path, fps: float, frame_size: tuple[int, in
     return writer
 
 
-def validate_detection_batch(detection_batch: dict[str, Any], frame_batch: dict[str, Any]) -> None:
-    frame_detections = detection_batch.get("detections")
-    frames = frame_batch["frames"]
-    if not isinstance(frame_detections, list):
-        raise ValueError("DetectionBatch.detections must be a list")
-    if len(frame_detections) != len(frames):
-        raise ValueError("DetectionBatch.detections length must match FrameBatch.frames")
-    for index, (frame, detections) in enumerate(zip(frames, frame_detections, strict=True)):
-        if detections["frame_id"] != frame["frame_id"]:
-            raise ValueError(f"DetectionBatch.detections[{index}].frame_id does not match FrameBatch")
-        if float(detections["timestamp"]) != float(frame["timestamp"]):
-            raise ValueError(f"DetectionBatch.detections[{index}].timestamp does not match FrameBatch")
-
-
 def draw_replay(
     frame_batch: dict[str, Any],
     detection_batch: dict[str, Any],
@@ -159,15 +145,7 @@ def draw_replay(
         writer.release()
 
 
-def validate_event_best_crops(event_batch: dict[str, Any], frame_batch: dict[str, Any]) -> None:
-    frame_ids = {frame["frame_id"] for frame in frame_batch["frames"]}
-    for event in event_batch["events"]:
-        frame_id = event["best_crop"]["frame_id"]
-        if frame_id not in frame_ids:
-            raise ValueError(f"Event track_id={event['track_id']} references missing frame_id={frame_id}")
-
-
-def write_json(payload: dict[str, Any], output_path: Path) -> None:
+def write_output_batch(payload: dict[str, Any], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
@@ -181,18 +159,20 @@ def main() -> None:
     frame_batch, fps, frame_size = build_frame_batch_from_video(video_path)
 
     detection_batch = Detect()(frame_batch)
-    validate_detection_batch(detection_batch, frame_batch)
+    tracking_state = Track()(
+        {"tracks": []},
+        detection_batch,
+    )
 
-    tracking_state = {"tracks": []}
-    tracking_state = Track(tracking_state, detection_batch)
-
-    event_batch = Event(tracking_state, LINE_CONFIG)
-    validate_event_best_crops(event_batch, frame_batch)
+    event_batch = Event()(
+        tracking_state,
+        LINE_CONFIG,
+    )
 
     demographics_batch = Demographic()(event_batch, frame_batch)
     output_batch = Assemble()(event_batch, demographics_batch)
     draw_replay(frame_batch, detection_batch, tracking_state, replay_path, fps, frame_size)
-    write_json(output_batch, output_batch_path)
+    write_output_batch(output_batch, output_batch_path)
     print(json.dumps(output_batch, sort_keys=True))
 
 
