@@ -1,18 +1,25 @@
-"""Production Demographic stage orchestration."""
+"""MiVOLO demographic inference for event body crops."""
 
-from __future__ import annotations
-
-from collections.abc import Mapping
+import math
+import threading
 from dataclasses import dataclass
-from math import isfinite
-from typing import Any
+from functools import lru_cache
+from pathlib import Path
 
-from contracts import FrameBatchError, build_frame_lookup
+import cv2
+import numpy as np
+import torch
 
-from .exceptions import DemographicInputError
-from .model import _MiVOLOModelRunner
+from ._mivolo.model.mivolo_model import create_mivolo_d1_224
 
-BBox = dict[str, float]
+_CHECKPOINT_PATH = Path(__file__).with_name("demographicweights.pth")
+_INPUT_SIZE = 224
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_IGNORED_STATE_PREFIXES = ("fds.",)
+_EXPECTED_OUTPUTS = 3
+_CPU_CHUNK_SIZE = 16
+_CUDA_CHUNK_SIZE = 64
 
 
 @dataclass(frozen=True)
@@ -20,133 +27,141 @@ class _CropDescriptor:
     track_id: str
     timestamp: float
     frame_id: str
-    bbox: BBox
+    bbox: dict
 
 
-def _require_mapping(value: Any, name: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise DemographicInputError(f"{name} must be an object")
-    return value
-
-
-def _require_fields(value: Mapping[str, Any], fields: tuple[str, ...], name: str) -> None:
-    for field in fields:
-        if field not in value:
-            raise DemographicInputError(f"Missing required {name} field: {field}")
-
-
-def _finite_number(value: Any, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(float(value)):
-        raise DemographicInputError(f"{name} must be a finite number")
-    return float(value)
-
-
-def _validate_bbox(value: Any, name: str) -> BBox:
-    bbox = _require_mapping(value, name)
-    _require_fields(bbox, ("x1", "y1", "x2", "y2"), name)
-    copied = {axis: _finite_number(bbox[axis], f"{name}.{axis}") for axis in ("x1", "y1", "x2", "y2")}
-    if copied["x2"] <= copied["x1"] or copied["y2"] <= copied["y1"]:
-        raise DemographicInputError(f"{name} must have positive area")
-    return copied
-
-
-def _validate_event_batch(event_batch: Any) -> list[dict[str, Any]]:
-    batch = _require_mapping(event_batch, "EventBatch")
-    _require_fields(batch, ("events",), "EventBatch")
-    if not isinstance(batch["events"], list):
-        raise DemographicInputError("EventBatch.events must be a list")
-    events: list[dict[str, Any]] = []
-    for index, event_value in enumerate(batch["events"]):
-        name = f"EventBatch.events[{index}]"
-        event = _require_mapping(event_value, name)
-        _require_fields(event, ("track_id", "timestamp", "event_type", "best_crop"), name)
-        track_id = event["track_id"]
-        if not isinstance(track_id, str) or not track_id:
-            raise DemographicInputError(f"{name}.track_id must be a non-empty string")
-        timestamp = _finite_number(event["timestamp"], f"{name}.timestamp")
-        event_type = event["event_type"]
-        if isinstance(event_type, bool) or not isinstance(event_type, int) or event_type not in (0, 1):
-            raise DemographicInputError(f"{name}.event_type must be exactly integer 0 or 1")
-        best_crop = _require_mapping(event["best_crop"], f"{name}.best_crop")
-        _require_fields(best_crop, ("frame_id", "bbox"), f"{name}.best_crop")
-        frame_id = best_crop["frame_id"]
-        if not isinstance(frame_id, str) or not frame_id:
-            raise DemographicInputError(f"{name}.best_crop.frame_id must be a non-empty string")
-        bbox = _validate_bbox(best_crop["bbox"], f"{name}.best_crop.bbox")
-        events.append({"track_id": track_id, "timestamp": timestamp, "frame_id": frame_id, "bbox": bbox})
-    return events
-
-
-def _select_unique_tracks(events: list[dict[str, Any]]) -> list[_CropDescriptor]:
-    by_track: dict[str, _CropDescriptor] = {}
+def _select_unique_tracks(events):
+    by_track = {}
     for event in events:
+        crop = event["best_crop"]
         descriptor = _CropDescriptor(
-            track_id=event["track_id"],
-            timestamp=event["timestamp"],
-            frame_id=event["frame_id"],
-            bbox=event["bbox"],
+            event["track_id"], float(event["timestamp"]), crop["frame_id"], dict(crop["bbox"])
         )
         existing = by_track.get(descriptor.track_id)
-        if existing is None:
+        if existing is None or descriptor.timestamp < existing.timestamp:
             by_track[descriptor.track_id] = descriptor
-            continue
-        if existing.frame_id != descriptor.frame_id or existing.bbox != descriptor.bbox:
-            raise DemographicInputError(
-                "Conflicting best_crop records for "
-                f"track_id={descriptor.track_id}; existing frame_id={existing.frame_id} bbox={existing.bbox}; "
-                f"new frame_id={descriptor.frame_id} bbox={descriptor.bbox}"
-            )
-        if descriptor.timestamp < existing.timestamp:
-            by_track[descriptor.track_id] = _CropDescriptor(
-                track_id=existing.track_id,
-                timestamp=descriptor.timestamp,
-                frame_id=existing.frame_id,
-                bbox=existing.bbox,
-            )
     return sorted(by_track.values(), key=lambda item: (item.timestamp, item.track_id))
 
 
-def _build_required_frame_lookup(frame_batch: Any, descriptors: list[_CropDescriptor]) -> dict[str, Mapping[str, Any]]:
-    required = {descriptor.frame_id for descriptor in descriptors}
-    try:
-        frames_by_id = build_frame_lookup(frame_batch, required_ids=required)
-    except FrameBatchError as exc:
-        message = str(exc)
-        if message.startswith("Missing frame_id in FrameBatch: "):
-            missing_frame_id = message.rsplit(": ", 1)[1]
-            for descriptor in descriptors:
-                if descriptor.frame_id == missing_frame_id:
-                    raise DemographicInputError(
-                        f"Missing source frame: track_id={descriptor.track_id} "
-                        f"frame_id={descriptor.frame_id} bbox={descriptor.bbox}"
-                    ) from exc
-        raise DemographicInputError(message) from exc
-    return frames_by_id
+def _crop_body(image, descriptor):
+    height, width = image.shape[:2]
+    bbox = descriptor.bbox
+    left = max(0, min(width, math.floor(float(bbox["x1"]))))
+    top = max(0, min(height, math.floor(float(bbox["y1"]))))
+    right = max(0, min(width, math.ceil(float(bbox["x2"]))))
+    bottom = max(0, min(height, math.ceil(float(bbox["y2"]))))
+    if right <= left or bottom <= top:
+        raise RuntimeError(
+            f"Body crop has zero area for track_id={descriptor.track_id} "
+            f"frame_id={descriptor.frame_id}"
+        )
+    return np.ascontiguousarray(image[top:bottom, left:right])
+
+
+def _letterbox_rgb(image):
+    height, width = image.shape[:2]
+    scale = min(_INPUT_SIZE / height, _INPUT_SIZE / width)
+    resized_width = int(round(width * scale))
+    resized_height = int(round(height * scale))
+    if (width, height) != (resized_width, resized_height):
+        image = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
+    dw = (_INPUT_SIZE - resized_width) / 2
+    dh = (_INPUT_SIZE - resized_height) / 2
+    return cv2.copyMakeBorder(
+        image,
+        int(round(dh - 0.1)), int(round(dh + 0.1)),
+        int(round(dw - 0.1)), int(round(dw + 0.1)),
+        cv2.BORDER_CONSTANT, value=(0, 0, 0),
+    )
+
+
+def _normalise_rgb(image):
+    return (image.astype(np.float32) / 255.0 - _IMAGENET_MEAN) / _IMAGENET_STD
+
+
+@lru_cache(maxsize=1)
+def _missing_face_tensor():
+    black = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
+    return np.ascontiguousarray(_normalise_rgb(black).transpose(2, 0, 1), dtype=np.float32)
+
+
+def _prepare_body(image, descriptor):
+    body = _normalise_rgb(_letterbox_rgb(_crop_body(image, descriptor)))
+    body = np.ascontiguousarray(body.transpose(2, 0, 1), dtype=np.float32)
+    return np.ascontiguousarray(
+        np.concatenate((_missing_face_tensor(), body), axis=0).astype(np.float32, copy=False)
+    )
 
 
 class Demographic:
-    """Callable production demographic stage."""
+    __slots__ = ("_lock", "_model", "_device", "_min_age", "_max_age", "_avg_age")
 
-    def __init__(self) -> None:
-        self._model = _MiVOLOModelRunner()
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._model = None
+        self._device = None
+        self._min_age = self._max_age = self._avg_age = None
 
-    def __call__(self, event_batch: Any, frame_batch: Any) -> dict[str, list[dict[str, int | str]]]:
-        events = _validate_event_batch(event_batch)
-        if not events:
+    def _load(self):
+        if self._model is not None:
+            return
+        with self._lock:
+            if self._model is not None:
+                return
+            if not _CHECKPOINT_PATH.exists():
+                raise RuntimeError(f"MiVOLO checkpoint not found at {_CHECKPOINT_PATH}")
+            try:
+                checkpoint = torch.load(str(_CHECKPOINT_PATH), map_location="cpu")
+            except Exception as exc:
+                raise RuntimeError(f"Unable to load MiVOLO checkpoint at {_CHECKPOINT_PATH}") from exc
+            try:
+                model = create_mivolo_d1_224(num_classes=_EXPECTED_OUTPUTS, in_chans=6)
+                state_dict = {
+                    key: value for key, value in checkpoint["state_dict"].items()
+                    if not key.startswith(_IGNORED_STATE_PREFIXES)
+                }
+                model.load_state_dict(state_dict, strict=True)
+                self._device = "cuda" if torch.cuda.is_available() else "cpu"
+                self._model = model.to(self._device).eval()
+                self._min_age = float(checkpoint["min_age"])
+                self._max_age = float(checkpoint["max_age"])
+                self._avg_age = float(checkpoint["avg_age"])
+            except Exception as exc:
+                raise RuntimeError("Unable to construct or load the MiVOLO model") from exc
+
+    def __call__(self, event_batch, frame_batch):
+        if not event_batch["events"]:
             return {"results": []}
-
-        descriptors = _select_unique_tracks(events)
-        frames_by_id = _build_required_frame_lookup(frame_batch, descriptors)
-        from .preprocessing import frame_image
-
+        descriptors = _select_unique_tracks(event_batch["events"])
+        frames_by_id = {frame["frame_id"]: frame for frame in frame_batch["frames"]}
         for descriptor in descriptors:
-            frame_image(frames_by_id[descriptor.frame_id]["image"], descriptor.frame_id)
-        predictions = self._model.predict(descriptors, frames_by_id)
-        if len(predictions) != len(descriptors):
-            raise DemographicInputError("Demographic model returned an unexpected number of results")
-        return {
-            "results": [
-                {"track_id": descriptor.track_id, "age": int(prediction["age"]), "sex": int(prediction["sex"])}
-                for descriptor, prediction in zip(descriptors, predictions, strict=True)
-            ]
-        }
+            if descriptor.frame_id not in frames_by_id:
+                raise RuntimeError(
+                    f"Missing source frame: track_id={descriptor.track_id} "
+                    f"frame_id={descriptor.frame_id}"
+                )
+
+        self._load()
+        predictions = []
+        chunk_size = _CUDA_CHUNK_SIZE if self._device == "cuda" else _CPU_CHUNK_SIZE
+        for start in range(0, len(descriptors), chunk_size):
+            chunk = descriptors[start:start + chunk_size]
+            batch = np.ascontiguousarray(np.stack([
+                _prepare_body(frames_by_id[item.frame_id]["image"], item) for item in chunk
+            ], axis=0).astype(np.float32, copy=False))
+            try:
+                with torch.inference_mode():
+                    output = self._model(torch.from_numpy(batch).to(self._device))
+                output = np.asarray(output.detach().cpu().numpy(), dtype=np.float32)
+            except Exception as exc:
+                raise RuntimeError("MiVOLO inference failed") from exc
+            if len(output) != len(chunk):
+                raise RuntimeError("MiVOLO inference output count does not match its input")
+            for row in output:
+                age = int(math.floor(float(row[2]) * (self._max_age - self._min_age) + self._avg_age + 0.5))
+                predictions.append({"age": age, "sex": 1 if float(row[0]) >= float(row[1]) else 0})
+
+        return {"results": [
+            {"track_id": descriptor.track_id, "age": prediction["age"], "sex": prediction["sex"]}
+            for descriptor, prediction in zip(descriptors, predictions, strict=True)
+        ]}

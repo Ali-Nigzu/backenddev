@@ -1,3 +1,3 @@
-from track.tracker import Track
+from .track import Track
 
 __all__ = ["Track"]

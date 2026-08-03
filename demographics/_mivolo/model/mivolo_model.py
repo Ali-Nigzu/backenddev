@@ -4,7 +4,7 @@ Adapted from MiVOLO (Copyright 2023 Irina Tolstykh, Maxim Kuprashevich)
 and timm / pytorch-image-models. The upstream MiVOLO repository is licensed
 under Apache-2.0. Local changes are limited to package-relative imports, fixed
 D1-224 specialisation, unused-code removal, and the VOLO constructor
-compatibility correction required by the validated timm version.
+compatibility correction required by the supported timm version.
 """
 
 import torch
