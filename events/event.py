@@ -8,17 +8,12 @@ _ON_LINE_DISTANCE_PIXELS = 2.0
 _GEOMETRY_EPSILON = 1e-6
 
 
-def _signed_distance_to_line(point, line_a, line_b):
-    dx = line_b[0] - line_a[0]
-    dy = line_b[1] - line_a[1]
-    line_length = hypot(dx, dy)
-    if line_length <= _GEOMETRY_EPSILON:
-        raise ValueError("Line endpoints must define a non-zero line")
+def _signed_distance_to_line(point, line_a, dx, dy, line_length):
     return (dx * (point[1] - line_a[1]) - dy * (point[0] - line_a[0])) / line_length
 
 
-def _side(point, line_a, line_b):
-    distance = _signed_distance_to_line(point, line_a, line_b)
+def _side(point, line_a, dx, dy, line_length):
+    distance = _signed_distance_to_line(point, line_a, dx, dy, line_length)
     if distance > _ON_LINE_DISTANCE_PIXELS:
         return 1
     if distance < -_ON_LINE_DISTANCE_PIXELS:
@@ -26,17 +21,17 @@ def _side(point, line_a, line_b):
     return 0
 
 
-def _events_for_track(track, line_a, line_b):
+def _events_for_track(track, line_a, dx, dy, line_length):
     if len(track["path"]) < _MIN_EVENT_TRACK_POINTS:
         return []
     events = []
     established_side = run_side = run_start_timestamp = None
     run_count = 0
     for path_point in track["path"]:
-        timestamp = float(path_point["timestamp"])
+        timestamp = path_point["timestamp"]
         centre = path_point["centre"]
         observed_side = _side(
-            (float(centre["x"]), float(centre["y"])), line_a, line_b
+            (centre["x"], centre["y"]), line_a, dx, dy, line_length
         )
         if observed_side == 0:
             continue
@@ -73,7 +68,15 @@ class Event:
         point_b = line_config["point_b"]
         line_a = (float(point_a["x"]), float(point_a["y"]))
         line_b = (float(point_b["x"]), float(point_b["y"]))
+        dx = line_b[0] - line_a[0]
+        dy = line_b[1] - line_a[1]
+        line_length = hypot(dx, dy)
         events = []
         for track in tracking_state["tracks"]:
-            events.extend(_events_for_track(track, line_a, line_b))
+            if (
+                len(track["path"]) >= _MIN_EVENT_TRACK_POINTS
+                and line_length <= _GEOMETRY_EPSILON
+            ):
+                raise ValueError("Line endpoints must define a non-zero line")
+            events.extend(_events_for_track(track, line_a, dx, dy, line_length))
         return {"events": events}

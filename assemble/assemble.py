@@ -38,19 +38,20 @@ class Assemble:
         self, event_batch, demographics_batch
     ):
         demographics_by_track = {
-            result["track_id"]: result for result in demographics_batch["results"]
+            result["track_id"]: (result["age"], result["sex"])
+            for result in demographics_batch["results"]
         }
         rows = []
 
         for event_index, event in enumerate(event_batch["events"]):
-            demographic = demographics_by_track[event["track_id"]]
+            age, sex = demographics_by_track[event["track_id"]]
             rows.append(
                 {
                     "event_id": _create_event_id(event, event_index),
-                    "event": int(event["event_type"]),
-                    "timestamp": float(event["timestamp"]),
-                    "sex": int(demographic["sex"]),
-                    "age_bucket": _age_to_bucket(demographic["age"]),
+                    "event": event["event_type"],
+                    "timestamp": event["timestamp"],
+                    "sex": sex,
+                    "age_bucket": _age_to_bucket(age),
                 }
             )
         return {"rows": rows}

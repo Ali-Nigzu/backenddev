@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import numpy as np
 
 from assemble import Assemble
 from demographics import Demographic
@@ -58,7 +57,6 @@ def build_frame_batch_from_video(video_path: Path) -> tuple[dict[str, list[dict[
             if not ok:
                 break
             rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-            rgb_image = np.ascontiguousarray(rgb_image)
             frames.append(
                 {
                     "frame_id": f"frame-{frame_index}",
@@ -171,7 +169,9 @@ def main() -> None:
 
     demographics_batch = Demographic()(event_batch, frame_batch)
     output_batch = Assemble()(event_batch, demographics_batch)
+    del event_batch, demographics_batch
     draw_replay(frame_batch, detection_batch, tracking_state, replay_path, fps, frame_size)
+    del frame_batch, detection_batch, tracking_state
     write_output_batch(output_batch, output_batch_path)
     print(json.dumps(output_batch, sort_keys=True))
 

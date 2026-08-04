@@ -17,7 +17,7 @@ def _track_sort_key(track) -> tuple:
     return (0, int(track_id), track_id) if track_id.isdecimal() else (1, track_id)
 
 
-def _historical_anchor(path) -> dict:
+def _historical_anchor(path) -> tuple[float, float]:
     window = min(len(path), _LOCATION_HISTORY_WINDOW_FRAMES)
     points = path[-window:]
     total_weight = 0.0
@@ -26,9 +26,9 @@ def _historical_anchor(path) -> dict:
     for index, point in enumerate(points, start=1):
         weight = float(index) ** _ANCHOR_WEIGHT_EXPONENT
         total_weight += weight
-        weighted_x += float(point["centre"]["x"]) * weight
-        weighted_y += float(point["centre"]["y"]) * weight
-    return {"x": weighted_x / total_weight, "y": weighted_y / total_weight}
+        weighted_x += point["centre"]["x"] * weight
+        weighted_y += point["centre"]["y"] * weight
+    return weighted_x / total_weight, weighted_y / total_weight
 
 
 def _beats(current: tuple[int, int, float] | None, challenger: tuple[int, int, float], tie_keys: Sequence[tuple]) -> bool:
@@ -57,12 +57,12 @@ def _match_tier(
 ) -> tuple[list[tuple[int, int]], list[int]]:
     candidates_by_detection: dict[int, list[tuple[int, int, float]]] = {index: [] for index in detection_indices}
     for track_index in track_indices:
-        anchor = _historical_anchor(tracks[track_index]["path"])
+        anchor_x, anchor_y = _historical_anchor(tracks[track_index]["path"])
         for detection_index in detection_indices:
             detection_centre = detections[detection_index]["centre"]
             candidate_distance = math.hypot(
-                float(anchor["x"]) - float(detection_centre["x"]),
-                float(anchor["y"]) - float(detection_centre["y"]),
+                anchor_x - detection_centre["x"],
+                anchor_y - detection_centre["y"],
             )
             if candidate_distance <= _MAX_ANCHOR_DISTANCE_PX:
                 candidates_by_detection[detection_index].append((track_index, detection_index, candidate_distance))
@@ -105,7 +105,7 @@ def _match_tier(
     )
 
 def _classify_track(track: dict, current_frame_number: float) -> str:
-    frame_delta = float(current_frame_number) - float(track["path"][-1]["timestamp"])
+    frame_delta = current_frame_number - track["path"][-1]["timestamp"]
     if len(track["path"]) >= _CONFIRMATION_HITS:
         return "active" if int(frame_delta) <= _ACTIVE_TIMEOUT_FRAMES else "inactive"
 
@@ -113,19 +113,19 @@ def _classify_track(track: dict, current_frame_number: float) -> str:
 
 
 def _append_detection(track, detection, frame_id: str, frame_number: float) -> None:
-    track["path"].append({"timestamp": float(frame_number), "centre": dict(detection["centre"])})
-    confidence = float(detection["confidence"])
-    if confidence > float(track["best_crop_confidence"]):
+    track["path"].append({"timestamp": frame_number, "centre": dict(detection["centre"])})
+    confidence = detection["confidence"]
+    if confidence > track["best_crop_confidence"]:
         track["best_crop"] = {"frame_id": frame_id, "bbox": dict(detection["bbox"])}
         track["best_crop_confidence"] = confidence
 
 
 def _create_track(detection, frame_id: str, frame_number: float, track_id: str) -> dict:
     return {
-        "track_id": str(track_id),
-        "path": [{"timestamp": float(frame_number), "centre": dict(detection["centre"])}],
+        "track_id": track_id,
+        "path": [{"timestamp": frame_number, "centre": dict(detection["centre"])}],
         "best_crop": {"frame_id": frame_id, "bbox": dict(detection["bbox"])},
-        "best_crop_confidence": float(detection["confidence"]),
+        "best_crop_confidence": detection["confidence"],
     }
 
 
@@ -138,11 +138,10 @@ def _next_numeric_track_id(tracks) -> int:
     return max_numeric_id + 1
 
 
-def _process_frame(tracking_state, frame_detections):
-    frame_number = float(frame_detections["timestamp"])
+def _process_frame(tracking_state, frame_detections, next_id: int):
+    frame_number = frame_detections["timestamp"]
     frame_id = frame_detections["frame_id"]
 
-    tracking_state["tracks"].sort(key=_track_sort_key)
     ordered_detections = [
         detection
         for _index, detection in sorted(
@@ -151,10 +150,17 @@ def _process_frame(tracking_state, frame_detections):
         )
     ]
 
-    statuses = [_classify_track(track, frame_number) for track in tracking_state["tracks"]]
-    active_track_indices = [index for index, status in enumerate(statuses) if status == "active"]
-    tentative_track_indices = [index for index, status in enumerate(statuses) if status == "tentative"]
-    all_detection_indices = list(range(len(ordered_detections)))
+    statuses = []
+    active_track_indices = []
+    tentative_track_indices = []
+    for index, track in enumerate(tracking_state["tracks"]):
+        status = _classify_track(track, frame_number)
+        statuses.append(status)
+        if status == "active":
+            active_track_indices.append(index)
+        elif status == "tentative":
+            tentative_track_indices.append(index)
+    all_detection_indices = range(len(ordered_detections))
 
     active_matches, remaining_detection_indices = _match_tier(
         tracking_state["tracks"], ordered_detections, statuses, active_track_indices, all_detection_indices
@@ -166,19 +172,22 @@ def _process_frame(tracking_state, frame_detections):
     for state_track_index, detection_index in sorted(active_matches + tentative_matches):
         _append_detection(tracking_state["tracks"][state_track_index], ordered_detections[detection_index], frame_id, frame_number)
 
-    next_id = _next_numeric_track_id(tracking_state["tracks"])
     for detection_index in sorted(remaining_detection_indices):
         tracking_state["tracks"].append(_create_track(ordered_detections[detection_index], frame_id, frame_number, str(next_id)))
         next_id += 1
 
     tracking_state["tracks"].sort(key=_track_sort_key)
-    return tracking_state
+    return tracking_state, next_id
 
 
 class Track:
     __slots__ = ()
 
     def __call__(self, tracking_state, detection_batch):
+        tracking_state["tracks"].sort(key=_track_sort_key)
+        next_id = _next_numeric_track_id(tracking_state["tracks"])
         for frame_detections in detection_batch["detections"]:
-            tracking_state = _process_frame(tracking_state, frame_detections)
+            tracking_state, next_id = _process_frame(
+                tracking_state, frame_detections, next_id
+            )
         return tracking_state
