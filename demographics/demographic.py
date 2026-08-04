@@ -2,7 +2,6 @@
 
 import math
 import threading
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -22,38 +21,29 @@ _CPU_CHUNK_SIZE = 16
 _CUDA_CHUNK_SIZE = 64
 
 
-@dataclass(frozen=True)
-class _CropDescriptor:
-    track_id: str
-    timestamp: float
-    frame_id: str
-    bbox: dict
-
-
 def _select_unique_tracks(events):
     by_track = {}
     for event in events:
         crop = event["best_crop"]
-        descriptor = _CropDescriptor(
-            event["track_id"], float(event["timestamp"]), crop["frame_id"], dict(crop["bbox"])
-        )
-        existing = by_track.get(descriptor.track_id)
-        if existing is None or descriptor.timestamp < existing.timestamp:
-            by_track[descriptor.track_id] = descriptor
-    return sorted(by_track.values(), key=lambda item: (item.timestamp, item.track_id))
+        track_id = event["track_id"]
+        descriptor = (event["timestamp"], track_id, crop["frame_id"], crop["bbox"])
+        existing = by_track.get(track_id)
+        if existing is None or descriptor[0] < existing[0]:
+            by_track[track_id] = descriptor
+    return sorted(by_track.values(), key=lambda item: (item[0], item[1]))
 
 
 def _crop_body(image, descriptor):
     height, width = image.shape[:2]
-    bbox = descriptor.bbox
+    _timestamp, track_id, frame_id, bbox = descriptor
     left = max(0, min(width, math.floor(float(bbox["x1"]))))
     top = max(0, min(height, math.floor(float(bbox["y1"]))))
     right = max(0, min(width, math.ceil(float(bbox["x2"]))))
     bottom = max(0, min(height, math.ceil(float(bbox["y2"]))))
     if right <= left or bottom <= top:
         raise RuntimeError(
-            f"Body crop has zero area for track_id={descriptor.track_id} "
-            f"frame_id={descriptor.frame_id}"
+            f"Body crop has zero area for track_id={track_id} "
+            f"frame_id={frame_id}"
         )
     return np.ascontiguousarray(image[top:bottom, left:right])
 
@@ -82,15 +72,16 @@ def _normalise_rgb(image):
 @lru_cache(maxsize=1)
 def _missing_face_tensor():
     black = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
-    return np.ascontiguousarray(_normalise_rgb(black).transpose(2, 0, 1), dtype=np.float32)
+    missing_face = np.ascontiguousarray(
+        _normalise_rgb(black).transpose(2, 0, 1), dtype=np.float32
+    )
+    missing_face.flags.writeable = False
+    return missing_face
 
 
 def _prepare_body(image, descriptor):
     body = _normalise_rgb(_letterbox_rgb(_crop_body(image, descriptor)))
-    body = np.ascontiguousarray(body.transpose(2, 0, 1), dtype=np.float32)
-    return np.ascontiguousarray(
-        np.concatenate((_missing_face_tensor(), body), axis=0).astype(np.float32, copy=False)
-    )
+    return np.ascontiguousarray(body.transpose(2, 0, 1), dtype=np.float32)
 
 
 class Demographic:
@@ -133,22 +124,30 @@ class Demographic:
         if not event_batch["events"]:
             return {"results": []}
         descriptors = _select_unique_tracks(event_batch["events"])
-        frames_by_id = {frame["frame_id"]: frame for frame in frame_batch["frames"]}
+        images_by_frame_id = {
+            frame["frame_id"]: frame["image"] for frame in frame_batch["frames"]
+        }
         for descriptor in descriptors:
-            if descriptor.frame_id not in frames_by_id:
+            _timestamp, track_id, frame_id, _bbox = descriptor
+            if frame_id not in images_by_frame_id:
                 raise RuntimeError(
-                    f"Missing source frame: track_id={descriptor.track_id} "
-                    f"frame_id={descriptor.frame_id}"
+                    f"Missing source frame: track_id={track_id} "
+                    f"frame_id={frame_id}"
                 )
 
         self._load()
-        predictions = []
+        results = []
         chunk_size = _CUDA_CHUNK_SIZE if self._device == "cuda" else _CPU_CHUNK_SIZE
         for start in range(0, len(descriptors), chunk_size):
             chunk = descriptors[start:start + chunk_size]
-            batch = np.ascontiguousarray(np.stack([
-                _prepare_body(frames_by_id[item.frame_id]["image"], item) for item in chunk
-            ], axis=0).astype(np.float32, copy=False))
+            batch = np.empty(
+                (len(chunk), 6, _INPUT_SIZE, _INPUT_SIZE), dtype=np.float32
+            )
+            batch[:, 0:3] = _missing_face_tensor()
+            for batch_index, descriptor in enumerate(chunk):
+                batch[batch_index, 3:6] = _prepare_body(
+                    images_by_frame_id[descriptor[2]], descriptor
+                )
             try:
                 with torch.inference_mode():
                     output = self._model(torch.from_numpy(batch).to(self._device))
@@ -157,11 +156,14 @@ class Demographic:
                 raise RuntimeError("MiVOLO inference failed") from exc
             if len(output) != len(chunk):
                 raise RuntimeError("MiVOLO inference output count does not match its input")
-            for row in output:
+            for descriptor, row in zip(chunk, output, strict=True):
                 age = int(math.floor(float(row[2]) * (self._max_age - self._min_age) + self._avg_age + 0.5))
-                predictions.append({"age": age, "sex": 1 if float(row[0]) >= float(row[1]) else 0})
+                results.append(
+                    {
+                        "track_id": descriptor[1],
+                        "age": age,
+                        "sex": 1 if float(row[0]) >= float(row[1]) else 0,
+                    }
+                )
 
-        return {"results": [
-            {"track_id": descriptor.track_id, "age": prediction["age"], "sex": prediction["sex"]}
-            for descriptor, prediction in zip(descriptors, predictions, strict=True)
-        ]}
+        return {"results": results}

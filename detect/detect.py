@@ -31,8 +31,8 @@ class Detect:
         image = frame["image"]
 
         detections = []
-        width = float(image.shape[1])
-        height = float(image.shape[0])
+        width = image.shape[1]
+        height = image.shape[0]
         detection_index = 0
 
         for result in self._model(
@@ -59,21 +59,19 @@ class Detect:
                 if x1 >= x2 or y1 >= y2:
                     continue
 
-                bbox = {
-                    "x1": float(np.float32(x1)),
-                    "y1": float(np.float32(y1)),
-                    "x2": float(np.float32(x2)),
-                    "y2": float(np.float32(y2)),
-                }
+                x1 = np.float32(x1).item()
+                y1 = np.float32(y1).item()
+                x2 = np.float32(x2).item()
+                y2 = np.float32(y2).item()
+                centre_x = np.float32((x1 + x2) / 2.0).item()
+                centre_y = np.float32((y1 + y2) / 2.0).item()
+                confidence = np.float32(confidence).item()
                 detections.append(
                     {
                         "detection_id": f"{frame_id}:det:{detection_index}",
-                        "bbox": bbox,
-                        "centre": {
-                            "x": float(np.float32((bbox["x1"] + bbox["x2"]) / 2.0)),
-                            "y": float(np.float32((bbox["y1"] + bbox["y2"]) / 2.0)),
-                        },
-                        "confidence": float(np.float32(confidence)),
+                        "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                        "centre": {"x": centre_x, "y": centre_y},
+                        "confidence": confidence,
                     }
                 )
                 detection_index += 1
