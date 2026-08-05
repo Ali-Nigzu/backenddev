@@ -170,7 +170,11 @@ def main() -> None:
     )
 
     demographics_batch = Demographic()(event_batch, frame_batch)
-    output_batch = Assemble()(event_batch, demographics_batch)
+    output_batch = Assemble()(
+        event_batch,
+        demographics_batch,
+        TIMEFRAME["start"],
+    )
     del event_batch, demographics_batch
     draw_replay(frame_batch, detection_batch, tracking_state, replay_path, fps, frame_size)
     del frame_batch, detection_batch, tracking_state
