@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 import cv2
@@ -13,11 +14,20 @@ from assemble import Assemble
 from demographics import Demographic
 from detect import Detect
 from events import Event
+from load.load import load
 from track import Track
 
-DEFAULT_VIDEO_PATH = "videoplayback.mp4"
 DEFAULT_REPLAY_PATH = "output/tracking_replay.mp4"
 DEFAULT_OUTPUT_BATCH_PATH = "output/output_batch.json"
+SOURCE_URI = (
+    "gs://camostesting/"
+    "Orgs/Sites/Devices/TestCamera/"
+)
+TIMEFRAME = {
+    "start": "2026-08-04T11:38:55.000Z",
+    "end": "2026-08-04T11:39:05.000Z",
+}
+SERVICE_ACCOUNT_PATH = Path(__file__).resolve().parent / "TestAdminSA.json"
 LINE_CONFIG = {
     "point_a": {"x": 100.0, "y": 300.0},
     "point_b": {"x": 700.0, "y": 300.0},
@@ -28,7 +38,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the real Detect -> Track -> Event -> Demographic -> Assemble pipeline."
     )
-    parser.add_argument("input", nargs="?", default=DEFAULT_VIDEO_PATH, help="Input video path")
     parser.add_argument("--output", default=DEFAULT_REPLAY_PATH, help="Annotated replay path")
     parser.add_argument(
         "--output-batch",
@@ -38,39 +47,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_frame_batch_from_video(video_path: Path) -> tuple[dict[str, list[dict[str, Any]]], float, tuple[int, int]]:
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {video_path}")
+def get_frame_size(frame_batch: dict[str, Any]) -> tuple[int, int]:
+    first_image = frame_batch["frames"][0]["image"]
+    return (first_image.shape[1], first_image.shape[0])
 
-    try:
-        fps = float(cap.get(cv2.CAP_PROP_FPS))
-        if fps <= 0.0 or fps > 240.0:
-            fps = 30.0
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        frames: list[dict[str, Any]] = []
-        frame_index = 0
-        while True:
-            ok, bgr_image = cap.read()
-            if not ok:
-                break
-            rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-            frames.append(
-                {
-                    "frame_id": f"frame-{frame_index}",
-                    "timestamp": float(frame_index) / fps,
-                    "image": rgb_image,
-                }
-            )
-            frame_index += 1
-    finally:
-        cap.release()
-
-    if not frames:
-        raise ValueError(f"No frames decoded from video: {video_path}")
-    return {"frames": frames}, fps, (width, height)
+def get_replay_fps(frame_batch: dict[str, Any]) -> float:
+    timestamps = [float(frame["timestamp"]) for frame in frame_batch["frames"]]
+    positive_intervals = [
+        later - earlier
+        for earlier, later in zip(timestamps, timestamps[1:], strict=False)
+        if later - earlier > 0.0
+    ]
+    if not positive_intervals:
+        raise ValueError("Cannot derive replay FPS from fewer than two distinct frame timestamps")
+    return 1.0 / median(positive_intervals)
 
 
 def create_video_writer(output_path: Path, fps: float, frame_size: tuple[int, int]) -> cv2.VideoWriter:
@@ -150,11 +141,22 @@ def write_output_batch(payload: dict[str, Any], output_path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    video_path = Path(args.input)
     replay_path = Path(args.output)
     output_batch_path = Path(args.output_batch)
 
-    frame_batch, fps, frame_size = build_frame_batch_from_video(video_path)
+    with SERVICE_ACCOUNT_PATH.open(encoding="utf-8") as file:
+        service_account_info = json.load(file)
+
+    frame_batch = load(
+        SOURCE_URI,
+        TIMEFRAME,
+        service_account_info,
+    )
+    if not frame_batch["frames"]:
+        raise ValueError("No timestamp-named JPG frames found in the configured timeframe")
+
+    frame_size = get_frame_size(frame_batch)
+    fps = get_replay_fps(frame_batch)
 
     detection_batch = Detect()(frame_batch)
     tracking_state = Track()(
