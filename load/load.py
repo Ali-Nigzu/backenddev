@@ -21,9 +21,7 @@ def load(
     service_account_info: dict,
 ) -> dict:
     """Return a FrameBatch for timestamp-named JPG frames in a GCS prefix and timeframe."""
-    parsed_uri = urlparse(source_uri)
-    bucket_name = parsed_uri.netloc
-    object_prefix = parsed_uri.path.lstrip("/")
+    bucket_name, object_prefix = _parse_gcs_uri(source_uri)
 
     timeframe_start = _parse_utc_timestamp(timeframe["start"])
     timeframe_end = _parse_utc_timestamp(timeframe["end"])
@@ -61,6 +59,13 @@ def load(
         )
 
     return {"frames": frames}
+
+
+def _parse_gcs_uri(source_uri: str) -> tuple[str, str]:
+    parsed_uri = urlparse(source_uri)
+    if parsed_uri.scheme != "gs" or not parsed_uri.netloc:
+        raise ValueError(f"Expected canonical gs:// GCS URI: {source_uri}")
+    return parsed_uri.netloc, parsed_uri.path.lstrip("/")
 
 
 def _parse_utc_timestamp(value: str) -> datetime:
