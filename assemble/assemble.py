@@ -2,6 +2,11 @@
 
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+_UK_TIMEZONE = ZoneInfo("Europe/London")
 
 
 def _age_to_bucket(age: int) -> int:
@@ -16,6 +21,13 @@ def _age_to_bucket(age: int) -> int:
     if age <= 65:
         return 4
     return 5
+
+
+def _parse_utc_timeframe_start(value: str) -> datetime:
+    return datetime.strptime(
+        value,
+        _TIMEFRAME_FORMAT,
+    ).replace(tzinfo=timezone.utc)
 
 
 def _create_event_id(event, event_index: int) -> str:
@@ -35,21 +47,33 @@ class Assemble:
     __slots__ = ()
 
     def __call__(
-        self, event_batch, demographics_batch
-    ):
+        self,
+        event_batch: dict,
+        demographics_batch: dict,
+        timeframe_start: str,
+    ) -> dict:
+        events = event_batch["events"]
+        if not events:
+            return {"rows": []}
+
+        timeframe_start_utc = _parse_utc_timeframe_start(timeframe_start)
         demographics_by_track = {
             result["track_id"]: (result["age"], result["sex"])
             for result in demographics_batch["results"]
         }
         rows = []
 
-        for event_index, event in enumerate(event_batch["events"]):
+        for event_index, event in enumerate(events):
+            absolute_utc = timeframe_start_utc + timedelta(
+                seconds=float(event["timestamp"])
+            )
+            absolute_uk = absolute_utc.astimezone(_UK_TIMEZONE)
             age, sex = demographics_by_track[event["track_id"]]
             rows.append(
                 {
                     "event_id": _create_event_id(event, event_index),
                     "event": event["event_type"],
-                    "timestamp": event["timestamp"],
+                    "ts": absolute_uk.isoformat(timespec="milliseconds"),
                     "sex": sex,
                     "age_bucket": _age_to_bucket(age),
                 }
