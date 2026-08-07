@@ -63,7 +63,7 @@ def _events_for_track(track, line_a, dx, dy, line_length):
 class Event:
     __slots__ = ()
 
-    def __call__(self, tracking_state, line_config):
+    def __call__(self, track_batch, line_config):
         point_a = line_config["point_a"]
         point_b = line_config["point_b"]
         line_a = (float(point_a["x"]), float(point_a["y"]))
@@ -72,7 +72,7 @@ class Event:
         dy = line_b[1] - line_a[1]
         line_length = hypot(dx, dy)
         events = []
-        for track in tracking_state["tracks"]:
+        for track in track_batch["tracks"]:
             if (
                 len(track["path"]) >= _MIN_EVENT_TRACK_POINTS
                 and line_length <= _GEOMETRY_EPSILON

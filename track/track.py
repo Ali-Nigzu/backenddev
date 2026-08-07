@@ -1,193 +1,331 @@
-"""Deterministic historical-anchor tracking stage."""
-
-_LOCATION_HISTORY_WINDOW_FRAMES = 7
-_ANCHOR_WEIGHT_EXPONENT = 1.0
-_MAX_ANCHOR_DISTANCE_PX = 100.0
-_ANCHOR_TIE_DISTANCE_PX = 20.0
-_CONFIRMATION_HITS = 3
-_ACTIVE_TIMEOUT_FRAMES = 30
-_TENTATIVE_TIMEOUT_FRAMES = 15
+"""Stateless, deterministic DetectionBatch -> TrackBatch tracking stage."""
 
 import math
-from typing import Iterable, Sequence
+
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+from .config import (
+    ACTIVATION_HITS,
+    ACTIVE_TIMEOUT_SECONDS,
+    BOOTSTRAP_ACTIVATION_HITS,
+    BOOTSTRAP_WINDOW_FRAMES,
+    CENTRE_PROCESS_NOISE,
+    HIGH_CONFIDENCE_THRESHOLD,
+    INITIAL_VELOCITY_VARIANCE,
+    IOU_COST_WEIGHT,
+    LOW_CONFIDENCE_THRESHOLD,
+    MAHALANOBIS_GATE,
+    MEASUREMENT_CENTRE_NOISE,
+    MEASUREMENT_SIZE_NOISE,
+    MOTION_COST_WEIGHT,
+    PRIMARY_MAX_COST,
+    RECOVERY_MAX_COST,
+    SIZE_PROCESS_NOISE,
+    TENTATIVE_TIMEOUT_SECONDS,
+)
+
+_TENTATIVE = "tentative"
+_ACTIVE = "active"
+_CLOSED = "closed"
+_MIN_BOX_SIZE = 1e-3
+_IMPOSSIBLE_COST = 1e6
 
 
-def _track_sort_key(track) -> tuple:
-    track_id = str(track["track_id"])
-    return (0, int(track_id), track_id) if track_id.isdecimal() else (1, track_id)
-
-
-def _historical_anchor(path) -> tuple[float, float]:
-    window = min(len(path), _LOCATION_HISTORY_WINDOW_FRAMES)
-    points = path[-window:]
-    total_weight = 0.0
-    weighted_x = 0.0
-    weighted_y = 0.0
-    for index, point in enumerate(points, start=1):
-        weight = float(index) ** _ANCHOR_WEIGHT_EXPONENT
-        total_weight += weight
-        weighted_x += point["centre"]["x"] * weight
-        weighted_y += point["centre"]["y"] * weight
-    return weighted_x / total_weight, weighted_y / total_weight
-
-
-def _beats(current: tuple[int, int, float] | None, challenger: tuple[int, int, float], tie_keys: Sequence[tuple]) -> bool:
-    if current is None:
-        return True
-    distance_delta = challenger[2] - current[2]
-    if abs(distance_delta) > _ANCHOR_TIE_DISTANCE_PX:
-        return distance_delta < 0
-    return (tie_keys[challenger[0]], challenger[1], challenger[0]) < (tie_keys[current[0]], current[1], current[0])
-
-
-def _best_for_detection(candidates: Iterable[tuple[int, int, float]], tie_keys: Sequence[tuple]) -> tuple[int, int, float] | None:
-    best = None
-    for candidate in candidates:
-        if _beats(best, candidate, tie_keys):
-            best = candidate
-    return best
-
-
-def _match_tier(
-    tracks: Sequence[dict],
-    detections: Sequence[dict],
-    statuses: Sequence[str],
-    track_indices: Sequence[int],
-    detection_indices: Sequence[int],
-) -> tuple[list[tuple[int, int]], list[int]]:
-    candidates_by_detection: dict[int, list[tuple[int, int, float]]] = {index: [] for index in detection_indices}
-    for track_index in track_indices:
-        anchor_x, anchor_y = _historical_anchor(tracks[track_index]["path"])
-        for detection_index in detection_indices:
-            detection_centre = detections[detection_index]["centre"]
-            candidate_distance = math.hypot(
-                anchor_x - detection_centre["x"],
-                anchor_y - detection_centre["y"],
-            )
-            if candidate_distance <= _MAX_ANCHOR_DISTANCE_PX:
-                candidates_by_detection[detection_index].append((track_index, detection_index, candidate_distance))
-
-    tie_keys = [
-        (0 if status == "active" else 1, -len(track["path"]), _track_sort_key(track))
-        for track, status in zip(tracks, statuses)
-    ]
-    used_tracks: set[int] = set()
-    used_detections: set[int] = set()
-    matches: list[tuple[int, int, float]] = []
-
-    while True:
-        proposals: list[tuple[int, int, float]] = []
-        for detection_index in detection_indices:
-            if detection_index in used_detections:
-                continue
-            best = _best_for_detection(
-                (
-                    candidate
-                    for candidate in candidates_by_detection.get(detection_index, ())
-                    if candidate[0] not in used_tracks
-                ),
-                tie_keys,
-            )
-            if best is not None:
-                proposals.append(best)
-
-        if not proposals:
-            break
-
-        chosen = _best_for_detection(proposals, tie_keys)
-        matches.append(chosen)
-        used_tracks.add(chosen[0])
-        used_detections.add(chosen[1])
-
-    return (
-        [(track_index, detection_index) for track_index, detection_index, _distance in matches],
-        [index for index in detection_indices if index not in used_detections],
+def _measurement(detection: dict) -> np.ndarray:
+    bbox = detection["bbox"]
+    return np.array(
+        [
+            float(detection["centre"]["x"]),
+            float(detection["centre"]["y"]),
+            max(float(bbox["x2"]) - float(bbox["x1"]), _MIN_BOX_SIZE),
+            max(float(bbox["y2"]) - float(bbox["y1"]), _MIN_BOX_SIZE),
+        ],
+        dtype=np.float64,
     )
 
-def _classify_track(track: dict, current_frame_number: float) -> str:
-    frame_delta = current_frame_number - track["path"][-1]["timestamp"]
-    if len(track["path"]) >= _CONFIRMATION_HITS:
-        return "active" if int(frame_delta) <= _ACTIVE_TIMEOUT_FRAMES else "inactive"
 
-    return "tentative" if int(frame_delta) <= _TENTATIVE_TIMEOUT_FRAMES else "inactive"
+def _measurement_covariance(measurement: np.ndarray) -> np.ndarray:
+    width = max(float(measurement[2]), _MIN_BOX_SIZE)
+    height = max(float(measurement[3]), _MIN_BOX_SIZE)
+    standard_deviations = np.array(
+        [
+            max(width * MEASUREMENT_CENTRE_NOISE, 1.0),
+            max(height * MEASUREMENT_CENTRE_NOISE, 1.0),
+            max(width * MEASUREMENT_SIZE_NOISE, 1.0),
+            max(height * MEASUREMENT_SIZE_NOISE, 1.0),
+        ],
+        dtype=np.float64,
+    )
+    return np.diag(standard_deviations**2)
 
 
-def _append_detection(track, detection, frame_id: str, frame_number: float) -> None:
-    track["path"].append({"timestamp": frame_number, "centre": dict(detection["centre"])})
+def _new_kalman_state(detection: dict) -> tuple[np.ndarray, np.ndarray]:
+    measurement = _measurement(detection)
+    state = np.zeros(8, dtype=np.float64)
+    state[:4] = measurement
+    covariance = np.zeros((8, 8), dtype=np.float64)
+    covariance[:4, :4] = _measurement_covariance(measurement)
+    covariance[4:, 4:] = np.eye(4, dtype=np.float64) * INITIAL_VELOCITY_VARIANCE
+    return state, covariance
+
+
+def _predict(track: dict, timestamp: float) -> None:
+    dt = timestamp - track["last_prediction_timestamp"]
+    transition = np.eye(8, dtype=np.float64)
+    transition[:4, 4:] = np.eye(4, dtype=np.float64) * dt
+
+    process_covariance = np.zeros((8, 8), dtype=np.float64)
+    for index, noise in enumerate(
+        (CENTRE_PROCESS_NOISE, CENTRE_PROCESS_NOISE, SIZE_PROCESS_NOISE, SIZE_PROCESS_NOISE)
+    ):
+        variance = noise**2
+        process_covariance[index, index] = variance * dt**4 / 4.0
+        process_covariance[index, index + 4] = variance * dt**3 / 2.0
+        process_covariance[index + 4, index] = variance * dt**3 / 2.0
+        process_covariance[index + 4, index + 4] = variance * dt**2
+
+    track["state"] = transition @ track["state"]
+    track["state"][2:4] = np.maximum(track["state"][2:4], _MIN_BOX_SIZE)
+    track["covariance"] = (
+        transition @ track["covariance"] @ transition.T + process_covariance
+    )
+    track["covariance"] = (track["covariance"] + track["covariance"].T) / 2.0
+    track["last_prediction_timestamp"] = timestamp
+
+
+def _innovation(track: dict, detection: dict) -> tuple[np.ndarray, np.ndarray, float]:
+    measurement = _measurement(detection)
+    residual = measurement - track["state"][:4]
+    innovation_covariance = (
+        track["covariance"][:4, :4] + _measurement_covariance(measurement)
+    )
+    solved = np.linalg.solve(innovation_covariance, residual)
+    distance = float(residual @ solved)
+    return residual, innovation_covariance, max(distance, 0.0)
+
+
+def _predicted_bbox(track: dict) -> tuple[float, float, float, float]:
+    centre_x, centre_y, width, height = track["state"][:4]
+    width = max(float(width), _MIN_BOX_SIZE)
+    height = max(float(height), _MIN_BOX_SIZE)
+    return (
+        float(centre_x) - width / 2.0,
+        float(centre_y) - height / 2.0,
+        float(centre_x) + width / 2.0,
+        float(centre_y) + height / 2.0,
+    )
+
+
+def _iou(track: dict, detection: dict) -> float:
+    left_a, top_a, right_a, bottom_a = _predicted_bbox(track)
+    bbox = detection["bbox"]
+    left_b, top_b, right_b, bottom_b = (
+        float(bbox[key]) for key in ("x1", "y1", "x2", "y2")
+    )
+    intersection_width = max(0.0, min(right_a, right_b) - max(left_a, left_b))
+    intersection_height = max(0.0, min(bottom_a, bottom_b) - max(top_a, top_b))
+    intersection = intersection_width * intersection_height
+    area_a = max(0.0, right_a - left_a) * max(0.0, bottom_a - top_a)
+    area_b = max(0.0, right_b - left_b) * max(0.0, bottom_b - top_b)
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0.0 else 0.0
+
+
+def _associate(
+    tracks: list[dict], detections: list[dict], maximum_cost: float
+) -> tuple[list[tuple[int, int]], list[int], list[int]]:
+    if not tracks or not detections:
+        return [], list(range(len(tracks))), list(range(len(detections)))
+
+    costs = np.full((len(tracks), len(detections)), _IMPOSSIBLE_COST, dtype=np.float64)
+    allowed = np.zeros(costs.shape, dtype=bool)
+    for track_index, track in enumerate(tracks):
+        for detection_index, detection in enumerate(detections):
+            _residual, _innovation_covariance, distance = _innovation(track, detection)
+            if not math.isfinite(distance) or distance > MAHALANOBIS_GATE:
+                continue
+            motion_cost = min(distance / MAHALANOBIS_GATE, 1.0)
+            iou_cost = 1.0 - _iou(track, detection)
+            costs[track_index, detection_index] = (
+                MOTION_COST_WEIGHT * motion_cost + IOU_COST_WEIGHT * iou_cost
+            )
+            allowed[track_index, detection_index] = True
+
+    matched_tracks: set[int] = set()
+    matched_detections: set[int] = set()
+    matches = []
+    row_indices, column_indices = linear_sum_assignment(costs)
+    for track_index, detection_index in zip(row_indices, column_indices, strict=True):
+        if allowed[track_index, detection_index] and costs[track_index, detection_index] <= maximum_cost:
+            matches.append((int(track_index), int(detection_index)))
+            matched_tracks.add(int(track_index))
+            matched_detections.add(int(detection_index))
+
+    return (
+        matches,
+        [index for index in range(len(tracks)) if index not in matched_tracks],
+        [index for index in range(len(detections)) if index not in matched_detections],
+    )
+
+
+def _update(track: dict, detection: dict, frame_id: str, timestamp: float) -> None:
+    measurement = _measurement(detection)
+    residual, innovation_covariance, _distance = _innovation(track, detection)
+    cross_covariance = track["covariance"][:, :4]
+    kalman_gain = np.linalg.solve(innovation_covariance, cross_covariance.T).T
+    track["state"] = track["state"] + kalman_gain @ residual
+    track["state"][2:4] = np.maximum(track["state"][2:4], _MIN_BOX_SIZE)
+
+    identity = np.eye(8, dtype=np.float64)
+    measurement_matrix = np.zeros((4, 8), dtype=np.float64)
+    measurement_matrix[:, :4] = np.eye(4, dtype=np.float64)
+    remainder = identity - kalman_gain @ measurement_matrix
+    measurement_covariance = _measurement_covariance(measurement)
+    track["covariance"] = (
+        remainder @ track["covariance"] @ remainder.T
+        + kalman_gain @ measurement_covariance @ kalman_gain.T
+    )
+    track["covariance"] = (track["covariance"] + track["covariance"].T) / 2.0
+    track["last_observed_timestamp"] = timestamp
+    track["hits"] += 1
+    track["path"].append(
+        {"timestamp": timestamp, "centre": dict(detection["centre"])}
+    )
     confidence = detection["confidence"]
     if confidence > track["best_crop_confidence"]:
         track["best_crop"] = {"frame_id": frame_id, "bbox": dict(detection["bbox"])}
         track["best_crop_confidence"] = confidence
+    if track["status"] == _TENTATIVE and track["hits"] >= track["required_hits"]:
+        track["status"] = _ACTIVE
+        track["reached_active"] = True
 
 
-def _create_track(detection, frame_id: str, frame_number: float, track_id: str) -> dict:
+def _create_track(
+    detection: dict, frame_id: str, timestamp: float, frame_index: int, track_id: int
+) -> dict:
+    state, covariance = _new_kalman_state(detection)
+    required_hits = (
+        BOOTSTRAP_ACTIVATION_HITS
+        if frame_index < BOOTSTRAP_WINDOW_FRAMES
+        else ACTIVATION_HITS
+    )
+    reached_active = required_hits <= 1
     return {
-        "track_id": track_id,
-        "path": [{"timestamp": frame_number, "centre": dict(detection["centre"])}],
+        "track_id": str(track_id),
+        "path": [{"timestamp": timestamp, "centre": dict(detection["centre"])}],
         "best_crop": {"frame_id": frame_id, "bbox": dict(detection["bbox"])},
         "best_crop_confidence": detection["confidence"],
+        "state": state,
+        "covariance": covariance,
+        "status": _ACTIVE if reached_active else _TENTATIVE,
+        "hits": 1,
+        "last_observed_timestamp": timestamp,
+        "last_prediction_timestamp": timestamp,
+        "required_hits": required_hits,
+        "reached_active": reached_active,
     }
 
 
-def _next_numeric_track_id(tracks) -> int:
-    max_numeric_id = 0
-    for track in tracks:
-        track_id = str(track["track_id"])
-        if track_id.isdecimal():
-            max_numeric_id = max(max_numeric_id, int(track_id))
-    return max_numeric_id + 1
-
-
-def _process_frame(tracking_state, frame_detections, next_id: int):
-    frame_number = frame_detections["timestamp"]
-    frame_id = frame_detections["frame_id"]
-
-    ordered_detections = [
-        detection
-        for _index, detection in sorted(
-            enumerate(frame_detections["detections"]),
-            key=lambda item: (str(item[1]["detection_id"]), item[0]),
-        )
-    ]
-
-    statuses = []
-    active_track_indices = []
-    tentative_track_indices = []
-    for index, track in enumerate(tracking_state["tracks"]):
-        status = _classify_track(track, frame_number)
-        statuses.append(status)
-        if status == "active":
-            active_track_indices.append(index)
-        elif status == "tentative":
-            tentative_track_indices.append(index)
-    all_detection_indices = range(len(ordered_detections))
-
-    active_matches, remaining_detection_indices = _match_tier(
-        tracking_state["tracks"], ordered_detections, statuses, active_track_indices, all_detection_indices
+def _expire(track: dict, timestamp: float) -> None:
+    elapsed = timestamp - track["last_observed_timestamp"]
+    timeout = (
+        TENTATIVE_TIMEOUT_SECONDS if track["status"] == _TENTATIVE else ACTIVE_TIMEOUT_SECONDS
     )
-    tentative_matches, remaining_detection_indices = _match_tier(
-        tracking_state["tracks"], ordered_detections, statuses, tentative_track_indices, remaining_detection_indices
-    )
+    if elapsed > timeout:
+        track["status"] = _CLOSED
 
-    for state_track_index, detection_index in sorted(active_matches + tentative_matches):
-        _append_detection(tracking_state["tracks"][state_track_index], ordered_detections[detection_index], frame_id, frame_number)
 
-    for detection_index in sorted(remaining_detection_indices):
-        tracking_state["tracks"].append(_create_track(ordered_detections[detection_index], frame_id, frame_number, str(next_id)))
-        next_id += 1
-
-    tracking_state["tracks"].sort(key=_track_sort_key)
-    return tracking_state, next_id
+def _public_track(track: dict) -> dict:
+    return {
+        "track_id": track["track_id"],
+        "path": track["path"],
+        "best_crop": track["best_crop"],
+        "best_crop_confidence": track["best_crop_confidence"],
+    }
 
 
 class Track:
+    """Process one complete DetectionBatch without retaining cross-call state."""
+
     __slots__ = ()
 
-    def __call__(self, tracking_state, detection_batch):
-        tracking_state["tracks"].sort(key=_track_sort_key)
-        next_id = _next_numeric_track_id(tracking_state["tracks"])
-        for frame_detections in detection_batch["detections"]:
-            tracking_state, next_id = _process_frame(
-                tracking_state, frame_detections, next_id
+    def __call__(self, detection_batch: dict) -> dict:
+        indexed_frames = []
+        for original_index, frame in enumerate(detection_batch["detections"]):
+            timestamp = float(frame["timestamp"])
+            if not math.isfinite(timestamp):
+                raise ValueError("Frame timestamps must be finite")
+            indexed_frames.append((timestamp, str(frame["frame_id"]), original_index, frame))
+        indexed_frames.sort(key=lambda item: item[:3])
+
+        tracks: list[dict] = []
+        next_track_id = 1
+        for frame_index, (timestamp, _frame_key, _original_index, frame) in enumerate(indexed_frames):
+            frame_id = frame["frame_id"]
+            detections = [
+                detection
+                for _index, detection in sorted(
+                    enumerate(frame["detections"]),
+                    key=lambda item: (str(item[1]["detection_id"]), item[0]),
+                )
+            ]
+            high_detections = [
+                detection
+                for detection in detections
+                if detection["confidence"] >= HIGH_CONFIDENCE_THRESHOLD
+            ]
+            low_detections = [
+                detection
+                for detection in detections
+                if LOW_CONFIDENCE_THRESHOLD
+                <= detection["confidence"]
+                < HIGH_CONFIDENCE_THRESHOLD
+            ]
+
+            eligible_tracks = [track for track in tracks if track["status"] != _CLOSED]
+            for track in eligible_tracks:
+                _predict(track, timestamp)
+                _expire(track, timestamp)
+            eligible_tracks = [track for track in eligible_tracks if track["status"] != _CLOSED]
+
+            primary_matches, unmatched_track_indices, unmatched_high_indices = _associate(
+                eligible_tracks, high_detections, PRIMARY_MAX_COST
             )
-        return tracking_state
+            for track_index, detection_index in primary_matches:
+                _update(
+                    eligible_tracks[track_index], high_detections[detection_index], frame_id, timestamp
+                )
+
+            recovery_tracks = [
+                eligible_tracks[index]
+                for index in unmatched_track_indices
+                if eligible_tracks[index]["status"] == _ACTIVE
+            ]
+            recovery_matches, _unmatched_recovery, _unmatched_low = _associate(
+                recovery_tracks, low_detections, RECOVERY_MAX_COST
+            )
+            for track_index, detection_index in recovery_matches:
+                _update(
+                    recovery_tracks[track_index], low_detections[detection_index], frame_id, timestamp
+                )
+
+            for detection_index in unmatched_high_indices:
+                tracks.append(
+                    _create_track(
+                        high_detections[detection_index],
+                        frame_id,
+                        timestamp,
+                        frame_index,
+                        next_track_id,
+                    )
+                )
+                next_track_id += 1
+
+        return {
+            "tracks": [
+                _public_track(track)
+                for track in tracks
+                if track["reached_active"]
+            ]
+        }

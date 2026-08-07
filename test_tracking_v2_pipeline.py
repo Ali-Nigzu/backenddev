@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -80,7 +81,7 @@ def create_video_writer(output_path: Path, fps: float, frame_size: tuple[int, in
 def draw_replay(
     frame_batch: dict[str, Any],
     detection_batch: dict[str, Any],
-    tracking_state: dict[str, Any],
+    track_batch: dict[str, Any],
     output_path: Path,
     fps: float,
     frame_size: tuple[int, int],
@@ -91,7 +92,7 @@ def draw_replay(
             round(float(point["centre"]["x"]), 6),
             round(float(point["centre"]["y"]), 6),
         ): str(track["track_id"])
-        for track in tracking_state["tracks"]
+        for track in track_batch["tracks"]
         for point in track["path"]
     }
     writer = create_video_writer(output_path, fps, frame_size)
@@ -159,15 +160,23 @@ def main() -> None:
     fps = get_replay_fps(frame_batch)
 
     detection_batch = Detect()(frame_batch)
-    tracking_state = Track()(
-        {"tracks": []},
-        detection_batch,
-    )
+    track_started = time.perf_counter()
+    track_batch = Track()(detection_batch)
+    track_seconds = time.perf_counter() - track_started
 
     event_batch = Event()(
-        tracking_state,
+        track_batch,
         LINE_CONFIG,
     )
+
+    track_lengths = [len(track["path"]) for track in track_batch["tracks"]]
+    average_length = sum(track_lengths) / len(track_lengths) if track_lengths else 0.0
+    print(f"Track runtime: {track_seconds:.3f}s")
+    print(f"Tracks returned: {len(track_lengths)}")
+    print(f"Average observations per Track: {average_length:.2f}")
+    print(f"Shortest Track: {min(track_lengths) if track_lengths else 0}")
+    print(f"Longest Track: {max(track_lengths) if track_lengths else 0}")
+    print(f"Events produced: {len(event_batch['events'])}")
 
     demographics_batch = Demographic()(event_batch, frame_batch)
     output_batch = Assemble()(
@@ -176,8 +185,8 @@ def main() -> None:
         TIMEFRAME["start"],
     )
     del event_batch, demographics_batch
-    draw_replay(frame_batch, detection_batch, tracking_state, replay_path, fps, frame_size)
-    del frame_batch, detection_batch, tracking_state
+    draw_replay(frame_batch, detection_batch, track_batch, replay_path, fps, frame_size)
+    del frame_batch, detection_batch, track_batch
     write_output_batch(output_batch, output_batch_path)
     print(json.dumps(output_batch, sort_keys=True))
 
