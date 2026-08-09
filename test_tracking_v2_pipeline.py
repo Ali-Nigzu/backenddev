@@ -20,10 +20,7 @@ from track import Track
 
 DEFAULT_REPLAY_PATH = "output/tracking_replay.mp4"
 DEFAULT_OUTPUT_BATCH_PATH = "output/output_batch.json"
-SOURCE_URI = (
-    "gs://camostesting/"
-    "Orgs/Sites/Devices/TestCamera/"
-)
+SOURCE_URI = "gs://camostesting/" "Orgs/Sites/Devices/TestCamera/"
 TIMEFRAME = {
     "start": "2026-08-04T11:38:55.000Z",
     "end": "2026-08-04T11:39:05.000Z",
@@ -39,7 +36,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the real Detect -> Track -> Event -> Demographic -> Assemble pipeline."
     )
-    parser.add_argument("--output", default=DEFAULT_REPLAY_PATH, help="Annotated replay path")
+    parser.add_argument(
+        "--output", default=DEFAULT_REPLAY_PATH, help="Annotated replay path"
+    )
     parser.add_argument(
         "--output-batch",
         default=DEFAULT_OUTPUT_BATCH_PATH,
@@ -61,11 +60,15 @@ def get_replay_fps(frame_batch: dict[str, Any]) -> float:
         if later - earlier > 0.0
     ]
     if not positive_intervals:
-        raise ValueError("Cannot derive replay FPS from fewer than two distinct frame timestamps")
+        raise ValueError(
+            "Cannot derive replay FPS from fewer than two distinct frame timestamps"
+        )
     return 1.0 / median(positive_intervals)
 
 
-def create_video_writer(output_path: Path, fps: float, frame_size: tuple[int, int]) -> cv2.VideoWriter:
+def create_video_writer(
+    output_path: Path, fps: float, frame_size: tuple[int, int]
+) -> cv2.VideoWriter:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
         str(output_path),
@@ -109,7 +112,12 @@ def draw_replay(
                 )
                 centre = detection["centre"]
                 track_id = track_ids_by_timestamp_centre.get(
-                    (timestamp, round(float(centre["x"]), 6), round(float(centre["y"]), 6)), "?"
+                    (
+                        timestamp,
+                        round(float(centre["x"]), 6),
+                        round(float(centre["y"]), 6),
+                    ),
+                    "?",
                 )
                 cv2.rectangle(bgr_output, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(
@@ -154,7 +162,9 @@ def main() -> None:
         service_account_info,
     )
     if not frame_batch["frames"]:
-        raise ValueError("No timestamp-named JPG frames found in the configured timeframe")
+        raise ValueError(
+            "No timestamp-named JPG frames found in the configured timeframe"
+        )
 
     frame_size = get_frame_size(frame_batch)
     fps = get_replay_fps(frame_batch)
@@ -171,11 +181,22 @@ def main() -> None:
 
     track_lengths = [len(track["path"]) for track in track_batch["tracks"]]
     average_length = sum(track_lengths) / len(track_lengths) if track_lengths else 0.0
+    median_length = median(track_lengths) if track_lengths else 0.0
+    assigned_observations = sum(track_lengths)
+    detection_count = sum(
+        len(frame_detections["detections"])
+        for frame_detections in detection_batch["detections"]
+    )
     print(f"Track runtime: {track_seconds:.3f}s")
     print(f"Tracks returned: {len(track_lengths)}")
     print(f"Average observations per Track: {average_length:.2f}")
+    print(f"Median observations per Track: {median_length:.2f}")
+    print(
+        f"Short Tracks (<=3 observations): {sum(length <= 3 for length in track_lengths)}"
+    )
     print(f"Shortest Track: {min(track_lengths) if track_lengths else 0}")
     print(f"Longest Track: {max(track_lengths) if track_lengths else 0}")
+    print(f"Unassigned/? detections: {max(detection_count - assigned_observations, 0)}")
     print(f"Events produced: {len(event_batch['events'])}")
 
     demographics_batch = Demographic()(event_batch, frame_batch)
