@@ -127,13 +127,6 @@ class Demographic:
         images_by_frame_id = {
             frame["frame_id"]: frame["image"] for frame in frame_batch["frames"]
         }
-        for descriptor in descriptors:
-            _timestamp, track_id, frame_id, _bbox = descriptor
-            if frame_id not in images_by_frame_id:
-                raise RuntimeError(
-                    f"Missing source frame: track_id={track_id} "
-                    f"frame_id={frame_id}"
-                )
 
         self._load()
         results = []
