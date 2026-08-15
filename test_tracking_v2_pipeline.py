@@ -1,10 +1,10 @@
-"""Minimal real integration runner for Detect -> Track -> Event -> Demographic -> Assemble."""
+"""Real GCS-to-BigQuery pipeline runner with replay and batch diagnostics."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
+import os
 import time
 from pathlib import Path
 from statistics import median
@@ -17,17 +17,23 @@ from demographics import Demographic
 from detect import Detect
 from events import Event
 from load.load import load
+from send import Send
 from track import Track
 
 DEFAULT_REPLAY_PATH = "output/tracking_replay.mp4"
 DEFAULT_OUTPUT_BATCH_PATH = "output/output_batch.json"
-DEFAULT_LOCAL_VIDEO_PATH = Path(__file__).resolve().parent / "test03fps.mp4"
 SOURCE_URI = "gs://camostesting/" "Orgs/Sites/Devices/TestCamera/"
 TIMEFRAME = {
     "start": "2026-08-04T11:38:55.000Z",
     "end": "2026-08-04T11:39:05.000Z",
 }
 SERVICE_ACCOUNT_PATH = Path(__file__).resolve().parent / "TestAdminSA.json"
+BIGQUERY_DESTINATION = (
+    "https://console.cloud.google.com/bigquery"
+    "?ws=!1m5!1m4!4m3!1scamosbase"
+    "!2sOrg_Test01"
+    "!3sSite_Test01_Logs"
+)
 LINE_CONFIG = {
     "point_a": {"x": 100.0, "y": 300.0},
     "point_b": {"x": 700.0, "y": 300.0},
@@ -36,7 +42,7 @@ LINE_CONFIG = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the real Detect -> Track -> Event -> Demographic -> Assemble pipeline."
+        description="Run the real GCS -> Analyze -> BigQuery pipeline."
     )
     parser.add_argument(
         "--output", default=DEFAULT_REPLAY_PATH, help="Annotated replay path"
@@ -46,79 +52,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT_BATCH_PATH,
         help="OutputBatch JSON path",
     )
-    parser.add_argument(
-        "--local-video",
-        type=Path,
-        default=DEFAULT_LOCAL_VIDEO_PATH,
-        help="Local MP4 used automatically if GCS loading fails",
-    )
     return parser.parse_args()
-
-
-def load_local_video(video_path: Path) -> dict[str, Any]:
-    if not video_path.is_file():
-        raise FileNotFoundError(f"Local fallback video not found: {video_path}")
-
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        capture.release()
-        raise ValueError(f"Cannot open local fallback video: {video_path}")
-
-    fps = float(capture.get(cv2.CAP_PROP_FPS))
-    if not math.isfinite(fps) or fps <= 0.0:
-        fps = 3.0
-
-    frames = []
-    frame_index = 0
-    try:
-        while True:
-            decoded, bgr_image = capture.read()
-            if not decoded:
-                break
-            frames.append(
-                {
-                    "frame_id": f"local:{video_path.name}:{frame_index:08d}",
-                    "timestamp": frame_index / fps,
-                    "image": cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB),
-                }
-            )
-            frame_index += 1
-    finally:
-        capture.release()
-
-    if not frames:
-        raise ValueError(f"No frames decoded from local fallback video: {video_path}")
-
-    print("Frame source: LOCAL VIDEO")
-    print(f"Local video: {video_path.resolve()}")
-    print(f"Frames loaded: {len(frames)}")
-    print(f"FPS: {fps:.3f}")
-    return {"frames": frames}
-
-
-def get_frame_batch(local_video_path: Path) -> dict[str, Any]:
-    try:
-        print("Frame source: trying GCS")
-        with SERVICE_ACCOUNT_PATH.open(encoding="utf-8") as file:
-            service_account_info = json.load(file)
-
-        frame_batch = load(
-            SOURCE_URI,
-            TIMEFRAME,
-            service_account_info,
-        )
-        if not frame_batch["frames"]:
-            raise ValueError(
-                "No timestamp-named JPG frames found in the configured timeframe"
-            )
-
-        print("Frame source: GCS")
-        print(f"Frames loaded: {len(frame_batch['frames'])}")
-        return frame_batch
-    except Exception as exc:
-        print("GCS frame load failed:")
-        print(f"{type(exc).__name__}: {exc}")
-        return load_local_video(local_video_path)
 
 
 def get_frame_size(frame_batch: dict[str, Any]) -> tuple[int, int]:
@@ -227,7 +161,21 @@ def main() -> None:
     replay_path = Path(args.output)
     output_batch_path = Path(args.output_batch)
 
-    frame_batch = get_frame_batch(args.local_video)
+    os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", str(SERVICE_ACCOUNT_PATH))
+    with SERVICE_ACCOUNT_PATH.open(encoding="utf-8") as file:
+        service_account_info = json.load(file)
+
+    frame_batch = load(
+        SOURCE_URI,
+        TIMEFRAME,
+        service_account_info,
+    )
+    if not frame_batch["frames"]:
+        raise ValueError(
+            "No timestamp-named JPG frames found in the configured timeframe"
+        )
+    print("Frame source: GCS")
+    print(f"Frames loaded: {len(frame_batch['frames'])}")
 
     frame_size = get_frame_size(frame_batch)
     fps = get_replay_fps(frame_batch)
@@ -268,6 +216,7 @@ def main() -> None:
         demographics_batch,
         TIMEFRAME["start"],
     )
+    Send()(output_batch, BIGQUERY_DESTINATION)
     del event_batch, demographics_batch
     draw_replay(frame_batch, detection_batch, track_batch, replay_path, fps, frame_size)
     del frame_batch, detection_batch, track_batch
