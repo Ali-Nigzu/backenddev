@@ -148,8 +148,7 @@ def draw_replay(
 
 def write_output_batch(payload: dict[str, Any], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "
-")
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def main() -> None:
