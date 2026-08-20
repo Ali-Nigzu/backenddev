@@ -16,28 +16,15 @@ from assemble import Assemble
 from demographics import Demographic
 from detect import Detect
 from events import Event
+from initialise import initialise
 from load.load import load
 from send import Send
 from track import Track
 
 DEFAULT_REPLAY_PATH = "output/tracking_replay.mp4"
 DEFAULT_OUTPUT_BATCH_PATH = "output/output_batch.json"
-SOURCE_URI = "gs://camostesting/" "Orgs/Sites/Devices/TestCamera/"
-TIMEFRAME = {
-    "start": "2026-08-04T11:38:55.000Z",
-    "end": "2026-08-04T11:39:05.000Z",
-}
+DEVICE_ID = 1
 SERVICE_ACCOUNT_PATH = Path(__file__).resolve().parent / "TestAdminSA.json"
-BIGQUERY_DESTINATION = (
-    "https://console.cloud.google.com/bigquery"
-    "?ws=!1m5!1m4!4m3!1scamosbase"
-    "!2sOrg_Test01"
-    "!3sSite_Test01_Logs"
-)
-LINE_CONFIG = {
-    "point_a": {"x": 100.0, "y": 300.0},
-    "point_b": {"x": 700.0, "y": 300.0},
-}
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,6 +80,7 @@ def draw_replay(
     frame_batch: dict[str, Any],
     detection_batch: dict[str, Any],
     track_batch: dict[str, Any],
+    analysis_config: dict[str, Any],
     output_path: Path,
     fps: float,
     frame_size: tuple[int, int],
@@ -140,8 +128,14 @@ def draw_replay(
                 )
             cv2.line(
                 bgr_output,
-                (int(LINE_CONFIG["point_a"]["x"]), int(LINE_CONFIG["point_a"]["y"])),
-                (int(LINE_CONFIG["point_b"]["x"]), int(LINE_CONFIG["point_b"]["y"])),
+                (
+                    int(analysis_config["point_a"]["x"]),
+                    int(analysis_config["point_a"]["y"]),
+                ),
+                (
+                    int(analysis_config["point_b"]["x"]),
+                    int(analysis_config["point_b"]["y"]),
+                ),
                 (255, 255, 255),
                 2,
                 cv2.LINE_AA,
@@ -165,9 +159,10 @@ def main() -> None:
     with SERVICE_ACCOUNT_PATH.open(encoding="utf-8") as file:
         service_account_info = json.load(file)
 
+    context = initialise(DEVICE_ID)
     frame_batch = load(
-        SOURCE_URI,
-        TIMEFRAME,
+        context["gcs_source_uri"],
+        context["timeframe"],
         service_account_info,
     )
     if not frame_batch["frames"]:
@@ -187,7 +182,7 @@ def main() -> None:
 
     event_batch = Event()(
         track_batch,
-        LINE_CONFIG,
+        context["analysis_config"],
     )
 
     track_lengths = [len(track["path"]) for track in track_batch["tracks"]]
@@ -214,11 +209,20 @@ def main() -> None:
     output_batch = Assemble()(
         event_batch,
         demographics_batch,
-        TIMEFRAME["start"],
+        context["timeframe"]["start"],
+        context["device_id"],
     )
-    Send()(output_batch, BIGQUERY_DESTINATION)
+    Send()(output_batch, context["bigquery_destination"])
     del event_batch, demographics_batch
-    draw_replay(frame_batch, detection_batch, track_batch, replay_path, fps, frame_size)
+    draw_replay(
+        frame_batch,
+        detection_batch,
+        track_batch,
+        context["analysis_config"],
+        replay_path,
+        fps,
+        frame_size,
+    )
     del frame_batch, detection_batch, track_batch
     write_output_batch(output_batch, output_batch_path)
     print(json.dumps(output_batch, sort_keys=True))
