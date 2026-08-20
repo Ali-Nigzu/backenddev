@@ -7,8 +7,6 @@ import os
 import time
 from pathlib import Path
 from statistics import median
-from typing import Any
-
 import cv2
 
 from assemble import Assemble
@@ -268,19 +266,14 @@ def Visualize(device_id: int, timeframe: dict) -> None:
         run_directory,
     )
     _write_json(run_directory / "data" / "summary.json", summary)
-
-    try:
-        demographics_batch = Demographic()(event_batch, frame_batch)
-        output_batch = Assemble()(
-            event_batch,
-            demographics_batch,
-            context["timeframe"]["start"],
-            context["device_id"],
-        )
-    except Exception:
-        raise
-    else:
-        _write_json(run_directory / "data" / "demographics.json", demographics_batch)
-        _write_json(run_directory / "data" / "output.json", output_batch)
-
     print(json.dumps(summary, sort_keys=True))
+
+    demographics_batch = Demographic()(event_batch, frame_batch)
+    output_batch = Assemble()(
+        event_batch,
+        demographics_batch,
+        context["timeframe"]["start"],
+        context["device_id"],
+    )
+    _write_json(run_directory / "data" / "demographics.json", demographics_batch)
+    _write_json(run_directory / "data" / "output.json", output_batch)
