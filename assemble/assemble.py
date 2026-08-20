@@ -6,7 +6,6 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
 _TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
-_TEMPORARY_DEVICE_ID = 0
 _MAX_SIGNED_INT64 = 2**63 - 1
 
 
@@ -51,6 +50,7 @@ class Assemble:
         event_batch: dict,
         demographics_batch: dict,
         timeframe_start: str,
+        device_id: int,
     ) -> dict:
         events = event_batch["events"]
         if not events:
@@ -75,7 +75,7 @@ class Assemble:
             sex_value = int(sex)
             age_bucket = int(_age_to_bucket(age))
             identity = (
-                _TEMPORARY_DEVICE_ID,
+                device_id,
                 timestamp,
                 event_value,
                 sex_value,
@@ -96,7 +96,7 @@ class Assemble:
                 identity_occurrences[identity] += 1
             rows.append(
                 {
-                    "device_id": _TEMPORARY_DEVICE_ID,
+                    "device_id": device_id,
                     "event_id": _create_event_id(identity, duplicate_occurrence),
                     "event": event_value,
                     "timestamp": timestamp,
