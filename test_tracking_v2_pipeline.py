@@ -20,6 +20,7 @@ from initialise import initialise
 from load.load import load
 from send import Send
 from track import Track
+from update import update
 
 DEFAULT_REPLAY_PATH = "output/tracking_replay.mp4"
 DEFAULT_OUTPUT_BATCH_PATH = "output/output_batch.json"
@@ -213,6 +214,10 @@ def main() -> None:
         context["device_id"],
     )
     Send()(output_batch, context["bigquery_destination"])
+    update(
+        context["device_id"],
+        context["timeframe"]["end"],
+    )
     del event_batch, demographics_batch
     draw_replay(
         frame_batch,
