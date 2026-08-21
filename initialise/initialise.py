@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from cloud_sql import cloud_sql_connection
+from initialise.cloud_sql import cloud_sql_connection
 
 _TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _FIRST_ANALYSIS_START = "2026-08-01T00:00:00.000Z"
