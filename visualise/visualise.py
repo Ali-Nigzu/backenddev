@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import csv
+import json
 import shutil
+import time
 from pathlib import Path
 from statistics import median
 import cv2
@@ -30,23 +31,13 @@ def _run_directory(device_id: int, timeframe: dict) -> Path:
     candidate = root / stem
     if candidate.exists():
         shutil.rmtree(candidate)
-    candidate.mkdir(parents=True)
+    (candidate / "tracks").mkdir(parents=True)
+    (candidate / "events").mkdir()
     return candidate
 
 
-def _write_events_csv(output_batch: dict, path: Path) -> None:
-    fieldnames = (
-        "device_id",
-        "event_id",
-        "event",
-        "timestamp",
-        "sex",
-        "age_bucket",
-    )
-    with path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(output_batch["rows"])
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _get_replay_fps(frame_batch: dict) -> float:
@@ -62,6 +53,43 @@ def _get_replay_fps(frame_batch: dict) -> float:
         )
     return 1.0 / median(intervals)
 
+
+def _write_crop(frames_by_id: dict, crop: dict, path: Path) -> None:
+    image = frames_by_id[crop["frame_id"]]
+    height, width = image.shape[:2]
+    bbox = crop["bbox"]
+    left = max(0, min(width, int(float(bbox["x1"]))))
+    top = max(0, min(height, int(float(bbox["y1"]))))
+    right = max(0, min(width, int(float(bbox["x2"]))))
+    bottom = max(0, min(height, int(float(bbox["y2"]))))
+    if right <= left or bottom <= top:
+        raise ValueError(f"Invalid crop for {path.name}")
+    if not cv2.imwrite(
+        str(path), cv2.cvtColor(image[top:bottom, left:right], cv2.COLOR_RGB2BGR)
+    ):
+        raise RuntimeError(f"Unable to write thumbnail: {path}")
+
+
+def _write_thumbnails(
+    track_batch: dict,
+    event_batch: dict,
+    frames_by_id: dict,
+    run_directory: Path,
+) -> None:
+    for track in track_batch["tracks"]:
+        _write_crop(
+            frames_by_id,
+            track["best_crop"],
+            run_directory / "tracks" / f"track-{track['track_id']}.jpg",
+        )
+    for event_index, event in enumerate(event_batch["events"], start=1):
+        _write_crop(
+            frames_by_id,
+            event["best_crop"],
+            run_directory
+            / "events"
+            / f"event-{event_index:03d}-track-{event['track_id']}.jpg",
+        )
 
 
 def _write_replay(
@@ -144,6 +172,43 @@ def _write_replay(
         writer.release()
 
 
+def _summary(
+    device_id: int,
+    timeframe: dict,
+    frame_batch: dict,
+    detection_batch: dict,
+    track_batch: dict,
+    event_batch: dict,
+    track_seconds: float,
+    run_directory: Path,
+) -> dict:
+    track_lengths = [len(track["path"]) for track in track_batch["tracks"]]
+    detection_count = sum(
+        len(frame_detections["detections"])
+        for frame_detections in detection_batch["detections"]
+    )
+    return {
+        "device_id": device_id,
+        "timeframe": timeframe,
+        "frames_loaded": len(frame_batch["frames"]),
+        "track_runtime_seconds": track_seconds,
+        "tracks_returned": len(track_lengths),
+        "average_observations_per_track": (
+            sum(track_lengths) / len(track_lengths) if track_lengths else 0.0
+        ),
+        "median_observations_per_track": median(track_lengths) if track_lengths else 0.0,
+        "short_tracks": sum(length <= 3 for length in track_lengths),
+        "shortest_track": min(track_lengths) if track_lengths else 0,
+        "longest_track": max(track_lengths) if track_lengths else 0,
+        "unassigned_detections": max(detection_count - sum(track_lengths), 0),
+        "events_produced": len(event_batch["events"]),
+        "event_track_ids": sorted(
+            {event["track_id"] for event in event_batch["events"]}
+        ),
+        "output_folder": str(run_directory),
+        "replay_path": str(run_directory / "replay.mp4"),
+    }
+
 
 def Visualise(device_id: int, timeframe: dict) -> None:
     """Run the real pipeline for a supplied timeframe and save local artifacts."""
@@ -159,10 +224,16 @@ def Visualise(device_id: int, timeframe: dict) -> None:
         raise ValueError("No timestamp-named JPG frames found in the supplied timeframe")
 
     detection_batch = Detect()(frame_batch)
+    track_started = time.perf_counter()
     track_batch = Track()(detection_batch)
+    track_seconds = time.perf_counter() - track_started
     event_batch = Event()(track_batch, context["analysis_config"])
+    frames_by_id = {
+        frame["frame_id"]: frame["image"] for frame in frame_batch["frames"]
+    }
     event_track_ids = {event["track_id"] for event in event_batch["events"]}
 
+    _write_thumbnails(track_batch, event_batch, frames_by_id, run_directory)
     _write_replay(
         frame_batch,
         detection_batch,
@@ -171,6 +242,20 @@ def Visualise(device_id: int, timeframe: dict) -> None:
         context["analysis_config"],
         run_directory / "replay.mp4",
     )
+    _write_json(run_directory / "tracks.json", track_batch)
+    _write_json(run_directory / "events.json", event_batch)
+    summary = _summary(
+        context["device_id"],
+        timeframe,
+        frame_batch,
+        detection_batch,
+        track_batch,
+        event_batch,
+        track_seconds,
+        run_directory,
+    )
+    _write_json(run_directory / "summary.json", summary)
+    print(json.dumps(summary, sort_keys=True))
 
     demographics_batch = Demographic()(event_batch, frame_batch)
     output_batch = Assemble()(
@@ -179,4 +264,5 @@ def Visualise(device_id: int, timeframe: dict) -> None:
         context["timeframe"]["start"],
         context["device_id"],
     )
-    _write_events_csv(output_batch, run_directory / "events.csv")
+    _write_json(run_directory / "demographics.json", demographics_batch)
+    _write_json(run_directory / "output.json", output_batch)
