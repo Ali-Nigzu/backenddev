@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from statistics import median
@@ -36,10 +37,8 @@ def _run_directory(device_id: int, timeframe: dict) -> Path:
         f"{window_part(timeframe['start'])}_{window_part(timeframe['end'])}"
     )
     candidate = root / stem
-    suffix = 2
-    while candidate.exists():
-        candidate = root / f"{stem}-{suffix}"
-        suffix += 1
+    if candidate.exists():
+        shutil.rmtree(candidate)
     (candidate / "tracks").mkdir(parents=True)
     (candidate / "events").mkdir()
     (candidate / "data").mkdir()
