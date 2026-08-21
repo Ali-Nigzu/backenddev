@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import time
 from pathlib import Path
@@ -18,13 +17,6 @@ from initialise import initialise
 from load.load import load
 from track import Track
 
-
-def _load_service_account_info() -> dict:
-    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if not credentials_path:
-        raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS must be configured")
-    with Path(credentials_path).open(encoding="utf-8") as file:
-        return json.load(file)
 
 
 def _run_directory(device_id: int, timeframe: dict) -> Path:
@@ -227,7 +219,6 @@ def Visualise(device_id: int, timeframe: dict) -> None:
     frame_batch = load(
         context["gcs_source_uri"],
         context["timeframe"],
-        _load_service_account_info(),
     )
     if not frame_batch["frames"]:
         raise ValueError("No timestamp-named JPG frames found in the supplied timeframe")

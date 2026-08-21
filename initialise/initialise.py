@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from initialise.cloud_sql import cloud_sql_connection
 
 _TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _FIRST_ANALYSIS_START = "2026-08-01T00:00:00.000Z"
+SA_PATH = Path(__file__).resolve().parent / "SA.json"
 _DEVICE_CONTEXT_QUERY = """
 SELECT
     devices.id,
@@ -36,6 +39,10 @@ def _decode_analysis_config(value: Any) -> Any:
 
 def initialise(device_id: int) -> dict:
     """Return the read-only processing context for a PostgreSQL device ID."""
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(SA_PATH)
+    if not SA_PATH.is_file():
+        raise FileNotFoundError(f"Service account file not found: {SA_PATH}")
+
     timeframe_end = _format_utc_timestamp(datetime.now(timezone.utc))
 
     try:

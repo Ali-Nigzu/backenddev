@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 
 from assemble import Assemble
 from demographics import Demographic
@@ -17,20 +15,14 @@ from track import Track
 from update import update
 from visualise import Visualise
 
-SERVICE_ACCOUNT_PATH = Path(__file__).resolve().parent / "TestAdminSA.json"
 DEVICE_ID = 1
 
 
 def main() -> None:
-    os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", str(SERVICE_ACCOUNT_PATH))
-    with SERVICE_ACCOUNT_PATH.open(encoding="utf-8") as file:
-        service_account_info = json.load(file)
-
     context = initialise(DEVICE_ID)
     frame_batch = load(
         context["gcs_source_uri"],
         context["timeframe"],
-        service_account_info,
     )
     detection_batch = Detect()(frame_batch)
     track_batch = Track()(detection_batch)

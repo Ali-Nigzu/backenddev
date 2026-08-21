@@ -9,7 +9,6 @@ from urllib.parse import urlparse
 import cv2
 import numpy as np
 from google.cloud import storage
-from google.oauth2 import service_account
 
 FRAME_FILENAME_FORMAT = "%Y-%m-%dT%H-%M-%S.%fZ.jpg"
 TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -18,7 +17,6 @@ TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 def load(
     source_uri: str,
     timeframe: dict,
-    service_account_info: dict,
 ) -> dict:
     """Return a FrameBatch for timestamp-named JPG frames in a GCS prefix and timeframe."""
     bucket_name, object_prefix = _parse_gcs_uri(source_uri)
@@ -26,11 +24,7 @@ def load(
     timeframe_start = _parse_utc_timestamp(timeframe["start"])
     timeframe_end = _parse_utc_timestamp(timeframe["end"])
 
-    credentials = service_account.Credentials.from_service_account_info(service_account_info)
-    client = storage.Client(
-        credentials=credentials,
-        project=service_account_info.get("project_id"),
-    )
+    client = storage.Client()
 
     selected_blobs = []
     for blob in client.list_blobs(bucket_name, prefix=object_prefix):
