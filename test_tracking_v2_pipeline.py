@@ -15,7 +15,7 @@ from load.load import load
 from send import Send
 from track import Track
 from update import update
-from visualize import Visualize
+from visualise import Visualise
 
 SERVICE_ACCOUNT_PATH = Path(__file__).resolve().parent / "TestAdminSA.json"
 DEVICE_ID = 1
@@ -50,10 +50,10 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-    # OPTIONAL LOCAL VISUALIZATION
+    # OPTIONAL LOCAL VISUALISATION
     # Comment out main() above when using this.
     #
-    # Visualize(
+    # Visualise(
     #     1,
     #     {
     #         "start": "2026-08-20T19:00:00.000Z",
