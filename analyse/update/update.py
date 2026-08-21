@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from initialise.cloud_sql import cloud_sql_connection
+from ..initialise.cloud_sql import cloud_sql_connection
 
 _UPDATE_ANALYZED_UNTIL = """
 UPDATE devices

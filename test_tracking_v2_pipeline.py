@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import json
-
-from analyze import Analyze
-from visualise import Visualise
+from analyse import Analyse
+from analyse.visualise import Visualise
 
 DEVICE_ID = 1
 
 
 def main() -> None:
-    output_batch = Analyze(DEVICE_ID)
-    print(json.dumps(output_batch, sort_keys=True))
+    success = Analyse(DEVICE_ID)
+    print(success)
 
 
 if __name__ == "__main__":

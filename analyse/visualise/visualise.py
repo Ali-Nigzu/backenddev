@@ -8,13 +8,13 @@ from pathlib import Path
 from statistics import median
 import cv2
 
-from assemble import Assemble
-from demographics import Demographic
-from detect import Detect
-from events import Event
-from initialise import initialise
-from load.load import load
-from track import Track
+from ..assemble import Assemble
+from ..demographics import Demographic
+from ..detect import Detect
+from ..events import Event
+from ..initialise import initialise
+from ..load import load
+from ..track import Track
 
 
 
