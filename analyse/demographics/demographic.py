@@ -1,5 +1,3 @@
-"""MiVOLO demographic inference for event body crops."""
-
 import math
 import threading
 from functools import lru_cache
@@ -20,7 +18,6 @@ _EXPECTED_OUTPUTS = 3
 _CPU_CHUNK_SIZE = 16
 _CUDA_CHUNK_SIZE = 64
 
-
 def _select_unique_tracks(events):
     by_track = {}
     for event in events:
@@ -31,7 +28,6 @@ def _select_unique_tracks(events):
         if existing is None or descriptor[0] < existing[0]:
             by_track[track_id] = descriptor
     return sorted(by_track.values(), key=lambda item: (item[0], item[1]))
-
 
 def _crop_body(image, descriptor):
     height, width = image.shape[:2]
@@ -46,7 +42,6 @@ def _crop_body(image, descriptor):
             f"frame_id={frame_id}"
         )
     return np.ascontiguousarray(image[top:bottom, left:right])
-
 
 def _letterbox_rgb(image):
     height, width = image.shape[:2]
@@ -64,10 +59,8 @@ def _letterbox_rgb(image):
         cv2.BORDER_CONSTANT, value=(0, 0, 0),
     )
 
-
 def _normalise_rgb(image):
     return (image.astype(np.float32) / 255.0 - _IMAGENET_MEAN) / _IMAGENET_STD
-
 
 @lru_cache(maxsize=1)
 def _missing_face_tensor():
@@ -78,11 +71,9 @@ def _missing_face_tensor():
     missing_face.flags.writeable = False
     return missing_face
 
-
 def _prepare_body(image, descriptor):
     body = _normalise_rgb(_letterbox_rgb(_crop_body(image, descriptor)))
     return np.ascontiguousarray(body.transpose(2, 0, 1), dtype=np.float32)
-
 
 class Demographic:
     __slots__ = ("_lock", "_model", "_device", "_min_age", "_max_age", "_avg_age")

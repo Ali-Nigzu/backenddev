@@ -1,7 +1,3 @@
-"""Local inspection pipeline for a manually chosen device timeframe."""
-
-from __future__ import annotations
-
 import csv
 import shutil
 from pathlib import Path
@@ -15,8 +11,6 @@ from ..events import Event
 from ..initialise import initialise
 from ..load import load
 from ..track import Track
-
-
 
 def _run_directory(device_id: int, timeframe: dict) -> Path:
     def window_part(value: str) -> str:
@@ -33,7 +27,6 @@ def _run_directory(device_id: int, timeframe: dict) -> Path:
     candidate.mkdir(parents=True)
     return candidate
 
-
 def _write_events_csv(output_batch: dict, path: Path) -> None:
     fieldnames = (
         "device_id",
@@ -48,7 +41,6 @@ def _write_events_csv(output_batch: dict, path: Path) -> None:
         writer.writeheader()
         writer.writerows(output_batch["rows"])
 
-
 def _get_replay_fps(frame_batch: dict) -> float:
     timestamps = [float(frame["timestamp"]) for frame in frame_batch["frames"]]
     intervals = [
@@ -61,8 +53,6 @@ def _get_replay_fps(frame_batch: dict) -> float:
             "Cannot derive replay FPS from fewer than two distinct frame timestamps"
         )
     return 1.0 / median(intervals)
-
-
 
 def _write_replay(
     frame_batch: dict,
@@ -143,10 +133,8 @@ def _write_replay(
     finally:
         writer.release()
 
-
-
 def Visualise(device_id: int, timeframe: dict) -> None:
-    """Run the real pipeline for a supplied timeframe and save local artifacts."""
+
     context = initialise(device_id)
     context["timeframe"] = timeframe
     run_directory = _run_directory(context["device_id"], timeframe)

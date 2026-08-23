@@ -1,7 +1,3 @@
-"""Resolve device processing context from PostgreSQL."""
-
-from __future__ import annotations
-
 import json
 import os
 from datetime import datetime, timezone
@@ -25,20 +21,17 @@ JOIN sites ON sites.id = devices.site_id
 WHERE devices.id = %s
 """
 
-
 def _format_utc_timestamp(value: datetime) -> str:
     utc_value = value.astimezone(timezone.utc)
     return utc_value.strftime(_TIMEFRAME_FORMAT)[:-4] + "Z"
-
 
 def _decode_analysis_config(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
 
-
 def initialise(device_id: int) -> dict:
-    """Return the read-only processing context for a PostgreSQL device ID."""
+
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(SA_PATH)
     if not SA_PATH.is_file():
         raise FileNotFoundError(f"Service account file not found: {SA_PATH}")

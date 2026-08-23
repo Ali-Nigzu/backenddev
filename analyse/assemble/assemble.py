@@ -1,5 +1,3 @@
-"""Production Event and demographic assembly stage."""
-
 import hashlib
 import json
 from collections import Counter, defaultdict
@@ -7,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 
 _TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _MAX_SIGNED_INT64 = 2**63 - 1
-
 
 def _age_to_bucket(age: int) -> int:
     if age <= 4:
@@ -22,13 +19,11 @@ def _age_to_bucket(age: int) -> int:
         return 4
     return 5
 
-
 def _parse_utc_timeframe_start(value: str) -> datetime:
     return datetime.strptime(
         value,
         _TIMEFRAME_FORMAT,
     ).replace(tzinfo=timezone.utc)
-
 
 def _create_event_id(identity: tuple, duplicate_occurrence: int | None) -> int:
     values = list(identity)
@@ -39,9 +34,7 @@ def _create_event_id(identity: tuple, duplicate_occurrence: int | None) -> int:
     unsigned_64 = int.from_bytes(digest[:8], byteorder="big", signed=False)
     return unsigned_64 % _MAX_SIGNED_INT64 + 1
 
-
 class Assemble:
-    """Join Event and demographic batches into final output rows."""
 
     __slots__ = ()
 

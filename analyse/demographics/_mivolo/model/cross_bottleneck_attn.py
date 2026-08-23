@@ -1,11 +1,3 @@
-"""Cross-bottleneck attention retained for MiVOLO D1-224 inference.
-
-Based on timm https://github.com/huggingface/pytorch-image-models with
-MiVOLO modifications by Copyright 2023 Irina Tolstykh and Maxim Kuprashevich.
-The upstream MiVOLO repository is licensed under Apache-2.0. Local changes are
-limited to retaining the runtime code path needed by `Demographic()`.
-"""
-
 import torch
 import torch.nn as nn
 from timm.layers.bottleneck_attn import PosEmbedRel
@@ -13,7 +5,6 @@ from timm.layers.helpers import make_divisible
 from timm.layers.mlp import Mlp
 from timm.layers.trace_utils import _assert
 from timm.layers.weight_init import trunc_normal_
-
 
 class CrossBottleneckAttn(nn.Module):
     def __init__(
@@ -44,7 +35,6 @@ class CrossBottleneckAttn(nn.Module):
         self.qkv_f = nn.Conv2d(dim, self.dim_out_qk * 2 + self.dim_out_v, 1, bias=qkv_bias)
         self.qkv_p = nn.Conv2d(dim, self.dim_out_qk * 2 + self.dim_out_v, 1, bias=qkv_bias)
 
-        # NOTE I'm only supporting relative pos embedding for now
         self.pos_embed = PosEmbedRel(feat_size, dim_head=self.dim_head_qk, scale=self.scale)
 
         self.norm = nn.LayerNorm([self.dim_out_v * 2, *feat_size])
@@ -105,9 +95,7 @@ class CrossBottleneckAttn(nn.Module):
         q_f, k_f, v_f = self.get_qkv(x1, self.qkv_f)
         q_p, k_p, v_p = self.get_qkv(x2, self.qkv_p)
 
-        # person to face
         out_f = self.apply_attn(q_f, k_p, v_p, B, H, W)
-        # face to person
         out_p = self.apply_attn(q_p, k_f, v_f, B, H, W)
 
         x_pf = torch.cat((out_f, out_p), dim=1)  # B, dim_out * 2, H, W

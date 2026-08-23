@@ -1,7 +1,3 @@
-"""Load timestamp-named JPG frames from Google Cloud Storage."""
-
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
@@ -13,12 +9,11 @@ from google.cloud import storage
 FRAME_FILENAME_FORMAT = "%Y-%m-%dT%H-%M-%S.%fZ.jpg"
 TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
-
 def load(
     source_uri: str,
     timeframe: dict,
 ) -> dict:
-    """Return a FrameBatch for timestamp-named JPG frames in a GCS prefix and timeframe."""
+
     bucket_name, object_prefix = _parse_gcs_uri(source_uri)
 
     timeframe_start = _parse_utc_timestamp(timeframe["start"])
@@ -54,17 +49,14 @@ def load(
 
     return {"frames": frames}
 
-
 def _parse_gcs_uri(source_uri: str) -> tuple[str, str]:
     parsed_uri = urlparse(source_uri)
     if parsed_uri.scheme != "gs" or not parsed_uri.netloc:
         raise ValueError(f"Expected canonical gs:// GCS URI: {source_uri}")
     return parsed_uri.netloc, parsed_uri.path.lstrip("/")
 
-
 def _parse_utc_timestamp(value: str) -> datetime:
     return datetime.strptime(value, TIMEFRAME_FORMAT).replace(tzinfo=timezone.utc)
-
 
 def _parse_frame_capture_time(object_name: str) -> datetime | None:
     basename = PurePosixPath(object_name).name

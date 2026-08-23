@@ -1,7 +1,3 @@
-"""Production pipeline orchestration for one device."""
-
-from __future__ import annotations
-
 from .assemble import Assemble
 from .demographics import Demographic
 from .detect import Detect
@@ -12,9 +8,8 @@ from .send import Send
 from .track import Track
 from .update import update
 
-
 def Analyse(device_id: int) -> bool:
-    """Run the complete production pipeline for one device."""
+
     try:
         context = initialise(device_id)
         frame_batch = load(
@@ -31,6 +26,7 @@ def Analyse(device_id: int) -> bool:
             context["timeframe"]["start"],
             context["device_id"],
         )
+        del frame_batch, detection_batch, track_batch, event_batch, demographics_batch
         Send()(output_batch, context["bigquery_destination"])
         update(context["device_id"], context["timeframe"]["end"])
         return True

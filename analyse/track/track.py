@@ -1,5 +1,3 @@
-"""Stateless, deterministic DetectionBatch -> TrackBatch tracking stage."""
-
 import bisect
 import math
 
@@ -30,8 +28,6 @@ _CLOSED = "closed"
 _MIN_BOX_SIZE = 1e-3
 _IMPOSSIBLE_COST = 1e6
 
-# Private Kalman and normal-association calibration. Operator-facing behaviour is
-# configured in config.py; these values define the internal statistical model.
 _MAHALANOBIS_GATE = 13.28
 _MOTION_COST_WEIGHT = 0.70
 _IOU_COST_WEIGHT = 0.30
@@ -70,7 +66,6 @@ _RESCUE_MAX_HISTORY_BONUS = 0.08
 _RESCUE_AMBIGUITY_STEP = 0.06
 _RESCUE_MAX_AMBIGUITY_PENALTY = 0.18
 
-
 def _measurement(detection: dict) -> np.ndarray:
     bbox = detection["bbox"]
     return np.array(
@@ -83,7 +78,6 @@ def _measurement(detection: dict) -> np.ndarray:
         dtype=np.float64,
     )
 
-
 def _observation(detection: dict, timestamp: float) -> dict:
     return {
         "timestamp": timestamp,
@@ -91,7 +85,6 @@ def _observation(detection: dict, timestamp: float) -> dict:
         "bbox": dict(detection["bbox"]),
         "confidence": detection["confidence"],
     }
-
 
 def _measurement_covariance(measurement: np.ndarray) -> np.ndarray:
     width = max(float(measurement[2]), _MIN_BOX_SIZE)
@@ -107,7 +100,6 @@ def _measurement_covariance(measurement: np.ndarray) -> np.ndarray:
     )
     return np.diag(standard_deviations**2)
 
-
 def _new_kalman_state(detection: dict) -> tuple[np.ndarray, np.ndarray]:
     measurement = _measurement(detection)
     state = np.zeros(8, dtype=np.float64)
@@ -116,7 +108,6 @@ def _new_kalman_state(detection: dict) -> tuple[np.ndarray, np.ndarray]:
     covariance[:4, :4] = _measurement_covariance(measurement)
     covariance[4:, 4:] = np.eye(4, dtype=np.float64) * _INITIAL_VELOCITY_VARIANCE
     return state, covariance
-
 
 def _transition_and_process_covariance(dt: float) -> tuple[np.ndarray, np.ndarray]:
     transition = np.eye(8, dtype=np.float64)
@@ -137,7 +128,6 @@ def _transition_and_process_covariance(dt: float) -> tuple[np.ndarray, np.ndarra
         process_covariance[index + 4, index + 4] = variance * dt**2
     return transition, process_covariance
 
-
 def _predict(track: dict, timestamp: float) -> None:
     dt = timestamp - track["last_prediction_timestamp"]
     transition, process_covariance = _transition_and_process_covariance(dt)
@@ -150,7 +140,6 @@ def _predict(track: dict, timestamp: float) -> None:
     track["covariance"] = (track["covariance"] + track["covariance"].T) / 2.0
     track["last_prediction_timestamp"] = timestamp
 
-
 def _innovation(track: dict, detection: dict) -> tuple[np.ndarray, np.ndarray, float]:
     measurement = _measurement(detection)
     residual = measurement - track["state"][:4]
@@ -160,7 +149,6 @@ def _innovation(track: dict, detection: dict) -> tuple[np.ndarray, np.ndarray, f
     solved = np.linalg.solve(innovation_covariance, residual)
     distance = float(residual @ solved)
     return residual, innovation_covariance, max(distance, 0.0)
-
 
 def _predicted_bbox(track: dict) -> tuple[float, float, float, float]:
     centre_x, centre_y, width, height = track["state"][:4]
@@ -172,7 +160,6 @@ def _predicted_bbox(track: dict) -> tuple[float, float, float, float]:
         float(centre_x) + width / 2.0,
         float(centre_y) + height / 2.0,
     )
-
 
 def _iou(track: dict, detection: dict) -> float:
     left_a, top_a, right_a, bottom_a = _predicted_bbox(track)
@@ -187,7 +174,6 @@ def _iou(track: dict, detection: dict) -> float:
     area_b = max(0.0, right_b - left_b) * max(0.0, bottom_b - top_b)
     union = area_a + area_b - intersection
     return intersection / union if union > 0.0 else 0.0
-
 
 def _associate(
     tracks: list[dict], detections: list[dict], maximum_cost: float
@@ -228,7 +214,6 @@ def _associate(
         [index for index in range(len(detections)) if index not in matched_detections],
     )
 
-
 def _update(track: dict, detection: dict, frame_id: str, timestamp: float) -> None:
     measurement = _measurement(detection)
     residual, innovation_covariance, _distance = _innovation(track, detection)
@@ -261,7 +246,6 @@ def _update(track: dict, detection: dict, frame_id: str, timestamp: float) -> No
         track["status"] = _ACTIVE
         track["reached_active"] = True
 
-
 def _create_track(
     detection: dict, frame_id: str, timestamp: float, frame_index: int, track_id: int
 ) -> dict:
@@ -292,7 +276,6 @@ def _create_track(
         "creation_order": track_id,
     }
 
-
 def _expire(track: dict, timestamp: float) -> None:
     elapsed = timestamp - track["last_observed_timestamp"]
     timeout = (
@@ -303,14 +286,12 @@ def _expire(track: dict, timestamp: float) -> None:
     if elapsed > timeout:
         track["status"] = _CLOSED
 
-
 def _box_size(observation: dict) -> tuple[float, float]:
     bbox = observation["bbox"]
     return (
         max(float(bbox["x2"]) - float(bbox["x1"]), _MIN_BOX_SIZE),
         max(float(bbox["y2"]) - float(bbox["y1"]), _MIN_BOX_SIZE),
     )
-
 
 def _endpoint_fit(observations: list[dict]) -> dict:
     reference_timestamp = float(observations[0]["timestamp"])
@@ -359,10 +340,8 @@ def _endpoint_fit(observations: list[dict]) -> dict:
         "reliability": reliability,
     }
 
-
 def _fit_value(fit: dict, timestamp: float) -> np.ndarray:
     return fit["intercept"] + fit["velocity"] * (timestamp - fit["reference_timestamp"])
-
 
 def _fragment_summary(
     fragment: dict, batch_start_timestamp: float, batch_end_timestamp: float
@@ -387,7 +366,6 @@ def _fragment_summary(
         "batch_end_timestamp": batch_end_timestamp,
     }
 
-
 def _predict_observed_endpoint(
     fragment: dict, timestamp: float
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -400,7 +378,6 @@ def _predict_observed_endpoint(
     )
     return state, covariance
 
-
 def _mahalanobis_2d(residual: np.ndarray, covariance: np.ndarray) -> float:
     try:
         distance = float(residual @ np.linalg.solve(covariance, residual))
@@ -408,15 +385,12 @@ def _mahalanobis_2d(residual: np.ndarray, covariance: np.ndarray) -> float:
         return math.inf
     return max(distance, 0.0) if math.isfinite(distance) else math.inf
 
-
 def _recent_motion(track: dict) -> dict:
     return _endpoint_fit(track["observations"][-_ENDPOINT_OBSERVATIONS:])
-
 
 def _established_history_bonus(track: dict) -> float:
     history_strength = min(math.log1p(len(track["observations"])) / math.log(26.0), 1.0)
     return _RESCUE_MAX_HISTORY_BONUS * history_strength
-
 
 def _continuity_rescue_base_cost(
     track: dict, detection: dict, timestamp: float
@@ -505,7 +479,6 @@ def _continuity_rescue_base_cost(
     )
     return max(cost, 0.0) if math.isfinite(cost) else None
 
-
 def _ambiguity_penalty(
     track_index: int,
     detection_index: int,
@@ -520,7 +493,6 @@ def _ambiguity_penalty(
         _RESCUE_AMBIGUITY_STEP * extra_choices,
         _RESCUE_MAX_AMBIGUITY_PENALTY,
     )
-
 
 def _continuity_rescue(
     tracks: list[dict], detections: list[dict], timestamp: float
@@ -576,7 +548,6 @@ def _continuity_rescue(
         [index for index in range(track_count) if index not in matched_tracks],
         [index for index in range(detection_count) if index not in matched_detections],
     )
-
 
 def _continuity_cost(earlier: dict, later: dict) -> float | None:
     gap = later["first_timestamp"] - earlier["last_timestamp"]
@@ -724,7 +695,6 @@ def _continuity_cost(earlier: dict, later: dict) -> float | None:
     cost = max(cost, 0.0)
     return cost if math.isfinite(cost) and cost <= REFINE_MAX_COST else None
 
-
 def _candidate_costs(summaries: list[dict]) -> dict[tuple[int, int], float]:
     starts = sorted(
         (
@@ -748,7 +718,6 @@ def _candidate_costs(summaries: list[dict]) -> dict[tuple[int, int], float]:
                 costs[(earlier_index, later_index)] = cost
     return costs
 
-
 def _assign_fragment_links(summaries: list[dict]) -> dict[int, int]:
     candidate_costs = _candidate_costs(summaries)
     if not candidate_costs:
@@ -768,7 +737,6 @@ def _assign_fragment_links(summaries: list[dict]) -> dict[int, int]:
         for row, column in zip(rows, columns, strict=True)
         if column < count and (int(row), int(column)) in candidate_costs
     }
-
 
 def _merge_chain(chain: list[dict]) -> dict:
     observations = []
@@ -823,7 +791,6 @@ def _merge_chain(chain: list[dict]) -> dict:
         ],
     }
 
-
 def _merge_linked_fragments(fragments: list[dict], links: dict[int, int]) -> list[dict]:
     predecessors = {successor: predecessor for predecessor, successor in links.items()}
     visited = set()
@@ -846,7 +813,6 @@ def _merge_linked_fragments(fragments: list[dict], links: dict[int, int]) -> lis
     )
     return sorted(merged, key=lambda fragment: fragment["creation_order"])
 
-
 def _refine_fragments(
     fragments: list[dict],
     batch_start_timestamp: float,
@@ -866,7 +832,6 @@ def _refine_fragments(
         refined = _merge_linked_fragments(refined, links)
     return refined
 
-
 def _public_track(track: dict) -> dict:
     return {
         "track_id": track["track_id"],
@@ -875,9 +840,7 @@ def _public_track(track: dict) -> dict:
         "best_crop_confidence": track["best_crop_confidence"],
     }
 
-
 class Track:
-    """Process one complete DetectionBatch without retaining cross-call state."""
 
     __slots__ = ()
 

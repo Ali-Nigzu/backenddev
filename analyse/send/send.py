@@ -1,7 +1,3 @@
-"""Append storage-ready OutputBatch rows to an existing BigQuery table."""
-
-from __future__ import annotations
-
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -13,7 +9,6 @@ _DESTINATION_PATTERN = re.compile(
     r"!3s(?P<table>[A-Za-z0-9_]+)(?:!|$)"
 )
 
-
 def _parse_bigquery_link(bigquery_link: str) -> tuple[str, str, str]:
     parsed = urlparse(bigquery_link)
     workspace = parse_qs(parsed.query)["ws"][0]
@@ -22,9 +17,7 @@ def _parse_bigquery_link(bigquery_link: str) -> tuple[str, str, str]:
         raise ValueError("Unable to extract BigQuery project, dataset, and table")
     return match.group("project", "dataset", "table")
 
-
 class Send:
-    """Append final rows; insert IDs are only best-effort dedupe."""
 
     __slots__ = ()
 

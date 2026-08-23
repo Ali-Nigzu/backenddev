@@ -1,7 +1,3 @@
-"""Advance a device analysis watermark after a successful send."""
-
-from __future__ import annotations
-
 from ..initialise.cloud_sql import cloud_sql_connection
 
 _UPDATE_ANALYZED_UNTIL = """
@@ -10,9 +6,8 @@ SET analyzed_until = %s
 WHERE id = %s
 """
 
-
 def update(device_id: int, analyzed_until: str) -> None:
-    """Set a device's analyzed-until watermark to the caller-supplied timestamp."""
+
     try:
         with cloud_sql_connection() as connection:
             cursor = connection.cursor()

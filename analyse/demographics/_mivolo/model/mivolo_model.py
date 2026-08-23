@@ -1,12 +1,3 @@
-"""Minimal MiVOLO D1-224 architecture for demographic inference.
-
-Adapted from MiVOLO (Copyright 2023 Irina Tolstykh, Maxim Kuprashevich)
-and timm / pytorch-image-models. The upstream MiVOLO repository is licensed
-under Apache-2.0. Local changes are limited to package-relative imports, fixed
-D1-224 specialisation, unused-code removal, and the VOLO constructor
-compatibility correction required by the supported timm version.
-"""
-
 import torch
 import torch.nn as nn
 from timm.layers import trunc_normal_
@@ -15,7 +6,6 @@ from timm.models.volo import VOLO
 from .cross_bottleneck_attn import CrossBottleneckAttn
 
 __all__ = ["MiVOLOModel", "create_mivolo_d1_224"]
-
 
 def get_output_size(input_shape, conv_layer):
     padding = conv_layer.padding
@@ -27,7 +17,6 @@ def get_output_size(input_shape, conv_layer):
         ((input_shape[i] + 2 * padding[i] - dilation[i] * (kernel_size[i] - 1) - 1) // stride[i]) + 1 for i in range(2)
     ]
     return output_size
-
 
 def get_output_size_module(input_size, stem):
     output_size = input_size
@@ -45,9 +34,7 @@ def get_output_size_module(input_size, stem):
 
     return output_size
 
-
 class PatchEmbed(nn.Module):
-    """Image to Patch Embedding."""
 
     def __init__(
         self, img_size=224, stem_conv=False, stem_stride=1, patch_size=8, in_chans=3, hidden_dim=64, embed_dim=384
@@ -63,7 +50,6 @@ class PatchEmbed(nn.Module):
                 self.conv = self.create_stem(stem_stride, in_chans, hidden_dim)
             else:
                 self.conv = True  # just to match interface
-                # split
                 self.conv1 = self.create_stem(stem_stride, 3, hidden_dim)
                 self.conv2 = self.create_stem(stem_stride, 3, hidden_dim)
         else:
@@ -124,11 +110,7 @@ class PatchEmbed(nn.Module):
 
         return x
 
-
 class MiVOLOModel(VOLO):
-    """
-    Vision Outlooker, the main class of our model
-    """
 
     def __init__(
         self,
@@ -195,10 +177,8 @@ class MiVOLOModel(VOLO):
     def forward_features(self, x):
         x = self.patch_embed(x).permute(0, 2, 3, 1)  # B,C,H,W-> B,H,W,C
 
-        # step2: tokens learning in the two stages
         x = self.forward_tokens(x)
 
-        # step3: post network, apply class attention or not
         if self.post_network is not None:
             x = self.forward_cls(x)
         x = self.norm(x)
@@ -221,19 +201,16 @@ class MiVOLOModel(VOLO):
 
         out = self.head(features)
         if self.aux_head is not None:
-            # generate classes in all feature tokens, see token labeling
             aux = self.aux_head(x[:, 1:])
             out = out + 0.5 * aux.max(1)[0]
 
         return (out, features) if (fds_enabled and self.training) else out
 
     def forward(self, x, targets=None, epoch=None):
-        """simplified forward (without mix token training)"""
+
         x = self.forward_features(x)
         x = self.forward_head(x, targets=targets, epoch=epoch)
         return x
-
-
 
 def create_mivolo_d1_224(num_classes=3, in_chans=6):
     return MiVOLOModel(

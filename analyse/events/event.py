@@ -1,5 +1,3 @@
-"""Line-crossing event stage."""
-
 from math import hypot
 
 _MIN_STABLE_SIDE_POINTS = 3
@@ -7,10 +5,8 @@ _MIN_EVENT_TRACK_POINTS = 6
 _ON_LINE_DISTANCE_PIXELS = 2.0
 _GEOMETRY_EPSILON = 1e-6
 
-
 def _signed_distance_to_line(point, line_a, dx, dy, line_length):
     return (dx * (point[1] - line_a[1]) - dy * (point[0] - line_a[0])) / line_length
-
 
 def _side(point, line_a, dx, dy, line_length):
     distance = _signed_distance_to_line(point, line_a, dx, dy, line_length)
@@ -19,7 +15,6 @@ def _side(point, line_a, dx, dy, line_length):
     if distance < -_ON_LINE_DISTANCE_PIXELS:
         return -1
     return 0
-
 
 def _events_for_track(track, line_a, dx, dy, line_length):
     if len(track["path"]) < _MIN_EVENT_TRACK_POINTS:
@@ -58,7 +53,6 @@ def _events_for_track(track, line_a, dx, dy, line_length):
             })
             established_side = run_side
     return events
-
 
 class Event:
     __slots__ = ()

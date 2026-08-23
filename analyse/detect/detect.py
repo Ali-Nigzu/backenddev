@@ -1,5 +1,3 @@
-"""FrameBatch -> DetectionBatch."""
-
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +12,6 @@ IOU = 0.70
 MAX_DETECTIONS = 300
 DEVICE = "cpu"
 VERBOSE = False
-
 
 class Detect:
     __slots__ = ("_model",)
