@@ -1,0 +1,243 @@
+[
+  {
+    "device_id": 1,
+    "event_id": 1001,
+    "event": 1,
+    "timestamp": "2026-08-21T15:50:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1002,
+    "event": 1,
+    "timestamp": "2026-08-21T16:10:00Z",
+    "sex": 1,
+    "age_bucket": 1
+  },
+  {
+    "device_id": 1,
+    "event_id": 1003,
+    "event": 0,
+    "timestamp": "2026-08-21T16:25:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1004,
+    "event": 0,
+    "timestamp": "2026-08-21T16:40:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1005,
+    "event": 1,
+    "timestamp": "2026-08-21T20:55:00Z",
+    "sex": 0,
+    "age_bucket": 2
+  },
+  {
+    "device_id": 1,
+    "event_id": 1006,
+    "event": 0,
+    "timestamp": "2026-08-21T21:05:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1007,
+    "event": 1,
+    "timestamp": "2026-08-21T22:50:00Z",
+    "sex": 1,
+    "age_bucket": 3
+  },
+  {
+    "device_id": 1,
+    "event_id": 1008,
+    "event": 0,
+    "timestamp": "2026-08-21T23:10:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1009,
+    "event": 1,
+    "timestamp": "2026-08-22T09:00:00Z",
+    "sex": 0,
+    "age_bucket": 4
+  },
+  {
+    "device_id": 1,
+    "event_id": 1010,
+    "event": 1,
+    "timestamp": "2026-08-22T09:07:00Z",
+    "sex": 1,
+    "age_bucket": 5
+  },
+  {
+    "device_id": 1,
+    "event_id": 1011,
+    "event": 0,
+    "timestamp": "2026-08-22T09:20:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1012,
+    "event": 0,
+    "timestamp": "2026-08-22T09:35:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1013,
+    "event": 1,
+    "timestamp": "2026-08-22T13:59:00Z",
+    "sex": 1,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1014,
+    "event": 1,
+    "timestamp": "2026-08-22T14:00:00Z",
+    "sex": 0,
+    "age_bucket": 1
+  },
+  {
+    "device_id": 1,
+    "event_id": 1015,
+    "event": 0,
+    "timestamp": "2026-08-22T14:14:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1016,
+    "event": 0,
+    "timestamp": "2026-08-22T14:16:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1017,
+    "event": 1,
+    "timestamp": "2026-08-22T18:45:00Z",
+    "sex": 0,
+    "age_bucket": 2
+  },
+  {
+    "device_id": 1,
+    "event_id": 1018,
+    "event": 0,
+    "timestamp": "2026-08-22T19:30:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1019,
+    "event": 1,
+    "timestamp": "2026-08-23T08:10:00Z",
+    "sex": 1,
+    "age_bucket": 3
+  },
+  {
+    "device_id": 1,
+    "event_id": 1020,
+    "event": 0,
+    "timestamp": "2026-08-23T08:20:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1021,
+    "event": 1,
+    "timestamp": "2026-08-23T12:45:00Z",
+    "sex": 0,
+    "age_bucket": 4
+  },
+  {
+    "device_id": 1,
+    "event_id": 1022,
+    "event": 1,
+    "timestamp": "2026-08-23T12:50:00Z",
+    "sex": 1,
+    "age_bucket": 5
+  },
+  {
+    "device_id": 1,
+    "event_id": 1023,
+    "event": 0,
+    "timestamp": "2026-08-23T13:05:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1024,
+    "event": 0,
+    "timestamp": "2026-08-23T13:25:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1025,
+    "event": 1,
+    "timestamp": "2026-08-23T14:15:00Z",
+    "sex": 1,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1026,
+    "event": 1,
+    "timestamp": "2026-08-23T14:30:00Z",
+    "sex": 0,
+    "age_bucket": 1
+  },
+  {
+    "device_id": 1,
+    "event_id": 1027,
+    "event": 0,
+    "timestamp": "2026-08-23T14:40:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1028,
+    "event": 1,
+    "timestamp": "2026-08-23T14:50:00Z",
+    "sex": 0,
+    "age_bucket": 2
+  },
+  {
+    "device_id": 1,
+    "event_id": 1029,
+    "event": 0,
+    "timestamp": "2026-08-23T14:55:00Z",
+    "sex": 0,
+    "age_bucket": 0
+  },
+  {
+    "device_id": 1,
+    "event_id": 1030,
+    "event": 0,
+    "timestamp": "2026-08-23T14:59:59Z",
+    "sex": 0,
+    "age_bucket": 0
+  }
+]
+
