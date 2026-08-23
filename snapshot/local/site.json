@@ -1,0 +1,11 @@
+{
+  "id": 1,
+  "name": "Test Site",
+  "organisation_id": 1,
+  "bigquery_destination": "camosbase.Org_Test01.Site_Test01_Logs",
+  "max_capacity": 50,
+  "timezone": "Europe/London",
+  "created_at": "2026-08-21T00:00:00Z",
+  "updated_at": "2026-08-21T00:00:00Z"
+}
+
