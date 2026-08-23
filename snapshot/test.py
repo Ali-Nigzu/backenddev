@@ -73,6 +73,14 @@ def main():
         write("devices.json", lagging)
         assert Snapshot(1)
         assert read("snapshot.json")["state"]["stable_until"] == "2026-08-23T14:30:00Z"
+        replay_events = read("events.json") + [{"device_id": 2, "event_id": 4001, "event": 1, "timestamp": "2026-08-23T14:40:00Z", "sex": 0, "age_bucket": 0}]
+        lagging[1]["analyzed_until"] = "2026-08-23T15:00:00Z"
+        write("events.json", replay_events)
+        write("devices.json", lagging)
+        assert Snapshot(1)
+        replayed = read("snapshot.json")
+        write("snapshot.json", baseline["snapshot.json"])
+        assert Snapshot(1) and read("snapshot.json") == replayed
         print("snapshot MVP tests passed")
     finally:
         for name, value in baseline.items():
