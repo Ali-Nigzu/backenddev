@@ -320,7 +320,8 @@ def _ensure_q15_interval(machine, instant):
 
 def advance(machine, target, site, expire_at_target=True):
     cursor = _dt(machine["cursor_ts"])
-    _expire_entries(machine, cursor)
+    if expire_at_target or cursor != target:
+        _expire_entries(machine, cursor)
     while cursor < target:
         _ensure_q15_interval(machine, cursor)
         boundary = _next_boundary(cursor, target, site, machine, expire_at_target)
@@ -452,7 +453,7 @@ def Snapshot(site_id):
     ts, stable = _horizons(previous, devices, site)
     horizons = {d["id"]: _dt(d["analyzed_until"]) for d in devices if d["analyzed_until"]}
     events = [e for e in loaded_events if e["device_id"] in horizons and _dt(e["timestamp"]) < horizons[e["device_id"]] and _dt(e["timestamp"]) < ts]
-    events.sort(key=lambda e: (e["timestamp"], e["event_id"]))
+    events.sort(key=lambda e: (e["timestamp"], -e["event"], e["event_id"]))
     start = _dt(site["created_at"])
     stable_machine = _machine(start, site)
     for event in events:
