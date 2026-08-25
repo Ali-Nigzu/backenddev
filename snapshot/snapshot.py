@@ -96,8 +96,8 @@ def _events(client, table, devices, start, end):
 
 
 def load_production_inputs(site_id, previous_ts):
-    from google.cloud import bigquery
     credentials = _credentials()
+    from google.cloud import bigquery
     with _connection(credentials) as connection:
         cursor = connection.cursor()
         try:
