@@ -102,7 +102,7 @@ def _events(client, table, devices, start, end):
     ids = [device["id"] for device in devices]
     if not ids:
         return []
-    sql = f"SELECT device_id, event_id, event, timestamp, sex, age_bucket FROM `{table}` WHERE device_id IN UNNEST(@device_ids) AND timestamp >= @start AND timestamp < @end ORDER BY timestamp ASC, event_id ASC"
+    sql = f"SELECT device_id, event_id, event, timestamp, sex, age_bucket FROM `{table}` WHERE device_id IN UNNEST(@device_ids) AND timestamp >= @start AND timestamp < @end ORDER BY timestamp ASC, event DESC, event_id ASC"
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("device_ids", "INT64", ids), bigquery.ScalarQueryParameter("start", "TIMESTAMP", start), bigquery.ScalarQueryParameter("end", "TIMESTAMP", end)])
     horizons = {device["id"]: device["analyzed_until"] for device in devices if device["analyzed_until"]}
     deduplicated = {}
@@ -113,7 +113,7 @@ def _events(client, table, devices, start, end):
         previous = deduplicated.setdefault(event["event_id"], event)
         if previous != event:
             raise ValueError(f"Conflicting event_id: {event['event_id']}")
-    return sorted(deduplicated.values(), key=lambda event: (event["timestamp"], event["event_id"]))
+    return sorted(deduplicated.values(), key=lambda event: (event["timestamp"], -event["event"], event["event_id"]))
 
 
 def load_production_inputs(site_id):
@@ -160,6 +160,7 @@ def _persist(credentials, site_id, version, ts, payload, state):
 
 
 Q15 = timedelta(minutes=15)
+MAX_OPEN_VISIT = timedelta(hours=4)
 
 
 def _zone():
@@ -272,22 +273,37 @@ def _active(machine, instant, site):
 
 
 def _add_occupancy(block, index, occupancy, seconds):
+    if occupancy <= 0:
+        return
     block["occupancy_area_person_seconds"][index] += occupancy * seconds
     block["occupancy_seconds"][index] += seconds
-    if occupancy > 0:
-        current = block["occupancy_min_positive"][index]
-        block["occupancy_min_positive"][index] = occupancy if current == 0 else min(current, occupancy)
+    current = block["occupancy_min_positive"][index]
+    block["occupancy_min_positive"][index] = occupancy if current == 0 else min(current, occupancy)
     block["occupancy_max"][index] = max(block["occupancy_max"][index], occupancy)
 
 
-def _next_boundary(value, target, site):
+def _next_expiry(machine):
+    if not machine["entry_fifo"]:
+        return None
+    return _dt(machine["entry_fifo"][0]) + MAX_OPEN_VISIT
+
+
+def _expire_entries(machine, instant):
+    while machine["entry_fifo"] and _next_expiry(machine) <= instant:
+        machine["entry_fifo"].pop(0)
+        machine["occupancy"] = max(0, machine["occupancy"] - 1)
+
+
+def _next_boundary(value, target, site, machine, expire_at_target):
     zone = _zone()
     values = [target]
     quarter = datetime.fromtimestamp(((int(value.timestamp()) // 900) + 1) * 900, tz=timezone.utc)
     values.append(quarter)
     local = value.astimezone(zone)
-    next_hour = (local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)).astimezone(timezone.utc)
-    values.append(next_hour)
+    values.append((local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)).astimezone(timezone.utc))
+    expiry = _next_expiry(machine)
+    if expiry and expiry > value and (expiry < target or expire_at_target and expiry == target):
+        values.append(expiry)
     return min(v for v in values if v > value)
 
 
@@ -302,11 +318,12 @@ def _ensure_q15_interval(machine, instant):
         _roll_q15(machine)
 
 
-def advance(machine, target, site):
+def advance(machine, target, site, expire_at_target=True):
     cursor = _dt(machine["cursor_ts"])
+    _expire_entries(machine, cursor)
     while cursor < target:
         _ensure_q15_interval(machine, cursor)
-        boundary = _next_boundary(cursor, target, site)
+        boundary = _next_boundary(cursor, target, site, machine, expire_at_target)
         elapsed = int((boundary - cursor).total_seconds())
         for block, index in _active(machine, cursor, site):
             _add_occupancy(block, index, machine["occupancy"], elapsed)
@@ -315,6 +332,8 @@ def advance(machine, target, site):
         _roll_calendar(machine, cursor, site)
         if cursor < target and cursor.minute % 15 == 0 and cursor.second == 0:
             _roll_q15(machine)
+        if cursor < target or expire_at_target:
+            _expire_entries(machine, cursor)
     _refresh_peaks(machine)
 
 
@@ -324,7 +343,7 @@ def _increment(block, key, index):
 
 def apply_event(machine, event, site):
     instant = _dt(event["timestamp"])
-    advance(machine, instant, site)
+    advance(machine, instant, site, expire_at_target=False)
     _ensure_q15_interval(machine, instant)
     active = _active(machine, instant, site)
     q, q_index = active[0]
@@ -353,9 +372,9 @@ def apply_event(machine, event, site):
             _increment(block, "exits", index)
         if machine["entry_fifo"]:
             entered = _dt(machine["entry_fifo"].pop(0))
+            machine["occupancy"] = max(0, machine["occupancy"] - 1)
             q["dwell_sum_seconds"][q_index] += int((instant - entered).total_seconds())
             q["dwell_count"][q_index] += 1
-        machine["occupancy"] = max(0, machine["occupancy"] - 1)
     device_id = str(event["device_id"])
     q["traffic_counts"][q_index][device_id] = q["traffic_counts"][q_index].get(device_id, 0) + 1
     _refresh_peaks(machine)
@@ -387,6 +406,10 @@ def derive_payload(machine, site, devices, state):
         traffic.append([0.0 if total == 0 else values.get(str(axis["device_id"]), 0) * 100 / total for axis in axes])
     peak = q["rolling_peak_occupancy"]
     today = _rollup(machine["today"], machine["today"]["age_counts"], machine["today"]["sex_counts"])
+    cursor = _dt(machine["cursor_ts"])
+    hours = cursor.hour + int(any((cursor.minute, cursor.second, cursor.microsecond)))
+    for key in ("entrances", "exits", "occupancy"):
+        today[key] = today[key][:hours]
     yesterday = _rollup(machine["yesterday"], machine["yesterday"]["age_counts"], machine["yesterday"]["sex_counts"])
     week = _rollup(machine["week"], [sum(row[i] for row in machine["week"]["age_counts_by_day"]) for i in range(6)], [sum(row[i] for row in machine["week"]["sex_counts_by_day"]) for i in range(2)])
     month = _rollup(machine["month"], [sum(row[i] for row in machine["month"]["age_counts_by_week"]) for i in range(6)], [sum(row[i] for row in machine["month"]["sex_counts_by_week"]) for i in range(2)])
