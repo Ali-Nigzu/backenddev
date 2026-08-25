@@ -6,15 +6,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import parse_qs, urlparse
-from zoneinfo import ZoneInfo
 
 
 _DESTINATION = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 _LINK = re.compile(r"(?:^|!)1s(?P<project>[A-Za-z0-9_-]+)!2s(?P<dataset>[A-Za-z0-9_]+)!3s(?P<table>[A-Za-z0-9_]+)(?:!|$)")
 _INSTANCE = "camosbase:europe-west2:camos-prod-postgres"
 _DATABASE = "camos_prod"
-_SITE_SQL = "SELECT id, name, organisation_id, bigquery_destination, max_capacity, timezone, created_at, updated_at FROM sites WHERE id = %s"
-_DEVICE_SQL = "SELECT id, name, site_id, gcs_source_uri, status, analysis_interval_minutes, analysis_config, analyzed_until, created_at, updated_at FROM devices WHERE site_id = %s ORDER BY id"
+_SITE_SQL = "SELECT id, name, organisation_id, bigquery_destination, max_capacity, created_at, updated_at FROM public.sites WHERE id = %s"
+_DEVICE_SQL = "SELECT id, name, site_id, gcs_source_uri, status, analysis_interval_minutes, analysis_config, analyzed_until, created_at, updated_at FROM public.devices WHERE site_id = %s ORDER BY id"
 
 
 
@@ -53,7 +52,7 @@ def _destination(value):
 def _site(row):
     if row is None:
         raise ValueError("Snapshot site not found")
-    keys = ("id", "name", "organisation_id", "bigquery_destination", "max_capacity", "timezone", "created_at", "updated_at")
+    keys = ("id", "name", "organisation_id", "bigquery_destination", "max_capacity", "created_at", "updated_at")
     result = dict(zip(keys, row))
     if result["max_capacity"] is None or result["max_capacity"] <= 0:
         raise ValueError("Snapshot site max_capacity must be positive")
@@ -119,11 +118,8 @@ LOCAL = ROOT / "local"
 Q15 = timedelta(minutes=15)
 
 
-def _zone(site):
-    try:
-        return ZoneInfo(site["timezone"])
-    except Exception:
-        return timezone(timedelta(hours=1))
+def _zone():
+    return timezone.utc
 
 
 def _dt(value):
@@ -160,7 +156,7 @@ def _bucket(size):
 
 
 def _machine(start, site):
-    local = start.astimezone(_zone(site))
+    local = start.astimezone(_zone())
     monday = (local - timedelta(days=local.weekday())).date()
     q_start = start - timedelta(minutes=15 * 95)
     machine = {
@@ -207,7 +203,7 @@ def _roll_q15(machine):
 
 
 def _roll_calendar(machine, instant, site):
-    zone = _zone(site)
+    zone = _zone()
     local = instant.astimezone(zone)
     if local.date().isoformat() != machine["today"]["local_date"]:
         machine["yesterday"] = copy.deepcopy(machine["today"])
@@ -231,7 +227,7 @@ def _roll_calendar(machine, instant, site):
 
 
 def _active(machine, instant, site):
-    zone = _zone(site)
+    zone = _zone()
     local = instant.astimezone(zone)
     q = machine["q15"]
     index = _q_index(machine, instant)
@@ -252,7 +248,7 @@ def _add_occupancy(block, index, occupancy, seconds):
 
 
 def _next_boundary(value, target, site):
-    zone = _zone(site)
+    zone = _zone()
     values = [target]
     quarter = datetime.fromtimestamp(((int(value.timestamp()) // 900) + 1) * 900, tz=timezone.utc)
     values.append(quarter)
@@ -304,7 +300,7 @@ def apply_event(machine, event, site):
         machine["entry_fifo"].append(event["timestamp"])
         for block, index in active:
             _increment(block, "entrances", index)
-        zone = _zone(site)
+        zone = _zone()
         local = instant.astimezone(zone)
         day = local.weekday()
         week_index = active[3][1]
@@ -378,30 +374,26 @@ def _horizons(previous, devices, site):
 
 
 def Snapshot(site_id):
-    try:
-        previous = _read("snapshot.json")
-        if previous["site_id"] != site_id:
-            raise ValueError("snapshot not found")
-        site, devices, loaded_events = load_production_inputs(site_id, previous["ts"])
-        ts, stable = _horizons(previous, devices, site)
-        horizons = {d["id"]: _dt(d["analyzed_until"]) for d in devices if d["analyzed_until"]}
-        events = [e for e in loaded_events if e["device_id"] in horizons and _dt(e["timestamp"]) < horizons[e["device_id"]] and _dt(e["timestamp"]) < ts]
-        events.sort(key=lambda e: (e["timestamp"], e["event_id"]))
-        start = _dt(site["created_at"])
-        stable_machine = _machine(start, site)
-        for event in events:
-            if _dt(event["timestamp"]) < stable:
-                apply_event(stable_machine, event, site)
-        advance(stable_machine, stable, site)
-        recent = [e for e in events if stable <= _dt(e["timestamp"]) < ts]
-        current_machine = copy.deepcopy(stable_machine)
-        for event in recent:
-            apply_event(current_machine, event, site)
-        advance(current_machine, ts, site)
-        state = {"stable_until": _stamp(stable), "devices": _device_state(devices), "recent_events": recent, "stable_machine": stable_machine, "current_machine": current_machine}
-        row = {"site_id": site_id, "ts": _stamp(ts), "payload": derive_payload(current_machine, site, devices, state), "state": state, "updated_at": _stamp(ts)}
-        _write("snapshot.json", row)
-        return True
-    except Exception:
-        return False
-
+    previous = _read("snapshot.json")
+    if previous["site_id"] != site_id:
+        raise ValueError("snapshot not found")
+    site, devices, loaded_events = load_production_inputs(site_id, previous["ts"])
+    ts, stable = _horizons(previous, devices, site)
+    horizons = {d["id"]: _dt(d["analyzed_until"]) for d in devices if d["analyzed_until"]}
+    events = [e for e in loaded_events if e["device_id"] in horizons and _dt(e["timestamp"]) < horizons[e["device_id"]] and _dt(e["timestamp"]) < ts]
+    events.sort(key=lambda e: (e["timestamp"], e["event_id"]))
+    start = _dt(site["created_at"])
+    stable_machine = _machine(start, site)
+    for event in events:
+        if _dt(event["timestamp"]) < stable:
+            apply_event(stable_machine, event, site)
+    advance(stable_machine, stable, site)
+    recent = [e for e in events if stable <= _dt(e["timestamp"]) < ts]
+    current_machine = copy.deepcopy(stable_machine)
+    for event in recent:
+        apply_event(current_machine, event, site)
+    advance(current_machine, ts, site)
+    state = {"stable_until": _stamp(stable), "devices": _device_state(devices), "recent_events": recent, "stable_machine": stable_machine, "current_machine": current_machine}
+    row = {"site_id": site_id, "ts": _stamp(ts), "payload": derive_payload(current_machine, site, devices, state), "state": state, "updated_at": _stamp(ts)}
+    _write("snapshot.json", row)
+    return True
