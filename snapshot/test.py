@@ -1,12 +1,14 @@
 import copy
 import json
 from pathlib import Path
-
-from snapshot import Snapshot
-
+import sys
 
 ROOT = Path(__file__).resolve().parent
 LOCAL = ROOT / "local"
+sys.path.insert(0, str(ROOT.parent))
+
+from snapshot import Snapshot
+import snapshot.snapshot as engine
 
 
 def read(name):
@@ -19,6 +21,11 @@ def write(name, value):
 
 def main():
     baseline = {name: read(name) for name in ("devices.json", "events.json", "snapshot.json")}
+    engine.load_production_inputs = lambda site_id, previous_ts: (
+        read("site.json"),
+        [device for device in read("devices.json") if device["site_id"] == site_id],
+        [event for event in read("events.json") if event["device_id"] in {device["id"] for device in read("devices.json") if device["site_id"] == site_id}],
+    )
     try:
         assert Snapshot(1)
         row = read("snapshot.json")
