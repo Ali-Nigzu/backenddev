@@ -4,6 +4,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+try:
+    from .inputs import load_production_inputs
+except ImportError:
+    from inputs import load_production_inputs
+
 
 ROOT = Path(__file__).resolve().parent
 LOCAL = ROOT / "local"
@@ -270,16 +275,13 @@ def _horizons(previous, devices, site):
 
 def Snapshot(site_id):
     try:
-        site = _read("site.json")
-        if site["id"] != site_id:
-            raise ValueError("site not found")
-        devices = [d for d in _read("devices.json") if d["site_id"] == site_id]
         previous = _read("snapshot.json")
         if previous["site_id"] != site_id:
             raise ValueError("snapshot not found")
+        site, devices, loaded_events = load_production_inputs(site_id, previous["ts"])
         ts, stable = _horizons(previous, devices, site)
         horizons = {d["id"]: _dt(d["analyzed_until"]) for d in devices if d["analyzed_until"]}
-        events = [e for e in _read("events.json") if e["device_id"] in horizons and _dt(e["timestamp"]) < horizons[e["device_id"]] and _dt(e["timestamp"]) < ts]
+        events = [e for e in loaded_events if e["device_id"] in horizons and _dt(e["timestamp"]) < horizons[e["device_id"]] and _dt(e["timestamp"]) < ts]
         events.sort(key=lambda e: (e["timestamp"], e["event_id"]))
         start = _dt(site["created_at"])
         stable_machine = _machine(start, site)
