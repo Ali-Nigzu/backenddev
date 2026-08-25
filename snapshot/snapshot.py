@@ -14,6 +14,8 @@ _INSTANCE = "camosbase:europe-west2:camos-prod-postgres"
 _DATABASE = "camos_prod"
 _SITE_SQL = "SELECT id, name, organisation_id, bigquery_destination, max_capacity, created_at, updated_at FROM public.sites WHERE id = %s"
 _DEVICE_SQL = "SELECT id, name, site_id, gcs_source_uri, status, analysis_interval_minutes, analysis_config, analyzed_until, created_at, updated_at FROM public.devices WHERE site_id = %s ORDER BY id"
+_SNAPSHOT_SQL = "SELECT site_id, ts, payload, state, updated_at FROM public.snapshots WHERE site_id = %s"
+_SNAPSHOT_UPDATE_SQL = "UPDATE public.snapshots SET ts = %s, payload = %s::jsonb, state = %s::jsonb, updated_at = CURRENT_TIMESTAMP WHERE site_id = %s AND updated_at = %s RETURNING updated_at"
 
 
 
@@ -76,6 +78,25 @@ def _devices(rows):
     return result
 
 
+def _json_object(value, field):
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        raise ValueError(f"Snapshot {field} must be a JSON object")
+    return value
+
+
+def _snapshot(row):
+    if row is None:
+        raise ValueError("Snapshot row not found")
+    keys = ("site_id", "ts", "payload", "state", "updated_at")
+    result = dict(zip(keys, row))
+    result["state"] = _json_object(result["state"], "state")
+    result["ts"] = _stamp(result["ts"])
+    result["version"] = result.pop("updated_at")
+    return result
+
+
 def _events(client, table, devices, start, end):
     from google.cloud import bigquery
     ids = [device["id"] for device in devices]
@@ -95,9 +116,8 @@ def _events(client, table, devices, start, end):
     return sorted(deduplicated.values(), key=lambda event: (event["timestamp"], event["event_id"]))
 
 
-def load_production_inputs(site_id, previous_ts):
+def load_production_inputs(site_id):
     credentials = _credentials()
-    from google.cloud import bigquery
     with _connection(credentials) as connection:
         cursor = connection.cursor()
         try:
@@ -105,16 +125,40 @@ def load_production_inputs(site_id, previous_ts):
             site = _site(cursor.fetchone())
             cursor.execute(_DEVICE_SQL, (site_id,))
             devices = _devices(cursor.fetchall())
+            cursor.execute(_SNAPSHOT_SQL, (site_id,))
+            snapshot = _snapshot(cursor.fetchone())
         finally:
             cursor.close()
+    if site["id"] != site_id or snapshot["site_id"] != site_id:
+        raise ValueError(f"Snapshot context does not match site_id={site_id}")
+    from google.cloud import bigquery
     horizons = [device["analyzed_until"] for device in devices if device["status"] == "enabled" and device["analyzed_until"]]
-    end = max(horizons) if horizons else previous_ts
+    end = max(horizons) if horizons else site["created_at"]
     client = bigquery.Client(credentials=credentials, project=credentials.project_id)
-    return site, devices, _events(client, _destination(site["bigquery_destination"]), devices, site["created_at"], end)
+    events = _events(client, _destination(site["bigquery_destination"]), devices, site["created_at"], end)
+    return credentials, site, devices, snapshot, events
 
 
-ROOT = Path(__file__).resolve().parent
-LOCAL = ROOT / "local"
+def _persist(credentials, site_id, version, ts, payload, state):
+    payload_json = json.dumps(payload)
+    state_json = json.dumps(state)
+    with _connection(credentials) as connection:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                _SNAPSHOT_UPDATE_SQL,
+                (_dt(ts), payload_json, state_json, site_id, version),
+            )
+            if cursor.fetchone() is None:
+                raise RuntimeError(f"Concurrent Snapshot update for site_id={site_id}")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
 Q15 = timedelta(minutes=15)
 
 
@@ -128,17 +172,6 @@ def _dt(value):
 
 def _stamp(value):
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _read(name):
-    with (LOCAL / name).open(encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def _write(name, value):
-    with (LOCAL / name).open("w", encoding="utf-8") as handle:
-        json.dump(value, handle, indent=2)
-        handle.write("\n")
 
 
 def _zeros(size):
@@ -364,6 +397,23 @@ def derive_payload(machine, site, devices, state):
     return {"entrances_96": q["entrances"], "occupancy_96": averages, "exits_96": q["exits"], "footfall_96": [a + b for a, b in zip(q["entrances"], q["exits"])], "dwell_time_96": [0.0 if count == 0 else total / count for total, count in zip(q["dwell_sum_seconds"], q["dwell_count"])], "traffic_devices": axes, "traffic_split_96": traffic, "capacity": [[average * 100 / site["max_capacity"], hard * 100 / site["max_capacity"]] for average, hard in zip(averages, peak)], "today": today, "yesterday": yesterday, "week": week, "month": month, "quarter": quarter, "year": year, "all_time": all_time}
 
 
+def _previous(snapshot, site, devices):
+    if snapshot["state"] == {}:
+        return {
+            "site_id": site["id"],
+            "ts": site["created_at"],
+            "state": initial_state(site, devices),
+        }
+    required = {"stable_until", "devices", "recent_events", "stable_machine", "current_machine"}
+    if not required.issubset(snapshot["state"]):
+        raise ValueError("Snapshot state is malformed")
+    return {
+        "site_id": snapshot["site_id"],
+        "ts": snapshot["ts"],
+        "state": snapshot["state"],
+    }
+
+
 def _horizons(previous, devices, site):
     enabled = [d for d in devices if d["status"] == "enabled"]
     horizons = [_dt(d["analyzed_until"]) for d in enabled if d["analyzed_until"]]
@@ -374,10 +424,8 @@ def _horizons(previous, devices, site):
 
 
 def Snapshot(site_id):
-    previous = _read("snapshot.json")
-    if previous["site_id"] != site_id:
-        raise ValueError("snapshot not found")
-    site, devices, loaded_events = load_production_inputs(site_id, previous["ts"])
+    credentials, site, devices, snapshot, loaded_events = load_production_inputs(site_id)
+    previous = _previous(snapshot, site, devices)
     ts, stable = _horizons(previous, devices, site)
     horizons = {d["id"]: _dt(d["analyzed_until"]) for d in devices if d["analyzed_until"]}
     events = [e for e in loaded_events if e["device_id"] in horizons and _dt(e["timestamp"]) < horizons[e["device_id"]] and _dt(e["timestamp"]) < ts]
@@ -394,6 +442,6 @@ def Snapshot(site_id):
         apply_event(current_machine, event, site)
     advance(current_machine, ts, site)
     state = {"stable_until": _stamp(stable), "devices": _device_state(devices), "recent_events": recent, "stable_machine": stable_machine, "current_machine": current_machine}
-    row = {"site_id": site_id, "ts": _stamp(ts), "payload": derive_payload(current_machine, site, devices, state), "state": state, "updated_at": _stamp(ts)}
-    _write("snapshot.json", row)
+    payload = derive_payload(current_machine, site, devices, state)
+    _persist(credentials, site_id, snapshot["version"], _stamp(ts), payload, state)
     return True
