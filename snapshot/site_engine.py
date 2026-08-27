@@ -1,7 +1,7 @@
 import copy
 from datetime import datetime, timedelta, timezone
 
-SITE_ENGINE_VERSION = 3
+SITE_ENGINE_VERSION = 4
 ENGINE_VERSION = SITE_ENGINE_VERSION
 MAX_RETRIES = 2
 Q15 = timedelta(minutes=15)
@@ -63,8 +63,17 @@ def _machine(start, site):
     return machine
 
 
-def _device_watermarks(devices):
-    return {str(d["id"]): {"name": d["name"], "status": d["status"], "created_at": d["created_at"], "analyzed_until": d["analyzed_until"], "analysis_config": d.get("analysis_config")} for d in devices}
+def _device_watermarks(devices, view_until=None):
+    result = {}
+    for device in devices:
+        horizon = device_horizon(device)
+        result[str(device["id"])] = {
+            "name": device["name"], "status": device["status"],
+            "created_at": device["created_at"], "analyzed_until": device["analyzed_until"],
+            "source_horizon": _stamp(horizon),
+            "analysis_config": device.get("analysis_config"),
+        }
+    return result
 
 
 def _site_metadata(site):
@@ -87,8 +96,20 @@ def _state_v2(state):
     return state
 
 
-def _build_state(stable, devices, site, stable_machine, provisional_events):
-    return {"engine_version": ENGINE_VERSION, "stable_until": _stamp(stable), "device_watermarks": _device_watermarks(devices), "site_metadata": _site_metadata(site), "stable_machine": stable_machine, "provisional_events": provisional_events}
+def _build_state(stable, devices, site, stable_machine, provisional_events,
+                 view_until=None, current_machine=None, pending_events=None):
+    # The optional arguments keep the small pure-engine fixtures readable while all
+    # production v4 states always contain an explicit wall-clock current cache.
+    view_until = stable if view_until is None else view_until
+    current_machine = copy.deepcopy(stable_machine) if current_machine is None else current_machine
+    return {
+        "engine_version": ENGINE_VERSION, "view_until": _stamp(view_until),
+        "stable_until": None if stable is None else _stamp(stable),
+        "device_watermarks": _device_watermarks(devices, view_until),
+        "site_metadata": _site_metadata(site), "stable_machine": stable_machine,
+        "provisional_events": provisional_events, "pending_events": pending_events or [],
+        "current_machine": current_machine,
+    }
 
 def _q_index(machine, value):
     start = _dt(machine["q15"]["window_start"])
@@ -464,38 +485,57 @@ def merge_events(events, devices, start, end, site=None):
     return sorted(merged.values(), key=event_order)
 
 
+def _machine_is_valid(machine, cursor):
+    if machine.get("cursor_ts") != _stamp(cursor) or not validate_q15(machine):
+        return False
+    if not _calendar_shapes(machine) or int(machine["occupancy"]) < 0:
+        return False
+    fifo = [_dt(value) for value in machine["entry_fifo"]]
+    return (fifo == sorted(fifo) and len(fifo) == int(machine["occupancy"])
+            and (not fifo or fifo[0] + MAX_OPEN_VISIT >= cursor))
+
+
 def validate_site_state(state, snapshot_ts, devices):
-    required = {"engine_version", "stable_until", "device_watermarks", "site_metadata",
-                "stable_machine", "provisional_events"}
+    required = {"engine_version", "view_until", "stable_until", "device_watermarks",
+                "site_metadata", "stable_machine", "provisional_events", "pending_events",
+                "current_machine"}
     if not isinstance(state, dict) or state.get("engine_version") != SITE_ENGINE_VERSION or not required <= set(state):
         return None
     try:
-        stable, latest = _dt(state["stable_until"]), _dt(snapshot_ts)
-        machine = state["stable_machine"]
-        if stable > latest or machine.get("cursor_ts") != state["stable_until"] or not validate_q15(machine):
+        latest = _dt(snapshot_ts)
+        if state["view_until"] != _stamp(latest):
             return None
-        if not _calendar_shapes(machine) or int(machine["occupancy"]) < 0:
+        enabled = [device for device in devices if device["status"] == "enabled"]
+        if not _machine_is_valid(state["current_machine"], latest):
             return None
-        fifo = [_dt(value) for value in machine["entry_fifo"]]
-        if fifo != sorted(fifo) or len(fifo) != int(machine["occupancy"]):
+        if not enabled:
+            if state["stable_until"] is not None or state["provisional_events"]:
+                return None
+            return state
+        stable = _dt(state["stable_until"])
+        if stable > latest or not _machine_is_valid(state["stable_machine"], stable):
             return None
-        # Exact-boundary expiries intentionally survive stable checkpoints.
-        if fifo and fifo[0] + MAX_OPEN_VISIT < stable:
+        future_end = max(device_horizon(device) for device in enabled)
+        retained = state["provisional_events"] + state["pending_events"]
+        merged = merge_events(retained, devices, stable, future_end)
+        if len(merged) != len(retained):
             return None
-        events = merge_events(state["provisional_events"], devices, stable, latest)
-        if len(events) != len(state["provisional_events"]):
+        if any((_dt(event["timestamp"]) < latest) != (event in state["provisional_events"])
+               for event in merged):
             return None
     except (KeyError, TypeError, ValueError):
         return None
     return state
 
 
-def classify_site(site, devices, snapshot):
+def classify_site(site, devices, snapshot, snapshot_now=None):
     previous = validate_site_state(snapshot["state"], snapshot["ts"], devices)
     if previous is None:
         return "REBUILD", None
     old = previous["device_watermarks"]
-    current = _device_watermarks(devices)
+    latest = _dt(snapshot["ts"])
+    snapshot_now = latest if snapshot_now is None else snapshot_now
+    current = _device_watermarks(devices, snapshot_now)
     if previous["site_metadata"].get("destination") != _site_metadata(site)["destination"]:
         return "REBUILD", previous
     if set(old) != set(current):
@@ -509,26 +549,59 @@ def classify_site(site, devices, snapshot):
             return "REBUILD", previous
         if before.get("name") != value.get("name"):
             metadata_only = True
-    horizons = site_horizons(site, devices)
-    if horizons and (horizons[0] != _dt(snapshot["ts"]) or horizons[1] != _dt(previous["stable_until"])):
+    source_changed = any(old[key].get("source_horizon") != value.get("source_horizon")
+                         for key, value in current.items())
+    if source_changed:
         return "INCREMENTAL", previous
+    horizons = site_horizons(site, devices)
+    effective_stable = None if horizons is None else min(horizons[1], snapshot_now)
+    if effective_stable is not None and effective_stable > _dt(previous["stable_until"]):
+        # A captured source horizon may be ahead of the prior wall clock.  As NOW
+        # catches up, promote the already-fetched checkpoint without another read.
+        return "PROMOTE_ONLY", previous
+    if any(_dt(event["timestamp"]) < snapshot_now for event in previous["pending_events"]):
+        return "PROMOTE_ONLY", previous
     if current != old or metadata_only:
         return "METADATA_ONLY", previous
+    if snapshot_now != latest:
+        return "TIME_ONLY", previous
     return "NO_OP", previous
 
 
-def compute_site(site, devices, snapshot, classification, previous, supplied_events):
+def compute_site(site, devices, snapshot, classification, previous, supplied_events,
+                 snapshot_now=None):
+    snapshot_now = (_dt(snapshot["ts"]) if snapshot_now is None else snapshot_now)
     horizons = site_horizons(site, devices)
-    if horizons is None:
-        raise ValueError(f"Site {site['id']} has no enabled devices")
-    ts, stable = horizons
     start = _dt(site["created_at"])
+    if horizons is None:
+        if classification == "REBUILD":
+            stable_machine = _machine(start, site)
+            current = copy.deepcopy(stable_machine)
+            advance(current, snapshot_now, site)
+        else:
+            stable_machine = copy.deepcopy(previous["stable_machine"])
+            current = copy.deepcopy(previous["current_machine"])
+            advance(current, snapshot_now, site)
+        state = _build_state(None, devices, site, stable_machine, [], snapshot_now, current, [])
+        return snapshot_now, derive_payload(current, site, devices, state), state
+
+    stable = min(horizons[1], snapshot_now)
+    if classification in ("TIME_ONLY", "METADATA_ONLY"):
+        current = copy.deepcopy(previous["current_machine"])
+        advance(current, snapshot_now, site)
+        state = _build_state(_dt(previous["stable_until"]), devices, site,
+                             copy.deepcopy(previous["stable_machine"]),
+                             copy.deepcopy(previous["provisional_events"]), snapshot_now, current,
+                             copy.deepcopy(previous["pending_events"]))
+        return snapshot_now, derive_payload(current, site, devices, state), state
+
     if classification == "REBUILD":
-        events = merge_events(supplied_events, devices, start, ts, site)
+        events = merge_events(supplied_events, devices, start, horizons[0], site)
         stable_machine = _machine(start, site)
     else:
         old_stable = _dt(previous["stable_until"])
-        events = merge_events(previous["provisional_events"] + supplied_events, devices, old_stable, ts, site)
+        events = merge_events(previous["provisional_events"] + previous["pending_events"] + supplied_events,
+                              devices, old_stable, horizons[0], site)
         stable_machine = copy.deepcopy(previous["stable_machine"])
     boundary = stable
     for event in events:
@@ -536,10 +609,12 @@ def compute_site(site, devices, snapshot, classification, previous, supplied_eve
             apply_event(stable_machine, event, site)
     # Strict expiry is essential: an expiry exactly at stable belongs to current replay.
     advance(stable_machine, boundary, site, expire_at_target=False)
-    provisional = [event for event in events if boundary <= _dt(event["timestamp"]) < ts]
+    provisional = [event for event in events if boundary <= _dt(event["timestamp"]) < snapshot_now]
+    pending = [event for event in events if _dt(event["timestamp"]) >= snapshot_now]
     current = copy.deepcopy(stable_machine)
     for event in provisional:
         apply_event(current, event, site)
-    advance(current, ts, site, expire_at_target=True)
-    state = _build_state(boundary, devices, site, stable_machine, provisional)
-    return ts, derive_payload(current, site, devices, state), state
+    advance(current, snapshot_now, site, expire_at_target=True)
+    state = _build_state(boundary, devices, site, stable_machine, provisional,
+                         snapshot_now, current, pending)
+    return snapshot_now, derive_payload(current, site, devices, state), state
