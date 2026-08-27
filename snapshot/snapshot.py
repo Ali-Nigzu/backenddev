@@ -14,8 +14,8 @@ _INSTANCE = "camosbase:europe-west2:camos-prod-postgres"
 _DATABASE = "camos_prod"
 _SITE_SQL = "SELECT id, name, organisation_id, bigquery_destination, max_capacity, created_at, updated_at FROM public.sites WHERE id = %s"
 _DEVICE_SQL = "SELECT id, name, site_id, gcs_source_uri, status, analysis_interval_minutes, analysis_config, analyzed_until, created_at, updated_at FROM public.devices WHERE site_id = %s ORDER BY id"
-_SNAPSHOT_SQL = "SELECT site_id, ts, payload, state, updated_at FROM public.snapshots WHERE site_id = %s"
-_SNAPSHOT_UPDATE_SQL = "UPDATE public.snapshots SET ts = %s, payload = %s::jsonb, state = %s::jsonb, updated_at = CURRENT_TIMESTAMP WHERE site_id = %s AND updated_at = %s RETURNING updated_at"
+_SNAPSHOT_SQL = "SELECT site_id, ts, payload, state, updated_at FROM public.site_snapshots WHERE site_id = %s"
+_SNAPSHOT_UPDATE_SQL = "UPDATE public.site_snapshots SET ts = %s, payload = %s::jsonb, state = %s::jsonb, updated_at = CURRENT_TIMESTAMP WHERE site_id = %s AND updated_at = %s RETURNING updated_at"
 
 
 
@@ -166,7 +166,8 @@ def _persist(credentials, site_id, version, ts, payload, state):
             cursor.close()
 
 
-ENGINE_VERSION = 2
+SITE_ENGINE_VERSION = 3
+ENGINE_VERSION = SITE_ENGINE_VERSION
 MAX_RETRIES = 2
 Q15 = timedelta(minutes=15)
 MAX_OPEN_VISIT = timedelta(hours=4)
@@ -198,10 +199,15 @@ def _bucket(size):
     }
 
 
+def floor_to_q15(value):
+    value = value.astimezone(timezone.utc)
+    return value.replace(minute=value.minute - value.minute % 15, second=0, microsecond=0)
+
+
 def _machine(start, site):
     local = start.astimezone(_zone())
     monday = (local - timedelta(days=local.weekday())).date()
-    q_start = start - timedelta(minutes=15 * 95)
+    q_start = floor_to_q15(start) - timedelta(minutes=15 * 95)
     machine = {
         "cursor_ts": _stamp(start), "occupancy": 0, "entry_fifo": [],
         "q15": {
