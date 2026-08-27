@@ -99,6 +99,8 @@ def _snapshot(row):
 
 def _events(client, table, devices, start, end):
     from google.cloud import bigquery
+    if start >= end:
+        return []
     ids = [device["id"] for device in devices]
     if not ids:
         return []
@@ -117,6 +119,7 @@ def _events(client, table, devices, start, end):
 
 
 def load_production_inputs(site_id):
+    """Load only the persistent Snapshot context; BigQuery is queried on demand."""
     credentials = _credentials()
     with _connection(credentials) as connection:
         cursor = connection.cursor()
@@ -131,12 +134,16 @@ def load_production_inputs(site_id):
             cursor.close()
     if site["id"] != site_id or snapshot["site_id"] != site_id:
         raise ValueError(f"Snapshot context does not match site_id={site_id}")
+    return credentials, site, devices, snapshot
+
+
+def _load_events(credentials, site, devices, start, end):
     from google.cloud import bigquery
-    horizons = [device["analyzed_until"] for device in devices if device["status"] == "enabled" and device["analyzed_until"]]
-    end = max(horizons) if horizons else site["created_at"]
     client = bigquery.Client(credentials=credentials, project=credentials.project_id)
-    events = _events(client, _destination(site["bigquery_destination"]), devices, site["created_at"], end)
-    return credentials, site, devices, snapshot, events
+    return _events(client, _destination(site["bigquery_destination"]), devices, start, end)
+
+class _ConcurrentSnapshotUpdate(RuntimeError):
+    pass
 
 
 def _persist(credentials, site_id, version, ts, payload, state):
@@ -150,7 +157,7 @@ def _persist(credentials, site_id, version, ts, payload, state):
                 (_dt(ts), payload_json, state_json, site_id, version),
             )
             if cursor.fetchone() is None:
-                raise RuntimeError(f"Concurrent Snapshot update for site_id={site_id}")
+                raise _ConcurrentSnapshotUpdate(f"Concurrent Snapshot update for site_id={site_id}")
             connection.commit()
         except Exception:
             connection.rollback()
@@ -159,6 +166,8 @@ def _persist(credentials, site_id, version, ts, payload, state):
             cursor.close()
 
 
+ENGINE_VERSION = 2
+MAX_RETRIES = 2
 Q15 = timedelta(minutes=15)
 MAX_OPEN_VISIT = timedelta(hours=4)
 
@@ -213,15 +222,32 @@ def _machine(start, site):
     return machine
 
 
-def _device_state(devices):
+def _device_watermarks(devices):
     return {str(d["id"]): {"name": d["name"], "status": d["status"], "created_at": d["created_at"], "analyzed_until": d["analyzed_until"]} for d in devices}
 
 
-def initial_state(site, devices):
-    start = _dt(site["created_at"])
-    machine = _machine(start, site)
-    return {"stable_until": _stamp(start), "devices": _device_state(devices), "recent_events": [], "stable_machine": copy.deepcopy(machine), "current_machine": machine}
+def _site_metadata(site):
+    return {"max_capacity": site["max_capacity"]}
 
+
+def _state_v2(state):
+    required = {"engine_version", "stable_until", "device_watermarks", "site_metadata", "stable_machine", "provisional_events"}
+    if not isinstance(state, dict) or state.get("engine_version") != ENGINE_VERSION or not required.issubset(state):
+        return None
+    if not isinstance(state["device_watermarks"], dict) or not isinstance(state["site_metadata"], dict) or not isinstance(state["stable_machine"], dict) or not isinstance(state["provisional_events"], list):
+        return None
+    try:
+        _dt(state["stable_until"])
+        if state["stable_machine"]["cursor_ts"] != state["stable_until"]:
+            return None
+        _dt(state["stable_machine"]["cursor_ts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return state
+
+
+def _build_state(stable, devices, site, stable_machine, provisional_events):
+    return {"engine_version": ENGINE_VERSION, "stable_until": _stamp(stable), "device_watermarks": _device_watermarks(devices), "site_metadata": _site_metadata(site), "stable_machine": stable_machine, "provisional_events": provisional_events}
 
 def _q_index(machine, value):
     start = _dt(machine["q15"]["window_start"])
@@ -399,7 +425,7 @@ def derive_payload(machine, site, devices, state):
     current_ids = {int(d["id"]): d["name"] for d in devices}
     for values in q["traffic_counts"]:
         for device_id in values:
-            current_ids.setdefault(int(device_id), state["devices"][device_id]["name"])
+            current_ids.setdefault(int(device_id), state["device_watermarks"][device_id]["name"])
     axes = [{"device_id": device_id, "name": current_ids[device_id]} for device_id in sorted(current_ids)]
     traffic = []
     for values in q["traffic_counts"]:
@@ -421,51 +447,130 @@ def derive_payload(machine, site, devices, state):
     return {"entrances_96": q["entrances"], "occupancy_96": averages, "exits_96": q["exits"], "footfall_96": [a + b for a, b in zip(q["entrances"], q["exits"])], "dwell_time_96": [0.0 if count == 0 else total / count for total, count in zip(q["dwell_sum_seconds"], q["dwell_count"])], "traffic_devices": axes, "traffic_split_96": traffic, "capacity": [[average * 100 / site["max_capacity"], hard * 100 / site["max_capacity"]] for average, hard in zip(averages, peak)], "today": today, "yesterday": yesterday, "week": week, "month": month, "quarter": quarter, "year": year, "all_time": all_time}
 
 
-def _previous(snapshot, site, devices):
-    if snapshot["state"] == {}:
-        return {
-            "site_id": site["id"],
-            "ts": site["created_at"],
-            "state": initial_state(site, devices),
-        }
-    required = {"stable_until", "devices", "recent_events", "stable_machine", "current_machine"}
-    if not required.issubset(snapshot["state"]):
-        raise ValueError("Snapshot state is malformed")
-    return {
-        "site_id": snapshot["site_id"],
-        "ts": snapshot["ts"],
-        "state": snapshot["state"],
-    }
-
-
-def _horizons(previous, devices, site):
+def _horizons(previous_ts, previous_stable, devices):
     enabled = [d for d in devices if d["status"] == "enabled"]
     horizons = [_dt(d["analyzed_until"]) for d in enabled if d["analyzed_until"]]
-    ts = max(horizons) if horizons else _dt(previous["ts"])
+    ts = max(horizons) if horizons else previous_ts
     safe = [_dt(d["analyzed_until"]) if d["analyzed_until"] else _dt(d["created_at"]) for d in enabled]
-    stable = max(_dt(previous["state"]["stable_until"]), min(safe)) if safe else _dt(previous["state"]["stable_until"])
+    stable = max(previous_stable, min(safe)) if safe else previous_stable
     return ts, stable
 
 
-def Snapshot(site_id):
-    credentials, site, devices, snapshot, loaded_events = load_production_inputs(site_id)
-    previous = _previous(snapshot, site, devices)
-    ts, stable = _horizons(previous, devices, site)
+def _event_key(event):
+    return event["timestamp"], -event["event"], event["event_id"]
+
+
+def _merge_events(events, devices, start, end):
     horizons = {d["id"]: _dt(d["analyzed_until"]) for d in devices if d["analyzed_until"]}
-    events = [e for e in loaded_events if e["device_id"] in horizons and _dt(e["timestamp"]) < horizons[e["device_id"]] and _dt(e["timestamp"]) < ts]
-    events.sort(key=lambda e: (e["timestamp"], -e["event"], e["event_id"]))
+    deduplicated = {}
+    for event in events:
+        try:
+            instant, device_id, event_id = _dt(event["timestamp"]), int(event["device_id"]), int(event["event_id"])
+            normalised = {"device_id": device_id, "event_id": event_id, "event": int(event["event"]), "timestamp": _stamp(instant), "sex": int(event["sex"]), "age_bucket": int(event["age_bucket"])}
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Malformed Snapshot provisional event") from error
+        if device_id not in horizons or not start <= instant < end or instant >= horizons[device_id]:
+            continue
+        previous = deduplicated.setdefault(event_id, normalised)
+        if previous != normalised:
+            raise ValueError(f"Conflicting event_id: {event_id}")
+    return sorted(deduplicated.values(), key=_event_key)
+
+
+def _provisional_is_safe(state, snapshot_ts):
+    try:
+        start, end = _dt(state["stable_until"]), _dt(snapshot_ts)
+        for event in state["provisional_events"]:
+            if not start <= _dt(event["timestamp"]) < end:
+                return False
+            for key in ("device_id", "event_id", "event", "sex", "age_bucket"):
+                int(event[key])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _membership_is_safe(previous, current):
+    if set(previous) != set(current):
+        return False
+    for device_id, watermark in current.items():
+        old = previous[device_id]
+        if any(old.get(key) != watermark.get(key) for key in ("status", "created_at")):
+            return False
+        old_horizon, new_horizon = old.get("analyzed_until"), watermark.get("analyzed_until")
+        if old_horizon and (not new_horizon or _dt(new_horizon) < _dt(old_horizon)):
+            return False
+    return True
+
+
+def _current_from(stable_machine, provisional, ts, site):
+    current = copy.deepcopy(stable_machine)
+    for event in provisional:
+        apply_event(current, event, site)
+    advance(current, ts, site)
+    return current
+
+
+def _full_rebuild(credentials, site, devices):
     start = _dt(site["created_at"])
+    ts, stable = _horizons(start, start, devices)
+    events = _merge_events(_load_events(credentials, site, devices, start, ts), devices, start, ts)
     stable_machine = _machine(start, site)
     for event in events:
         if _dt(event["timestamp"]) < stable:
             apply_event(stable_machine, event, site)
     advance(stable_machine, stable, site)
-    recent = [e for e in events if stable <= _dt(e["timestamp"]) < ts]
-    current_machine = copy.deepcopy(stable_machine)
-    for event in recent:
-        apply_event(current_machine, event, site)
-    advance(current_machine, ts, site)
-    state = {"stable_until": _stamp(stable), "devices": _device_state(devices), "recent_events": recent, "stable_machine": stable_machine, "current_machine": current_machine}
-    payload = derive_payload(current_machine, site, devices, state)
-    _persist(credentials, site_id, snapshot["version"], _stamp(ts), payload, state)
-    return True
+    provisional = [event for event in events if stable <= _dt(event["timestamp"]) < ts]
+    current = _current_from(stable_machine, provisional, ts, site)
+    state = _build_state(stable, devices, site, stable_machine, provisional)
+    return _stamp(ts), derive_payload(current, site, devices, state), state
+
+
+def _incremental(credentials, site, devices, snapshot, previous):
+    previous_ts, previous_stable = _dt(snapshot["ts"]), _dt(previous["stable_until"])
+    ts, stable = _horizons(previous_ts, previous_stable, devices)
+    watermarks, metadata = _device_watermarks(devices), _site_metadata(site)
+    if ts < previous_ts or stable < previous_stable:
+        return _full_rebuild(credentials, site, devices)
+    if ts == previous_ts and stable == previous_stable and watermarks == previous["device_watermarks"] and metadata == previous["site_metadata"]:
+        return None
+    horizons_changed = any(
+        previous["device_watermarks"][device_id].get("analyzed_until")
+        != watermark.get("analyzed_until")
+        for device_id, watermark in watermarks.items()
+    )
+    if ts == previous_ts and stable == previous_stable and not horizons_changed:
+        current = _current_from(previous["stable_machine"], previous["provisional_events"], ts, site)
+        state = _build_state(stable, devices, site, previous["stable_machine"], previous["provisional_events"])
+        return _stamp(ts), derive_payload(current, site, devices, state), state
+    fetched = _load_events(credentials, site, devices, previous_stable, ts)
+    events = _merge_events(previous["provisional_events"] + fetched, devices, previous_stable, ts)
+    stable_machine = copy.deepcopy(previous["stable_machine"])
+    for event in events:
+        if _dt(event["timestamp"]) < stable:
+            apply_event(stable_machine, event, site)
+    advance(stable_machine, stable, site)
+    provisional = [event for event in events if stable <= _dt(event["timestamp"]) < ts]
+    current = _current_from(stable_machine, provisional, ts, site)
+    state = _build_state(stable, devices, site, stable_machine, provisional)
+    return _stamp(ts), derive_payload(current, site, devices, state), state
+
+
+def Snapshot(site_id):
+    for attempt in range(MAX_RETRIES + 1):
+        credentials, site, devices, snapshot = load_production_inputs(site_id)
+        previous = _state_v2(snapshot["state"])
+        if previous is None or not _provisional_is_safe(previous, snapshot["ts"]) or not _membership_is_safe(previous["device_watermarks"], _device_watermarks(devices)):
+            result = _full_rebuild(credentials, site, devices)
+        else:
+            result = _incremental(credentials, site, devices, snapshot, previous)
+        if result is None:
+            return True
+        ts, payload, state = result
+        try:
+            _persist(credentials, site_id, snapshot["version"], ts, payload, state)
+            return True
+        except _ConcurrentSnapshotUpdate:
+            if attempt == MAX_RETRIES:
+                raise RuntimeError(f"Snapshot update repeatedly conflicted for site_id={site_id}") from None
+    raise AssertionError("unreachable")
