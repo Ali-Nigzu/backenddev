@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+SNAPSHOT_STATE_VERSION = 1
+
 
 @dataclass(frozen=True)
 class Event:

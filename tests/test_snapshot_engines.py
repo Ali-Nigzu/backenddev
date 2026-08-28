@@ -8,6 +8,7 @@ from snapshot import organisation_engine as org
 from snapshot import site_engine as site
 from snapshot.models import SourceRange
 from snapshot.source import coalesce_ranges
+from snapshot.storage import _status, membership_fingerprint
 
 UTC = timezone.utc
 
@@ -16,8 +17,9 @@ def dt(hour, minute=0, second=0, day=1):
     return datetime(2026, 1, day, hour, minute, second, tzinfo=UTC)
 
 
-def site_record(site_id=1, capacity=10):
+def site_record(site_id=1, capacity=10, status="enabled"):
     return {"id": site_id, "name": str(site_id), "max_capacity": capacity,
+            "status": status,
             "created_at": site.stamp(dt(0)), "destination": "p.d.t",
             "bigquery_destination": "p.d.t"}
 
@@ -139,7 +141,7 @@ def test_horizons_and_no_enabled_capacity_rule():
     state = {"device_watermarks": {}, "metadata": {"device_names": {}}}
     payload = org.derive_payload(site.new_machine(dt(12), {}), sites, state)
     assert payload["capacity"][-1] == [0.0, 0.0]
-    with pytest.raises(ValueError, match="no analytically relevant"):
+    with pytest.raises(ValueError, match="snapshot_now is required"):
         org.organisation_horizons({4: None})
 
 
@@ -154,14 +156,14 @@ def test_source_ranges_coalesce_without_crossing_devices():
                       SourceRange("p.d.t", 1, 2, dt(9), dt(11))]
 
 
-def test_site_v2_and_corrupt_v3_are_not_reusable():
+def test_snapshot_v1_and_corrupt_state_are_not_reusable():
     record = site_record()
     devices = [device(horizon=dt(12))]
     machine = site.new_machine(dt(0), record)
     site.advance(machine, dt(12), record, expire_at_target=False)
     state = site._build_state(dt(12), devices, record, machine, [])
     assert site.validate_site_state(state, site.stamp(dt(12)), devices) is state
-    legacy = dict(state, engine_version=2)
+    legacy = dict(state, version=2)
     assert site.validate_site_state(legacy, site.stamp(dt(12)), devices) is None
     corrupt = dict(state)
     corrupt["stable_machine"] = dict(machine)
@@ -294,11 +296,11 @@ def _site_snapshot(record, devices, now, rows):
     return {"ts": site.stamp(result[0]), "payload": result[1], "state": result[2]}
 
 
-def test_site_v4_wall_clock_time_only_and_q15_roll():
+def test_site_v1_wall_clock_time_only_and_q15_roll():
     record = site_record()
     devices = [device(horizon=dt(12))]
     snapshot = _site_snapshot(record, devices, dt(12, 14, 59), [])
-    assert snapshot["state"]["engine_version"] == 4
+    assert snapshot["state"]["version"] == 1
     classification, previous = site.classify_site(record, devices, snapshot, dt(12, 15))
     assert classification == "TIME_ONLY"
     ts, payload, state = site.compute_site(record, devices, snapshot, classification,
@@ -384,15 +386,15 @@ def test_late_entry_changes_past_and_current_state():
     assert sum(current["all_time"]["entrances"]) == 1
 
 
-def test_no_enabled_device_site_advances_with_null_stable_and_capacity():
+def test_no_enabled_device_site_advances_stable_to_now_and_capacity():
     record = site_record(capacity=25)
     devices = [device(status="disabled")]
     snapshot = _site_snapshot(record, devices, dt(12, 14, 59), [])
-    assert snapshot["state"]["stable_until"] is None
+    assert snapshot["state"]["stable_until"] == site.stamp(dt(12, 14, 59))
     classification, previous = site.classify_site(record, devices, snapshot, dt(12, 15))
     result = site.compute_site(record, devices, snapshot, classification, previous, [], dt(12, 15))
     assert result[0] == dt(12, 15)
-    assert result[2]["stable_until"] is None
+    assert result[2]["stable_until"] == site.stamp(dt(12, 15))
     assert result[2]["provisional_events"] == []
     assert result[1]["capacity"][-1] == [0.0, 0.0]
 
@@ -411,22 +413,22 @@ def test_current_cache_time_advance_equals_full_reconstruction():
 
 def _org_snapshot(sites, devices_by_site, horizons, now, rows):
     result = org.compute(sites, devices_by_site, horizons, None, site.stamp(now),
-                         rows, "REBUILD", now)
+                         rows, "REBUILD", now, "enabled")
     return {"ts": site.stamp(result[0]), "payload": result[1], "state": result[2]}
 
 
-def test_organisation_v2_wall_clock_cache_and_source_cap():
+def test_organisation_v1_wall_clock_cache_and_source_cap():
     sites = [site_record(1), site_record(2)]
     devices_by_site = {1: [device(1, 1, dt(12, 2))], 2: [device(2, 2, dt(11, 30))]}
     horizons = {1: {"stable_until": dt(12, 2)}, 2: {"stable_until": dt(11, 30)}}
     snapshot = _org_snapshot(sites, devices_by_site, horizons, dt(12), [])
     state = snapshot["state"]
-    assert state["engine_version"] == 2
+    assert state["version"] == 1
     assert state["view_until"] == site.stamp(dt(12))
     assert state["stable_until"] == site.stamp(dt(11, 30))
     assert "site_horizons" not in state
     assert state["site_source_horizons"]["1"] == {"stable_until": site.stamp(dt(12, 2))}
-    assert org.validate_state(state, snapshot["ts"], sites, devices_by_site) is state
+    assert org.validate_state(state, snapshot["ts"], sites, devices_by_site, "enabled") is state
     result = org.compute(sites, devices_by_site, horizons, state, snapshot["ts"], [],
                          "TIME_ONLY", dt(12, 15))
     assert result[0] == dt(12, 15)
@@ -452,14 +454,14 @@ def test_organisation_late_exit_repairs_site_local_runtime_and_expiry():
     assert state["current_machine"]["occupancy"] == 0
 
 
-def test_organisation_v2_validation_accepts_site_local_positive_occupancy():
+def test_organisation_v1_validation_accepts_site_local_positive_occupancy():
     sites = [site_record(1)]
     devices_by_site = {1: [device(1, 1, dt(11))]}
     horizons = {1: {"stable_until": dt(11)}}
     snapshot = _org_snapshot(sites, devices_by_site, horizons, dt(12),
                              [event(dt(10), 1, site_id=1)])
     assert snapshot["state"]["current_machine"]["occupancy"] == 1
-    assert org.validate_state(snapshot["state"], snapshot["ts"], sites, devices_by_site) is snapshot["state"]
+    assert org.validate_state(snapshot["state"], snapshot["ts"], sites, devices_by_site, "enabled") is snapshot["state"]
 
 
 def test_orchestration_time_only_plans_zero_source_ranges():
@@ -470,6 +472,7 @@ def test_orchestration_time_only_plans_zero_source_ranges():
     horizons = {1: {"stable_until": dt(12)}}
     org_snapshot = _org_snapshot([record], {1: devices}, horizons, dt(12), [])
     context = {
+        "organisation": {"id": 1, "status": "enabled"},
         "sites": [record], "devices_by_site": {1: devices},
         "site_snapshots": {1: site_snapshot}, "organisation_snapshot": org_snapshot,
         "snapshot_now": dt(12, 5),
@@ -481,3 +484,181 @@ def test_orchestration_time_only_plans_zero_source_ranges():
     assert org_classification == "TIME_ONLY"
     assert orchestration._ranges(context, classifications, previous, org_classification,
                                  org_previous, planned_horizons) == []
+
+
+def test_slow_device_retirement_promotes_without_reads_or_history_loss():
+    orchestration = importlib.import_module("snapshot.snapshot")
+    record = site_record()
+    before_devices = [device(1, horizon=dt(15)), device(2, horizon=dt(10))]
+    rows = [event(dt(9), 1, device_id=2), event(dt(9, 30), 0, device_id=2, event_id=2)]
+    snapshot = _site_snapshot(record, before_devices, dt(12), rows)
+    after_devices = [before_devices[0], dict(before_devices[1], status="disabled")]
+    classification, previous = site.classify_site(record, after_devices, snapshot, dt(12))
+    assert classification == "SOURCE_RETIREMENT"
+    context = {"sites": [record], "devices_by_site": {1: after_devices}}
+    assert orchestration._ranges(context, {1: classification}, {1: previous},
+                                 classification, None, {1: {"stable_until": dt(15)}}) == []
+    result = site.compute_site(record, after_devices, snapshot, classification, previous, [], dt(12))
+    assert result[2]["stable_until"] == site.stamp(dt(12))
+    assert result[1]["all_time"] == snapshot["payload"]["all_time"]
+    assert result[1]["traffic_devices"] == [
+        {"device_id": 1, "name": "camera"}, {"device_id": 2, "name": "camera"}]
+
+
+def test_fast_device_retirement_leaves_slow_active_constraint():
+    record = site_record()
+    before = [device(1, horizon=dt(15)), device(2, horizon=dt(10))]
+    snapshot = _site_snapshot(record, before, dt(12), [event(dt(9), 1, device_id=1)])
+    after = [dict(before[0], status="disabled"), before[1]]
+    classification, previous = site.classify_site(record, after, snapshot, dt(12))
+    result = site.compute_site(record, after, snapshot, classification, previous, [], dt(12))
+    assert classification == "SOURCE_RETIREMENT"
+    assert result[2]["stable_until"] == site.stamp(dt(10))
+    assert sum(result[1]["all_time"]["entrances"]) == 1
+
+
+def test_last_device_retirement_preserves_fifo_and_expires_exactly():
+    record = site_record()
+    enabled = [device(horizon=dt(10))]
+    snapshot = _site_snapshot(record, enabled, dt(10), [event(dt(9), 1)])
+    retired = [dict(enabled[0], status="disabled")]
+    classification, previous = site.classify_site(record, retired, snapshot, dt(10))
+    at_retirement = site.compute_site(record, retired, snapshot, classification, previous, [], dt(10))
+    current = {"ts": site.stamp(at_retirement[0]), "payload": at_retirement[1], "state": at_retirement[2]}
+    classification, previous = site.classify_site(record, retired, current, dt(12, 59, 59))
+    before_expiry = site.compute_site(record, retired, current, classification, previous, [], dt(12, 59, 59))
+    assert before_expiry[2]["current_machine"]["occupancy"] == 1
+    current = {"ts": site.stamp(before_expiry[0]), "payload": before_expiry[1], "state": before_expiry[2]}
+    classification, previous = site.classify_site(record, retired, current, dt(13))
+    expired = site.compute_site(record, retired, current, classification, previous, [], dt(13))
+    assert expired[2]["stable_until"] == site.stamp(dt(13))
+    assert expired[2]["current_machine"]["occupancy"] == 0
+    assert sum(expired[1]["all_time"]["entrances"]) == 1
+    assert sum(expired[1]["all_time"]["exits"]) == 0
+
+
+def test_retired_device_pending_event_is_applied_without_refetch():
+    record = site_record()
+    enabled = [device(horizon=dt(12))]
+    future = event(dt(11), 1)
+    snapshot = _site_snapshot(record, enabled, dt(10), [future])
+    retired = [dict(enabled[0], status="disabled")]
+    classification, previous = site.classify_site(record, retired, snapshot, dt(10, 30))
+    result = site.compute_site(record, retired, snapshot, classification, previous, [], dt(10, 30))
+    assert result[2]["pending_events"] == [future]
+    current = {"ts": site.stamp(result[0]), "payload": result[1], "state": result[2]}
+    classification, previous = site.classify_site(record, retired, current, dt(11, 1))
+    result = site.compute_site(record, retired, current, classification, previous, [], dt(11, 1))
+    assert result[2]["pending_events"] == []
+    assert sum(result[1]["all_time"]["entrances"]) == 1
+
+
+def test_rebuild_ranges_include_disabled_devices_and_terminal_delta_once():
+    orchestration = importlib.import_module("snapshot.snapshot")
+    record = site_record(status="disabled")
+    retired = [device(horizon=dt(10), status="disabled")]
+    context = {"sites": [record], "devices_by_site": {1: retired}}
+    rebuilt = orchestration._ranges(context, {1: "REBUILD"}, {1: None},
+                                    "REBUILD", None, {1: None})
+    assert rebuilt == [SourceRange("p.d.t", 1, 1, dt(0), dt(10))]
+
+    old_device = device(horizon=dt(10), status="disabled")
+    snapshot = _site_snapshot(record, [old_device], dt(10), [])
+    advanced = [device(horizon=dt(10, 15), status="disabled")]
+    classification, previous = site.classify_site(record, advanced, snapshot, dt(10, 15))
+    assert classification == "INCREMENTAL"
+    context["devices_by_site"] = {1: advanced}
+    terminal = orchestration._ranges(context, {1: classification}, {1: previous},
+                                     classification, None, {1: None})
+    assert terminal == [SourceRange("p.d.t", 1, 1, dt(10), dt(10, 15))]
+
+
+def test_site_retirement_unpins_org_but_keeps_history_capacity_and_axis():
+    sites = [site_record(1, 10), site_record(2, 20)]
+    devices = {1: [device(1, 1, dt(15))], 2: [device(2, 2, dt(9))]}
+    horizons = {1: {"stable_until": dt(15)}, 2: {"stable_until": dt(9)}}
+    rows = [event(dt(8), 1, site_id=2, device_id=2)]
+    snapshot = _org_snapshot(sites, devices, horizons, dt(12), rows)
+    retired_sites = [sites[0], dict(sites[1], status="disabled")]
+    retired_horizons = {1: {"stable_until": dt(15)}, 2: None}
+    result = org.compute(retired_sites, devices, retired_horizons, snapshot["state"], snapshot["ts"],
+                         [], "SOURCE_RETIREMENT", dt(12), "enabled")
+    assert result[2]["stable_until"] == site.stamp(dt(12))
+    assert sum(result[1]["all_time"]["entrances"]) == 1
+    assert result[1]["traffic_devices"] == [
+        {"site_id": 1, "name": "1"}, {"site_id": 2, "name": "2"}]
+    assert result[1]["capacity"][-1][1] == pytest.approx(100 / 30)
+
+
+def test_no_active_sites_advance_org_history_and_shared_version():
+    sites = [site_record(1, 10, status="disabled")]
+    devices = {1: [device(1, 1, dt(10), status="disabled")]}
+    snapshot = _org_snapshot(sites, devices, {1: None}, dt(10), [event(dt(9), 1)])
+    assert snapshot["state"]["version"] == 1
+    result = org.compute(sites, devices, {1: None}, snapshot["state"], snapshot["ts"], [],
+                         "PROMOTE_ONLY", dt(13), "disabled")
+    assert result[2]["stable_until"] == site.stamp(dt(13))
+    assert sum(result[1]["all_time"]["entrances"]) == 1
+    assert result[2]["current_machine"]["occupancy"] == 0
+
+
+def test_status_validation_and_configuration_fingerprint():
+    assert _status("enabled", "Site", 1) == "enabled"
+    assert _status("disabled", "Device", 2) == "disabled"
+    with pytest.raises(ValueError, match="invalid status"):
+        _status(None, "Organisation", 3)
+    context = {
+        "organisation": {"id": 1, "status": "enabled"},
+        "sites": [dict(site_record(), organisation_id=1)], "devices_by_site": {1: [device()]},
+    }
+    baseline = membership_fingerprint(context)
+    assert membership_fingerprint({**context, "organisation": {"id": 1, "status": "disabled"}}) != baseline
+    assert membership_fingerprint({**context, "sites": [dict(site_record(), organisation_id=1,
+                                                               status="disabled")]}) != baseline
+    assert membership_fingerprint({**context, "devices_by_site": {
+        1: [dict(device(), status="disabled")]}}) != baseline
+
+
+def test_disabled_organisation_is_metadata_not_an_execution_gate():
+    orchestration = importlib.import_module("snapshot.snapshot")
+    record = site_record()
+    devices = [device(horizon=dt(10))]
+    site_snapshot = _site_snapshot(record, devices, dt(10), [])
+    org_snapshot = _org_snapshot([record], {1: devices}, {1: {"stable_until": dt(10)}}, dt(10), [])
+    context = {
+        "organisation": {"id": 1, "status": "disabled"},
+        "sites": [record], "devices_by_site": {1: devices},
+        "site_snapshots": {1: site_snapshot}, "organisation_snapshot": org_snapshot,
+    }
+    classification, _ = orchestration._org_classification(
+        context, {1: {"stable_until": dt(10)}}, dt(10, 5))
+    assert classification == "METADATA_ONLY"
+
+
+def test_mixed_status_incremental_state_matches_clean_historical_rebuild():
+    record = site_record()
+    before = [device(1, horizon=dt(12)), device(2, horizon=dt(10))]
+    rows = [event(dt(9), 1, device_id=2),
+            event(dt(9, 30), 0, device_id=2, event_id=2),
+            event(dt(10, 30), 1, device_id=1, event_id=3)]
+    snapshot = _site_snapshot(record, before, dt(11), rows)
+    mixed = [before[0], dict(before[1], status="disabled")]
+    classification, previous = site.classify_site(record, mixed, snapshot, dt(11))
+    transitioned = site.compute_site(record, mixed, snapshot, classification, previous, [], dt(11))
+    rebuilt = _site_snapshot(record, mixed, dt(11), rows)
+    assert transitioned[1] == rebuilt["payload"]
+    assert transitioned[2]["stable_machine"] == rebuilt["state"]["stable_machine"]
+    assert transitioned[2]["current_machine"] == rebuilt["state"]["current_machine"]
+
+
+def test_retired_provisional_truth_is_promoted_not_discarded():
+    record = site_record()
+    enabled = [device(1, horizon=dt(12)), device(2, horizon=dt(10))]
+    provisional = event(dt(10, 30), 1, device_id=1)
+    snapshot = _site_snapshot(record, enabled, dt(11), [provisional])
+    assert snapshot["state"]["provisional_events"] == [provisional]
+    retired = [dict(enabled[0], status="disabled"), enabled[1]]
+    classification, previous = site.classify_site(record, retired, snapshot, dt(11))
+    result = site.compute_site(record, retired, snapshot, classification, previous, [], dt(11))
+    assert result[2]["provisional_events"] == [provisional]
+    assert sum(result[1]["all_time"]["entrances"]) == 1

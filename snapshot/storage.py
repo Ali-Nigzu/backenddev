@@ -43,22 +43,30 @@ def _json(value, field):
     return value
 
 
+def _status(value, entity, entity_id):
+    if value not in ("enabled", "disabled"):
+        raise ValueError(f"{entity} {entity_id} has invalid status: {value!r}")
+    return value
+
+
 def load_context(connection, organisation_id, destination_parser):
     cursor = connection.cursor()
     try:
-        cursor.execute("SELECT id, name, updated_at FROM public.organisations WHERE id=%s", (organisation_id,))
+        cursor.execute("SELECT id, name, status, updated_at FROM public.organisations WHERE id=%s", (organisation_id,))
         row = cursor.fetchone()
         if row is None:
             raise ValueError(f"Snapshot organisation not found: {organisation_id}")
-        organisation = {"id": int(row[0]), "name": row[1], "updated_at": row[2]}
-        cursor.execute("SELECT id,name,organisation_id,bigquery_destination,max_capacity,created_at,updated_at FROM public.sites WHERE organisation_id=%s ORDER BY id", (organisation_id,))
+        organisation = {"id": int(row[0]), "name": row[1],
+                        "status": _status(row[2], "Organisation", row[0]), "updated_at": row[3]}
+        cursor.execute("SELECT id,name,organisation_id,bigquery_destination,max_capacity,status,created_at,updated_at FROM public.sites WHERE organisation_id=%s ORDER BY id", (organisation_id,))
         sites = []
         for row in cursor.fetchall():
             if row[4] is None or row[4] <= 0:
                 raise ValueError(f"Site {row[0]} max_capacity must be positive")
             sites.append({"id": int(row[0]), "name": row[1], "organisation_id": int(row[2]),
                           "bigquery_destination": row[3], "destination": destination_parser(row[3]),
-                          "max_capacity": int(row[4]), "created_at": stamp(row[5]), "updated_at": stamp(row[6])})
+                          "max_capacity": int(row[4]), "status": _status(row[5], "Site", row[0]),
+                          "created_at": stamp(row[6]), "updated_at": stamp(row[7])})
         site_ids = [site["id"] for site in sites]
         devices_by_site = {site_id: [] for site_id in site_ids}
         if site_ids:
@@ -66,7 +74,7 @@ def load_context(connection, organisation_id, destination_parser):
             for row in cursor.fetchall():
                 config = json.loads(row[4]) if isinstance(row[4], str) else row[4]
                 devices_by_site[int(row[2])].append({"id": int(row[0]), "name": row[1], "site_id": int(row[2]),
-                    "status": row[3], "analysis_config": config, "analyzed_until": None if row[5] is None else stamp(row[5]),
+                    "status": _status(row[3], "Device", row[0]), "analysis_config": config, "analyzed_until": None if row[5] is None else stamp(row[5]),
                     "created_at": stamp(row[6]), "updated_at": stamp(row[7])})
             cursor.execute("SELECT site_id,ts,payload,state,updated_at FROM public.site_snapshots WHERE site_id = ANY(%s)", (site_ids,))
             site_rows = {int(row[0]): {"site_id": int(row[0]), "ts": stamp(row[1]), "payload": _json(row[2], "payload"),
@@ -90,7 +98,8 @@ def load_context(connection, organisation_id, destination_parser):
 
 def membership_fingerprint(context):
     return (
-        tuple((site["id"], site["organisation_id"], site["destination"], site["created_at"], site["max_capacity"])
+        (context["organisation"]["id"], context["organisation"]["status"]),
+        tuple((site["id"], site["organisation_id"], site["status"], site["destination"], site["created_at"], site["max_capacity"])
               for site in context["sites"]),
         tuple((site_id, device["id"], device["status"], device["created_at"], repr(device["analysis_config"]))
               for site_id in sorted(context["devices_by_site"]) for device in context["devices_by_site"][site_id]),
