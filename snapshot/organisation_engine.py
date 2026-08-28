@@ -8,7 +8,6 @@ import copy
 from datetime import timedelta
 
 from . import site_engine as engine
-from .models import SNAPSHOT_STATE_VERSION
 
 def organisation_horizons(site_results, snapshot_now=None):
     relevant = [value for value in site_results.values() if value is not None]
@@ -47,10 +46,6 @@ def metadata(sites, devices_by_site, organisation_status=None):
         "site_statuses": {str(s["id"]): s["status"] for s in sites},
         "device_names": {str(d["id"]): d["name"] for values in devices_by_site.values() for d in values},
     }
-
-
-def _runtime(machine):
-    return {"occupancy": int(machine["occupancy"]), "entry_fifo": list(machine["entry_fifo"])}
 
 
 def _expire_before(machine, runtimes, target, include_target):
@@ -119,8 +114,6 @@ def apply_event(machine, runtimes, event):
 def advance(machine, runtimes, target, include_target_expiry=True):
     _expire_before(machine, runtimes, target, include_target_expiry)
     engine.advance(machine, target, {}, expire_at_target=False)
-    if machine["occupancy"] != sum(runtime["occupancy"] for runtime in runtimes.values()):
-        raise ValueError("Organisation occupancy/runtime mismatch")
 
 
 def current_from(stable_machine, stable_runtime, provisional, target):
@@ -159,76 +152,12 @@ def derive_payload(machine, sites, state):
     return payload
 
 
-def validate_state(state, row_ts, sites, devices_by_site, organisation_status=None):
-    required = {"version", "view_until", "stable_until", "membership", "site_source_horizons",
-                "device_watermarks", "metadata", "stable_machine", "stable_site_runtime",
-                "provisional_events", "pending_events", "traffic_dimension", "current_machine",
-                "current_site_runtime"}
-    if not isinstance(state, dict) or state.get("version") != SNAPSHOT_STATE_VERSION or not required <= set(state):
-        return None
-    if state["traffic_dimension"] != "site":
-        return None
-    try:
-        stable, latest = engine.parse_ts(state["stable_until"]), engine.parse_ts(row_ts)
-        if state["view_until"] != engine.stamp(latest) or stable > latest:
-            return None
-        for machine, cursor in ((state["stable_machine"], stable),
-                                (state["current_machine"], latest)):
-            if (machine.get("cursor_ts") != engine.stamp(cursor)
-                    or not engine.validate_q15(machine)
-                    or not engine._calendar_shapes(machine)
-                    or int(machine.get("occupancy", -1)) < 0
-                    or machine.get("entry_fifo") != []):
-                return None
-        if state["membership"].get("site_ids") != sorted(int(site["id"]) for site in sites):
-            return None
-        if set(state["site_source_horizons"]) != {str(site["id"]) for site in sites}:
-            return None
-        for runtime_key, machine_key, cursor in (("stable_site_runtime", "stable_machine", stable),
-                                                  ("current_site_runtime", "current_machine", latest)):
-            if set(state[runtime_key]) != {str(site["id"]) for site in sites}:
-                return None
-            total = 0
-            for runtime in state[runtime_key].values():
-                fifo = [engine.parse_ts(value) for value in runtime["entry_fifo"]]
-                if fifo != sorted(fifo) or runtime["occupancy"] != len(fifo) or runtime["occupancy"] < 0:
-                    return None
-                if fifo and fifo[0] + engine.MAX_OPEN_VISIT < cursor:
-                    return None
-                total += runtime["occupancy"]
-            if total != state[machine_key]["occupancy"]:
-                return None
-        identities = set()
-        horizons = {int(key): engine.device_horizon({**value, "id": int(key)})
-                    for key, value in state["device_watermarks"].items()}
-        for event in state["provisional_events"]:
-            event = engine.normalize_event_dict(event)
-            instant = engine.parse_ts(event["timestamp"])
-            identity = engine.event_identity(event)
-            if not stable <= instant < latest or instant >= horizons[event["device_id"]] or identity in identities:
-                return None
-            identities.add(identity)
-        for event in state["pending_events"]:
-            event = engine.normalize_event_dict(event)
-            instant = engine.parse_ts(event["timestamp"])
-            identity = engine.event_identity(event)
-            if instant < latest or instant >= horizons[event["device_id"]] or identity in identities:
-                return None
-            identities.add(identity)
-    except (KeyError, TypeError, ValueError):
-        return None
-    return state
-
-
 def build_state(stable, sites, devices_by_site, site_horizons, stable_machine, runtimes,
-                provisional, view_until=None, current_machine=None, current_runtimes=None,
-                pending=None, organisation_status=None):
-    view_until = stable if view_until is None else view_until
-    current_machine = copy.deepcopy(stable_machine) if current_machine is None else current_machine
-    current_runtimes = copy.deepcopy(runtimes) if current_runtimes is None else current_runtimes
+                provisional, view_until, current_machine, current_runtimes, pending,
+                organisation_status):
     relevant = [int(key) for key, value in site_horizons.items() if value is not None]
     return {
-        "version": SNAPSHOT_STATE_VERSION,
+        "version": engine.SNAPSHOT_STATE_VERSION,
         "traffic_dimension": "site",
         "view_until": engine.stamp(view_until),
         "stable_until": engine.stamp(stable),
@@ -241,7 +170,7 @@ def build_state(stable, sites, devices_by_site, site_horizons, stable_machine, r
         "stable_machine": stable_machine,
         "stable_site_runtime": runtimes,
         "provisional_events": provisional,
-        "pending_events": pending or [],
+        "pending_events": pending,
         "current_machine": current_machine,
         "current_site_runtime": current_runtimes,
     }
@@ -252,15 +181,15 @@ def compute(sites, devices_by_site, horizons, old_state, old_ts, events, classif
     latest = engine.parse_ts(old_ts) if snapshot_now is None else snapshot_now
     stable = organisation_horizons(horizons, latest)
     if classification in ("TIME_ONLY", "METADATA_ONLY"):
-        stable_machine = copy.deepcopy(old_state["stable_machine"])
-        runtimes = copy.deepcopy(old_state["stable_site_runtime"])
+        stable_machine = old_state["stable_machine"]
+        runtimes = old_state["stable_site_runtime"]
         current = copy.deepcopy(old_state["current_machine"])
         current_runtimes = copy.deepcopy(old_state["current_site_runtime"])
         advance(current, current_runtimes, latest, include_target_expiry=True)
         state = build_state(engine.parse_ts(old_state["stable_until"]), sites, devices_by_site,
                             horizons, stable_machine, runtimes,
-                            copy.deepcopy(old_state["provisional_events"]), latest,
-                            current, current_runtimes, copy.deepcopy(old_state["pending_events"]),
+                            old_state["provisional_events"], latest,
+                            current, current_runtimes, old_state["pending_events"],
                             organisation_status)
         return latest, derive_payload(current, sites, state), state
     if classification == "REBUILD":
@@ -277,8 +206,7 @@ def compute(sites, devices_by_site, horizons, old_state, old_ts, events, classif
     merged = {}
     source_devices = {int(value["id"]): value for values in devices_by_site.values()
                       for value in values}
-    for raw in combined:
-        event = engine.normalize_event_dict(raw)
+    for event in combined:
         instant = engine.parse_ts(event["timestamp"])
         device = source_devices.get(int(event["device_id"]))
         if device is None or not start <= instant < engine.device_horizon(device):

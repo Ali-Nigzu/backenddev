@@ -1,14 +1,12 @@
 """Organisation-scoped Snapshot orchestration."""
 
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 from . import organisation_engine as organisation
 from . import site_engine as site_engine
-from .models import AttemptStats, SnapshotCandidate, SourceRange
-from .source import fetch_events
+from .source import SourceRange, fetch_events
 from .storage import ConcurrentSnapshotUpdate, connection, credentials, load_context, persist
 
 MAX_RETRIES = 2
@@ -24,20 +22,6 @@ def destination(value):
     if not match:
         raise ValueError("Invalid BigQuery destination")
     return ".".join(match.group("project", "dataset", "table"))
-
-
-@dataclass
-class Resources:
-    credentials: object
-    connector: object
-    bq_client: object
-
-
-def _resources():
-    from google.cloud import bigquery
-    from google.cloud.sql.connector import Connector
-    creds = credentials()
-    return Resources(creds, Connector(credentials=creds), bigquery.Client(credentials=creds, project=creds.project_id))
 
 
 def _now():
@@ -58,9 +42,30 @@ def _site_plan(context, snapshot_now):
 
 def _org_classification(context, horizons, snapshot_now):
     row = context["organisation_snapshot"]
-    state = organisation.validate_state(row["state"], row["ts"], context["sites"],
-                                        context["devices_by_site"], context["organisation"]["status"])
-    if state is None:
+    state = row["state"]
+    try:
+        latest = site_engine.parse_ts(row["ts"])
+        stable = site_engine.parse_ts(state["stable_until"])
+        usable = (
+            isinstance(state, dict)
+            and state.get("version") == site_engine.SNAPSHOT_STATE_VERSION
+            and state["traffic_dimension"] == "site"
+            and state["view_until"] == site_engine.stamp(latest)
+            and stable <= latest
+            and state["stable_machine"]["cursor_ts"] == state["stable_until"]
+            and state["current_machine"]["cursor_ts"] == state["view_until"]
+            and isinstance(state["membership"], dict)
+            and isinstance(state["site_source_horizons"], dict)
+            and isinstance(state["device_watermarks"], dict)
+            and isinstance(state["metadata"], dict)
+            and isinstance(state["stable_site_runtime"], dict)
+            and isinstance(state["current_site_runtime"], dict)
+            and isinstance(state["provisional_events"], list)
+            and isinstance(state["pending_events"], list)
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        usable = False
+    if not usable:
         return "REBUILD", None
     current_membership = organisation.membership(context["sites"], [key for key, value in horizons.items() if value])
     if state["membership"].get("site_ids") != current_membership["site_ids"]:
@@ -149,7 +154,7 @@ def _ranges(context, classifications, previous, org_classification, org_previous
     return ranges
 
 
-def _run_attempt(resources, sql_connection, organisation_id, stats):
+def _run_attempt(sql_connection, organisation_id, bq_client):
     snapshot_now = _now()
     context = load_context(sql_connection, organisation_id, destination)
     context["snapshot_now"] = snapshot_now
@@ -160,10 +165,8 @@ def _run_attempt(resources, sql_connection, organisation_id, stats):
     # Raises the required domain error before any BigQuery work.
     organisation.organisation_horizons(horizons, snapshot_now)
     org_classification, org_previous = _org_classification(context, horizons, snapshot_now)
-    for value in classifications.values():
-        stats.classifications[value] = stats.classifications.get(value, 0) + 1
     ranges = _ranges(context, classifications, previous, org_classification, org_previous, horizons)
-    events = fetch_events(resources.bq_client, ranges, stats) if ranges else []
+    events = fetch_events(bq_client(), ranges) if ranges else []
     events_by_site = {site["id"]: [] for site in context["sites"]}
     for event in events:
         events_by_site[event["site_id"]].append(event)
@@ -173,18 +176,15 @@ def _run_attempt(resources, sql_connection, organisation_id, stats):
         classification = classifications[site_id]
         if classification == "NO_OP":
             continue
-        result = site_engine.compute_site(site, context["devices_by_site"][site_id],
+        site_candidates[site_id] = site_engine.compute_site(site, context["devices_by_site"][site_id],
             context["site_snapshots"][site_id], classification, previous[site_id],
             events_by_site[site_id], snapshot_now)
-        site_candidates[site_id] = SnapshotCandidate(*result)
-    stats.changed_sites = len(site_candidates)
     org_candidate = None
     if org_classification != "NO_OP":
-        result = organisation.compute(context["sites"], context["devices_by_site"], horizons,
-                                      org_previous, context["organisation_snapshot"]["ts"], events,
-                                      org_classification, snapshot_now,
-                                      context["organisation"]["status"])
-        org_candidate = SnapshotCandidate(*result)
+        org_candidate = organisation.compute(
+            context["sites"], context["devices_by_site"], horizons, org_previous,
+            context["organisation_snapshot"]["ts"], events, org_classification,
+            snapshot_now, context["organisation"]["status"])
     if not site_candidates and org_candidate is None:
         return True
     persist(sql_connection, context, site_candidates, org_candidate, destination)
@@ -193,17 +193,28 @@ def _run_attempt(resources, sql_connection, organisation_id, stats):
 
 def Snapshot(organisation_id):
     """Advance all required site snapshots and one organisation snapshot atomically."""
-    resources = _resources()
+    from google.cloud.sql.connector import Connector
+
+    snapshot_credentials = credentials()
+    connector = Connector(credentials=snapshot_credentials)
+    client = None
+
+    def bq_client():
+        nonlocal client
+        if client is None:
+            from google.cloud import bigquery
+            client = bigquery.Client(credentials=snapshot_credentials,
+                                     project=snapshot_credentials.project_id)
+        return client
+
     try:
-        with connection(resources) as sql_connection:
+        with connection(connector, snapshot_credentials) as sql_connection:
             for attempt in range(MAX_RETRIES + 1):
-                stats = AttemptStats()
                 try:
-                    return _run_attempt(resources, sql_connection, organisation_id, stats)
+                    return _run_attempt(sql_connection, organisation_id, bq_client)
                 except ConcurrentSnapshotUpdate:
                     sql_connection.rollback()
                     if attempt == MAX_RETRIES:
                         raise RuntimeError(f"Snapshot update repeatedly conflicted for organisation_id={organisation_id}") from None
     finally:
-        resources.connector.close()
-    raise AssertionError("unreachable")
+        connector.close()
