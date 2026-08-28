@@ -1,9 +1,7 @@
 import copy
 from datetime import datetime, timedelta, timezone
 
-from .models import SNAPSHOT_STATE_VERSION
-
-MAX_RETRIES = 2
+SNAPSHOT_STATE_VERSION = 1
 Q15 = timedelta(minutes=15)
 MAX_OPEN_VISIT = timedelta(hours=4)
 
@@ -82,17 +80,13 @@ def _site_metadata(site):
 
 
 def _build_state(stable, devices, site, stable_machine, provisional_events,
-                 view_until=None, current_machine=None, pending_events=None):
-    # The optional arguments keep the small pure-engine fixtures readable while all
-    # production v4 states always contain an explicit wall-clock current cache.
-    view_until = stable if view_until is None else view_until
-    current_machine = copy.deepcopy(stable_machine) if current_machine is None else current_machine
+                 view_until, current_machine, pending_events):
     return {
         "version": SNAPSHOT_STATE_VERSION, "view_until": _stamp(view_until),
         "stable_until": None if stable is None else _stamp(stable),
         "device_watermarks": _device_watermarks(devices, view_until),
         "site_metadata": _site_metadata(site), "stable_machine": stable_machine,
-        "provisional_events": provisional_events, "pending_events": pending_events or [],
+        "provisional_events": provisional_events, "pending_events": pending_events,
         "current_machine": current_machine,
     }
 
@@ -209,6 +203,7 @@ def advance(machine, target, site, expire_at_target=True):
         if cursor < target or expire_at_target:
             _expire_entries(machine, cursor)
     _refresh_peaks(machine)
+    align_q15(machine, target)
 
 
 def _increment(block, key, index):
@@ -294,82 +289,11 @@ def derive_payload(machine, site, devices, state):
     return {"entrances_96": q["entrances"], "occupancy_96": averages, "exits_96": q["exits"], "footfall_96": [a + b for a, b in zip(q["entrances"], q["exits"])], "dwell_time_96": [0.0 if count == 0 else total / count for total, count in zip(q["dwell_sum_seconds"], q["dwell_count"])], "traffic_devices": axes, "traffic_split_96": traffic, "capacity": [[average * 100 / site["max_capacity"], hard * 100 / site["max_capacity"]] for average, hard in zip(averages, peak)], "today": today, "yesterday": yesterday, "week": week, "month": month, "quarter": quarter, "year": year, "all_time": all_time}
 
 
-def _horizons(previous_ts, previous_stable, devices):
-    enabled = [d for d in devices if d["status"] == "enabled"]
-    horizons = [_dt(d["analyzed_until"]) for d in enabled if d["analyzed_until"]]
-    ts = max(horizons) if horizons else previous_ts
-    safe = [_dt(d["analyzed_until"]) if d["analyzed_until"] else _dt(d["created_at"]) for d in enabled]
-    stable = max(previous_stable, min(safe)) if safe else previous_stable
-    return ts, stable
-
-
-def _event_key(event):
-    return event["timestamp"], -event["event"], event["event_id"]
-
-
-def _merge_events(events, devices, start, end):
-    horizons = {d["id"]: _dt(d["analyzed_until"]) for d in devices if d["analyzed_until"]}
-    deduplicated = {}
-    for event in events:
-        try:
-            instant, device_id, event_id = _dt(event["timestamp"]), int(event["device_id"]), int(event["event_id"])
-            normalised = {"device_id": device_id, "event_id": event_id, "event": int(event["event"]), "timestamp": _stamp(instant), "sex": int(event["sex"]), "age_bucket": int(event["age_bucket"])}
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("Malformed Snapshot provisional event") from error
-        if device_id not in horizons or not start <= instant < end or instant >= horizons[device_id]:
-            continue
-        previous = deduplicated.setdefault(event_id, normalised)
-        if previous != normalised:
-            raise ValueError(f"Conflicting event_id: {event_id}")
-    return sorted(deduplicated.values(), key=_event_key)
-
-
-def _provisional_is_safe(state, snapshot_ts):
-    try:
-        start, end = _dt(state["stable_until"]), _dt(snapshot_ts)
-        for event in state["provisional_events"]:
-            if not start <= _dt(event["timestamp"]) < end:
-                return False
-            for key in ("device_id", "event_id", "event", "sex", "age_bucket"):
-                int(event[key])
-    except (KeyError, TypeError, ValueError):
-        return False
-    return True
-
-
-def _membership_is_safe(previous, current):
-    if set(previous) != set(current):
-        return False
-    for device_id, watermark in current.items():
-        old = previous[device_id]
-        if any(old.get(key) != watermark.get(key) for key in ("status", "created_at")):
-            return False
-        old_horizon, new_horizon = old.get("analyzed_until"), watermark.get("analyzed_until")
-        if old_horizon and (not new_horizon or _dt(new_horizon) < _dt(old_horizon)):
-            return False
-    return True
-
-
-def _current_from(stable_machine, provisional, ts, site):
-    current = copy.deepcopy(stable_machine)
-    for event in provisional:
-        apply_event(current, event, site)
-    advance(current, ts, site)
-    return current
-
-
 # Public names for the I/O and organisation layers.
 parse_ts = _dt
 stamp = _stamp
 new_machine = _machine
 derive_site_payload = derive_payload
-
-Q15_ARRAYS = (
-    "entrances", "exits", "occupancy_area_person_seconds", "occupancy_seconds",
-    "occupancy_min_positive", "occupancy_max", "rolling_peak_occupancy",
-    "dwell_sum_seconds", "dwell_count", "traffic_counts",
-)
-
 
 def device_horizon(device):
     """The captured immutable source horizon, including never-analysed devices."""
@@ -394,40 +318,6 @@ def align_q15(machine, instant):
     while current < wanted:
         _roll_q15(machine)
         current += Q15
-
-
-_advance = advance
-
-
-def advance(machine, target, site, expire_at_target=True):
-    _advance(machine, target, site, expire_at_target=expire_at_target)
-    align_q15(machine, target)
-
-
-def validate_q15(machine):
-    try:
-        cursor = _dt(machine["cursor_ts"])
-        q = machine["q15"]
-        start = _dt(q["window_start"])
-        if start != floor_to_q15(start) or start + Q15 * 95 != floor_to_q15(cursor):
-            return False
-        return all(isinstance(q[key], list) and len(q[key]) == 96 for key in Q15_ARRAYS)
-    except (KeyError, TypeError, ValueError):
-        return False
-
-
-def _calendar_shapes(machine):
-    sizes = {"today": 24, "yesterday": 24, "week": 7, "month": 4,
-             "quarter": 12, "year": 12}
-    for name, size in sizes.items():
-        block = machine.get(name)
-        if not isinstance(block, dict):
-            return False
-        for key in ("entrances", "exits", "occupancy_area_person_seconds",
-                    "occupancy_seconds", "occupancy_min_positive", "occupancy_max"):
-            if not isinstance(block.get(key), list) or len(block[key]) != size:
-                return False
-    return isinstance(machine.get("all_time", {}).get("entrances"), list)
 
 
 def normalize_event_dict(event, site=None):
@@ -460,8 +350,7 @@ def merge_events(events, devices, start, end, site=None):
     # Event validity follows historical ownership, not current source obligation.
     horizons = {int(d["id"]): device_horizon(d) for d in devices}
     merged = {}
-    for raw in events:
-        event = normalize_event_dict(raw, site)
+    for event in events:
         instant = _dt(event["timestamp"])
         if event["device_id"] not in horizons or not start <= instant < end or instant >= horizons[event["device_id"]]:
             continue
@@ -472,50 +361,28 @@ def merge_events(events, devices, start, end, site=None):
     return sorted(merged.values(), key=event_order)
 
 
-def _machine_is_valid(machine, cursor):
-    if machine.get("cursor_ts") != _stamp(cursor) or not validate_q15(machine):
-        return False
-    if not _calendar_shapes(machine) or int(machine["occupancy"]) < 0:
-        return False
-    fifo = [_dt(value) for value in machine["entry_fifo"]]
-    return (fifo == sorted(fifo) and len(fifo) == int(machine["occupancy"])
-            and (not fifo or fifo[0] + MAX_OPEN_VISIT >= cursor))
-
-
-def validate_site_state(state, snapshot_ts, devices):
-    required = {"version", "view_until", "stable_until", "device_watermarks",
-                "site_metadata", "stable_machine", "provisional_events", "pending_events",
-                "current_machine"}
-    if not isinstance(state, dict) or state.get("version") != SNAPSHOT_STATE_VERSION or not required <= set(state):
-        return None
-    try:
-        latest = _dt(snapshot_ts)
-        if state["view_until"] != _stamp(latest):
-            return None
-        if not _machine_is_valid(state["current_machine"], latest):
-            return None
-        stable = _dt(state["stable_until"])
-        if stable > latest or not _machine_is_valid(state["stable_machine"], stable):
-            return None
-        future_end = max([stable] + [device_horizon(device) for device in devices])
-        retained = state["provisional_events"] + state["pending_events"]
-        merged = merge_events(retained, devices, stable, future_end)
-        if len(merged) != len(retained):
-            return None
-        if any((_dt(event["timestamp"]) < latest) != (event in state["provisional_events"])
-               for event in merged):
-            return None
-    except (KeyError, TypeError, ValueError):
-        return None
-    return state
-
-
 def classify_site(site, devices, snapshot, snapshot_now=None):
-    previous = validate_site_state(snapshot["state"], snapshot["ts"], devices)
-    if previous is None:
+    previous = snapshot["state"]
+    try:
+        latest = _dt(snapshot["ts"])
+        stable = _dt(previous["stable_until"])
+        usable = (
+            isinstance(previous, dict)
+            and previous.get("version") == SNAPSHOT_STATE_VERSION
+            and previous["view_until"] == _stamp(latest)
+            and stable <= latest
+            and previous["stable_machine"]["cursor_ts"] == previous["stable_until"]
+            and previous["current_machine"]["cursor_ts"] == previous["view_until"]
+            and isinstance(previous["device_watermarks"], dict)
+            and isinstance(previous["site_metadata"], dict)
+            and isinstance(previous["provisional_events"], list)
+            and isinstance(previous["pending_events"], list)
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        usable = False
+    if not usable:
         return "REBUILD", None
     old = previous["device_watermarks"]
-    latest = _dt(snapshot["ts"])
     snapshot_now = latest if snapshot_now is None else snapshot_now
     current = _device_watermarks(devices, snapshot_now)
     current_metadata = _site_metadata(site)
@@ -585,9 +452,8 @@ def compute_site(site, devices, snapshot, classification, previous, supplied_eve
         current = copy.deepcopy(previous["current_machine"])
         advance(current, snapshot_now, site)
         state = _build_state(_dt(previous["stable_until"]), devices, site,
-                             copy.deepcopy(previous["stable_machine"]),
-                             copy.deepcopy(previous["provisional_events"]), snapshot_now, current,
-                             copy.deepcopy(previous["pending_events"]))
+                             previous["stable_machine"], previous["provisional_events"],
+                             snapshot_now, current, previous["pending_events"])
         return snapshot_now, derive_payload(current, site, devices, state), state
 
     if classification == "REBUILD":

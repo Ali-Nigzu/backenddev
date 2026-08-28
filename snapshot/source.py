@@ -2,9 +2,17 @@
 
 from collections import defaultdict
 from datetime import datetime
+from typing import NamedTuple
 
-from .models import SourceRange
 from .site_engine import event_identity, event_order, normalize_event_dict, stamp
+
+
+class SourceRange(NamedTuple):
+    destination: str
+    site_id: int
+    device_id: int
+    start: datetime
+    end: datetime
 
 
 def coalesce_ranges(ranges):
@@ -26,7 +34,7 @@ def coalesce_ranges(ranges):
     return sorted(result, key=lambda value: (value.destination, value.device_id, value.start))
 
 
-def fetch_events(client, ranges, stats=None):
+def fetch_events(client, ranges):
     from google.cloud import bigquery
     by_destination = defaultdict(list)
     for item in coalesce_ranges(ranges):
@@ -46,12 +54,12 @@ def fetch_events(client, ranges, stats=None):
         sql = (f"SELECT device_id,event_id,event,timestamp,sex,age_bucket FROM `{destination}` "
                f"WHERE {' OR '.join(clauses)} ORDER BY timestamp,event DESC,device_id,event_id")
         config = bigquery.QueryJobConfig(query_parameters=parameters)
-        if stats:
-            stats.bq_queries += 1
         for row in client.query(sql, job_config=config).result():
             device_id = int(row["device_id"])
             timestamp = row["timestamp"]
-            matching = [item for item in route.get(device_id, ()) if item.start <= timestamp < item.end]
+            candidates = route.get(device_id, ())
+            matching = candidates if len(candidates) == 1 else [
+                item for item in candidates if item.start <= timestamp < item.end]
             if not matching:
                 continue
             site_ids = {item.site_id for item in matching}
@@ -65,7 +73,4 @@ def fetch_events(client, ranges, stats=None):
             previous = merged.setdefault(identity, event)
             if previous != event:
                 raise ValueError(f"Conflicting event identity: {identity!r}")
-            if stats:
-                stats.events_fetched += 1
-                stats.events_normalized += int(previous is event)
     return sorted(merged.values(), key=event_order)
