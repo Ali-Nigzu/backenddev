@@ -1,42 +1,29 @@
-import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from .cloud_sql import cloud_sql_connection
 
-_TIMEFRAME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
-_FIRST_ANALYSIS_START = "2026-08-01T00:00:00.000Z"
 SA_PATH = Path(__file__).resolve().parent / "SA.json"
 _DEVICE_CONTEXT_QUERY = """
 SELECT
     devices.id,
-    devices.gcs_source_uri,
-    devices.analysis_config,
+    devices.site_id,
+    sites.organisation_id,
+    devices.created_at,
     devices.analyzed_until,
-    sites.bigquery_destination
-FROM devices
-JOIN sites ON sites.id = devices.site_id
+    devices.frame_package_interval_minutes,
+    devices.line_ax,
+    devices.line_ay,
+    devices.line_bx,
+    devices.line_by
+FROM public.devices AS devices
+JOIN public.sites AS sites ON sites.id = devices.site_id
 WHERE devices.id = %s
 """
-
-def _format_utc_timestamp(value: datetime) -> str:
-    utc_value = value.astimezone(timezone.utc)
-    return utc_value.strftime(_TIMEFRAME_FORMAT)[:-4] + "Z"
-
-def _decode_analysis_config(value: Any) -> Any:
-    if isinstance(value, str):
-        return json.loads(value)
-    return value
 
 def initialise(device_id: int) -> dict:
 
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(SA_PATH)
-    if not SA_PATH.is_file():
-        raise FileNotFoundError(f"Service account file not found: {SA_PATH}")
-
-    timeframe_end = _format_utc_timestamp(datetime.now(timezone.utc))
 
     try:
         with cloud_sql_connection() as connection:
@@ -52,16 +39,27 @@ def initialise(device_id: int) -> dict:
     if row is None:
         raise ValueError(f"Device not found: {device_id}")
 
-    resolved_device_id, source_uri, analysis_config, analyzed_until, destination = row
-    timeframe_start = (
-        _format_utc_timestamp(analyzed_until)
-        if analyzed_until is not None
-        else _FIRST_ANALYSIS_START
-    )
+    (
+        resolved_device_id,
+        site_id,
+        organisation_id,
+        created_at,
+        analyzed_until,
+        frame_package_interval_minutes,
+        line_ax,
+        line_ay,
+        line_bx,
+        line_by,
+    ) = row
     return {
         "device_id": resolved_device_id,
-        "gcs_source_uri": source_uri,
-        "analysis_config": _decode_analysis_config(analysis_config),
-        "timeframe": {"start": timeframe_start, "end": timeframe_end},
-        "bigquery_destination": destination,
+        "site_id": site_id,
+        "organisation_id": organisation_id,
+        "created_at": created_at,
+        "analyzed_until": analyzed_until,
+        "frame_package_interval_minutes": frame_package_interval_minutes,
+        "line_config": {
+            "point_a": {"x": line_ax, "y": line_ay},
+            "point_b": {"x": line_bx, "y": line_by},
+        },
     }

@@ -1,5 +1,6 @@
 import csv
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 import cv2
@@ -9,7 +10,7 @@ from ..demographics import Demographic
 from ..detect import Detect
 from ..events import Event
 from ..initialise import initialise
-from ..load import load
+from ..load import load, load_package
 from ..track import Track
 
 def _run_directory(device_id: int, timeframe: dict) -> Path:
@@ -29,6 +30,8 @@ def _run_directory(device_id: int, timeframe: dict) -> Path:
 
 def _write_events_csv(output_batch: dict, path: Path) -> None:
     fieldnames = (
+        "organisation_id",
+        "site_id",
         "device_id",
         "event_id",
         "event",
@@ -59,7 +62,7 @@ def _write_replay(
     detection_batch: dict,
     track_batch: dict,
     event_track_ids: set,
-    analysis_config: dict,
+    line_config: dict,
     path: Path,
 ) -> None:
     track_ids_by_timestamp_centre = {
@@ -118,12 +121,12 @@ def _write_replay(
             cv2.line(
                 output,
                 (
-                    int(analysis_config["point_a"]["x"]),
-                    int(analysis_config["point_a"]["y"]),
+                    int(line_config["point_a"]["x"]),
+                    int(line_config["point_a"]["y"]),
                 ),
                 (
-                    int(analysis_config["point_b"]["x"]),
-                    int(analysis_config["point_b"]["y"]),
+                    int(line_config["point_b"]["x"]),
+                    int(line_config["point_b"]["y"]),
                 ),
                 (255, 255, 255),
                 2,
@@ -136,19 +139,31 @@ def _write_replay(
 def Visualise(device_id: int, timeframe: dict) -> None:
 
     context = initialise(device_id)
-    context["timeframe"] = timeframe
     run_directory = _run_directory(context["device_id"], timeframe)
-
-    frame_batch = load(
-        context["gcs_source_uri"],
-        context["timeframe"],
-    )
+    start = datetime.strptime(
+        timeframe["start"], "%Y-%m-%dT%H:%M:%S.%fZ"
+    ).replace(tzinfo=timezone.utc)
+    end = datetime.strptime(
+        timeframe["end"], "%Y-%m-%dT%H:%M:%S.%fZ"
+    ).replace(tzinfo=timezone.utc)
+    source = load({**context, "created_at": start, "analyzed_until": None})
+    frames = []
+    for package in source["packages"]:
+        if package["start"] >= end:
+            break
+        for frame in load_package(source, package)["frames"]:
+            captured_at = source["source_origin"] + timedelta(
+                seconds=frame["timestamp"]
+            )
+            if start <= captured_at < end:
+                frames.append(frame)
+    frame_batch = {"frames": frames}
     if not frame_batch["frames"]:
         raise ValueError("No timestamp-named JPG frames found in the supplied timeframe")
 
     detection_batch = Detect()(frame_batch)
     track_batch = Track()(detection_batch)
-    event_batch = Event()(track_batch, context["analysis_config"])
+    event_batch = Event()(track_batch, context["line_config"])
     event_track_ids = {event["track_id"] for event in event_batch["events"]}
 
     _write_replay(
@@ -156,7 +171,7 @@ def Visualise(device_id: int, timeframe: dict) -> None:
         detection_batch,
         track_batch,
         event_track_ids,
-        context["analysis_config"],
+        context["line_config"],
         run_directory / "replay.mp4",
     )
 
@@ -164,7 +179,9 @@ def Visualise(device_id: int, timeframe: dict) -> None:
     output_batch = Assemble()(
         event_batch,
         demographics_batch,
-        context["timeframe"]["start"],
+        source["source_origin"],
+        context["organisation_id"],
+        context["site_id"],
         context["device_id"],
     )
     _write_events_csv(output_batch, run_directory / "events.csv")
