@@ -342,24 +342,9 @@ def merge_events(events, devices, start, end, site=None):
 
 def classify_site(site, devices, snapshot, snapshot_now=None):
     previous = snapshot["state"]
-    try:
-        latest = _dt(snapshot["ts"])
-        stable = _dt(previous["stable_until"])
-        usable = (
-            isinstance(previous, dict)
-            and previous.get("version") == SNAPSHOT_STATE_VERSION
-            and previous["view_until"] == _stamp(latest)
-            and stable <= latest
-            and previous["stable_machine"]["cursor_ts"] == previous["stable_until"]
-            and previous["current_machine"]["cursor_ts"] == previous["view_until"]
-            and isinstance(previous["device_watermarks"], dict)
-            and isinstance(previous["site_metadata"], dict)
-            and isinstance(previous["provisional_events"], list)
-        )
-    except (AttributeError, KeyError, TypeError, ValueError):
-        usable = False
-    if not usable:
+    if previous == {}:
         return "REBUILD", None
+    latest = _dt(snapshot["ts"])
     old = previous["device_watermarks"]
     snapshot_now = latest if snapshot_now is None else snapshot_now
     current = _device_watermarks(devices, snapshot_now)

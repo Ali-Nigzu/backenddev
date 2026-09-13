@@ -29,28 +29,9 @@ def _site_plan(context, snapshot_now):
 def _org_classification(context, horizons, snapshot_now):
     row = context["organisation_snapshot"]
     state = row["state"]
-    try:
-        latest = site_engine.parse_ts(row["ts"])
-        stable = site_engine.parse_ts(state["stable_until"])
-        usable = (
-            isinstance(state, dict)
-            and state.get("version") == site_engine.SNAPSHOT_STATE_VERSION
-            and state["traffic_dimension"] == "site"
-            and state["view_until"] == site_engine.stamp(latest)
-            and stable <= latest
-            and state["stable_machine"]["cursor_ts"] == state["stable_until"]
-            and state["current_machine"]["cursor_ts"] == state["view_until"]
-            and isinstance(state["membership"], dict)
-            and isinstance(state["device_watermarks"], dict)
-            and isinstance(state["metadata"], dict)
-            and isinstance(state["stable_site_runtime"], dict)
-            and isinstance(state["current_site_runtime"], dict)
-            and isinstance(state["provisional_events"], list)
-        )
-    except (AttributeError, KeyError, TypeError, ValueError):
-        usable = False
-    if not usable:
+    if state == {}:
         return "REBUILD", None
+    latest = site_engine.parse_ts(row["ts"])
     current_membership = organisation.membership(context["sites"])
     if state["membership"].get("site_ids") != current_membership["site_ids"]:
         return "REBUILD", state
