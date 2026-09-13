@@ -1,14 +1,17 @@
-"""BigQuery source range planning and single-pass event normalization."""
+"""Canonical BigQuery source range planning."""
 
 from collections import defaultdict
 from datetime import datetime
 from typing import NamedTuple
 
-from .site_engine import event_identity, event_order, normalize_event_dict, stamp
+from .site_engine import event_identity, event_order, stamp
+
+
+TABLE = "camosbase.camos_prod.events"
 
 
 class SourceRange(NamedTuple):
-    destination: str
+    organisation_id: int
     site_id: int
     device_id: int
     start: datetime
@@ -19,58 +22,71 @@ def coalesce_ranges(ranges):
     grouped = defaultdict(list)
     for item in ranges:
         if item.start < item.end:
-            grouped[(item.destination, item.site_id, item.device_id)].append(item)
+            grouped[(item.organisation_id, item.site_id, item.device_id)].append(item)
     result = []
-    for (destination, site_id, device_id), values in grouped.items():
+    for (organisation_id, site_id, device_id), values in grouped.items():
         values.sort(key=lambda value: value.start)
         start, end = values[0].start, values[0].end
         for value in values[1:]:
             if value.start <= end:
                 end = max(end, value.end)
             else:
-                result.append(SourceRange(destination, site_id, device_id, start, end))
+                result.append(
+                    SourceRange(organisation_id, site_id, device_id, start, end)
+                )
                 start, end = value.start, value.end
-        result.append(SourceRange(destination, site_id, device_id, start, end))
-    return sorted(result, key=lambda value: (value.destination, value.device_id, value.start))
+        result.append(SourceRange(organisation_id, site_id, device_id, start, end))
+    return sorted(
+        result,
+        key=lambda value: (
+            value.organisation_id,
+            value.site_id,
+            value.device_id,
+            value.start,
+        ),
+    )
 
 
 def fetch_events(client, ranges):
     from google.cloud import bigquery
-    by_destination = defaultdict(list)
-    for item in coalesce_ranges(ranges):
-        by_destination[item.destination].append(item)
-    merged = {}
-    for destination, values in sorted(by_destination.items()):
-        clauses, parameters = [], []
-        route = {}
-        for index, item in enumerate(values):
-            clauses.append(f"(device_id=@device_{index} AND timestamp>=@start_{index} AND timestamp<@end_{index})")
-            parameters.extend([
-                bigquery.ScalarQueryParameter(f"device_{index}", "INT64", item.device_id),
+
+    clauses, parameters = [], []
+    for index, item in enumerate(coalesce_ranges(ranges)):
+        clauses.append(
+            f"(organisation_id=@organisation_{index} AND site_id=@site_{index} "
+            f"AND device_id=@device_{index} AND timestamp>=@start_{index} "
+            f"AND timestamp<@end_{index})"
+        )
+        parameters.extend(
+            [
+                bigquery.ScalarQueryParameter(
+                    f"organisation_{index}", "INT64", item.organisation_id
+                ),
+                bigquery.ScalarQueryParameter(f"site_{index}", "INT64", item.site_id),
+                bigquery.ScalarQueryParameter(
+                    f"device_{index}", "INT64", item.device_id
+                ),
                 bigquery.ScalarQueryParameter(f"start_{index}", "TIMESTAMP", item.start),
                 bigquery.ScalarQueryParameter(f"end_{index}", "TIMESTAMP", item.end),
-            ])
-            route.setdefault(item.device_id, []).append(item)
-        sql = (f"SELECT device_id,event_id,event,timestamp,sex,age_bucket FROM `{destination}` "
-               f"WHERE {' OR '.join(clauses)} ORDER BY timestamp,event DESC,device_id,event_id")
-        config = bigquery.QueryJobConfig(query_parameters=parameters)
-        for row in client.query(sql, job_config=config).result():
-            device_id = int(row["device_id"])
-            timestamp = row["timestamp"]
-            candidates = route.get(device_id, ())
-            matching = candidates if len(candidates) == 1 else [
-                item for item in candidates if item.start <= timestamp < item.end]
-            if not matching:
-                continue
-            site_ids = {item.site_id for item in matching}
-            if len(site_ids) != 1:
-                raise ValueError(f"Device {device_id} routed to multiple sites")
-            raw = {"destination": destination, "site_id": site_ids.pop(), "device_id": device_id,
-                   "event_id": row["event_id"], "event": row["event"], "timestamp": stamp(timestamp),
-                   "sex": row["sex"], "age_bucket": row["age_bucket"]}
-            event = normalize_event_dict(raw)
-            identity = event_identity(event)
-            previous = merged.setdefault(identity, event)
-            if previous != event:
-                raise ValueError(f"Conflicting event identity: {identity!r}")
+            ]
+        )
+    sql = (
+        "SELECT organisation_id,site_id,device_id,event_id,event,timestamp,sex,age_bucket "
+        f"FROM `{TABLE}` WHERE {' OR '.join(clauses)} "
+        "ORDER BY timestamp,event DESC,organisation_id,site_id,device_id,event_id"
+    )
+    config = bigquery.QueryJobConfig(query_parameters=parameters)
+    merged = {}
+    for row in client.query(sql, job_config=config).result():
+        event = {
+            "organisation_id": int(row["organisation_id"]),
+            "site_id": int(row["site_id"]),
+            "device_id": int(row["device_id"]),
+            "event_id": str(row["event_id"]),
+            "event": int(row["event"]),
+            "timestamp": stamp(row["timestamp"]),
+            "sex": int(row["sex"]),
+            "age_bucket": int(row["age_bucket"]),
+        }
+        merged.setdefault(event_identity(event), event)
     return sorted(merged.values(), key=event_order)

@@ -1,8 +1,9 @@
 from ..initialise.cloud_sql import cloud_sql_connection
 
 _UPDATE_ANALYZED_UNTIL = """
-UPDATE devices
-SET analyzed_until = %s
+UPDATE public.devices
+SET analyzed_until = GREATEST(COALESCE(analyzed_until, %s), %s),
+    updated_at = CURRENT_TIMESTAMP
 WHERE id = %s
 """
 
@@ -12,7 +13,10 @@ def update(device_id: int, analyzed_until: str) -> None:
         with cloud_sql_connection() as connection:
             cursor = connection.cursor()
             try:
-                cursor.execute(_UPDATE_ANALYZED_UNTIL, (analyzed_until, device_id))
+                cursor.execute(
+                    _UPDATE_ANALYZED_UNTIL,
+                    (analyzed_until, analyzed_until, device_id),
+                )
                 if cursor.rowcount != 1:
                     raise ValueError(f"Device not found: {device_id}")
                 connection.commit()

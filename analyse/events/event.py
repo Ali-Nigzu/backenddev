@@ -1,4 +1,5 @@
 from math import hypot
+from uuid import uuid4
 
 _MIN_STABLE_SIDE_POINTS = 3
 _MIN_EVENT_TRACK_POINTS = 6
@@ -43,6 +44,7 @@ def _events_for_track(track, line_a, dx, dy, line_length):
         elif run_side != established_side:
             crop = track["best_crop"]
             events.append({
+                "event_id": str(uuid4()),
                 "track_id": track["track_id"],
                 "timestamp": run_start_timestamp,
                 "event_type": 1 if established_side == -1 and run_side == 1 else 0,

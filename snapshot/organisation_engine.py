@@ -19,32 +19,29 @@ def organisation_horizons(site_results, snapshot_now=None):
     return stable if snapshot_now is None else min(stable, snapshot_now)
 
 
-def membership(sites, relevant_ids):
-    return {"site_ids": sorted(int(s["id"]) for s in sites), "relevant_site_ids": sorted(relevant_ids)}
+def membership(sites):
+    return {"site_ids": sorted(int(s["id"]) for s in sites)}
 
 
-def device_watermarks(sites, devices_by_site, view_until=None):
-    destinations = {int(site["id"]): site["destination"] for site in sites}
+def device_watermarks(devices_by_site, view_until=None):
     result = {}
     for site_id, devices in devices_by_site.items():
         for device in devices:
-            horizon = engine.device_horizon(device)
+            consumed_until = engine.device_horizon(device, view_until)
             result[str(device["id"])] = {
-                "site_id": int(site_id), "status": device["status"],
-                "created_at": device["created_at"], "analyzed_until": device["analyzed_until"],
-                "source_horizon": engine.stamp(horizon),
-                "destination": destinations[int(site_id)], "analysis_config": device.get("analysis_config"),
+                "site_id": int(site_id), "enabled": device["enabled"],
+                "created_at": device["created_at"],
+                "consumed_until": engine.stamp(consumed_until),
             }
     return result
 
 
-def metadata(sites, devices_by_site, organisation_status=None):
+def metadata(sites, organisation_enabled=None):
     return {
-        "organisation_status": organisation_status,
+        "organisation_enabled": organisation_enabled,
         "site_capacities": {str(s["id"]): int(s["max_capacity"]) for s in sites},
         "site_names": {str(s["id"]): s["name"] for s in sites},
-        "site_statuses": {str(s["id"]): s["status"] for s in sites},
-        "device_names": {str(d["id"]): d["name"] for values in devices_by_site.values() for d in values},
+        "site_enabled": {str(s["id"]): s["enabled"] for s in sites},
     }
 
 
@@ -152,32 +149,27 @@ def derive_payload(machine, sites, state):
     return payload
 
 
-def build_state(stable, sites, devices_by_site, site_horizons, stable_machine, runtimes,
-                provisional, view_until, current_machine, current_runtimes, pending,
-                organisation_status):
-    relevant = [int(key) for key, value in site_horizons.items() if value is not None]
+def build_state(stable, sites, devices_by_site, stable_machine, runtimes,
+                provisional, view_until, current_machine, current_runtimes,
+                organisation_enabled):
     return {
         "version": engine.SNAPSHOT_STATE_VERSION,
         "traffic_dimension": "site",
         "view_until": engine.stamp(view_until),
         "stable_until": engine.stamp(stable),
-        "membership": membership(sites, relevant),
-        "site_source_horizons": {str(key): None if value is None else {
-            "stable_until": engine.stamp(value["stable_until"])}
-            for key, value in site_horizons.items()},
-        "device_watermarks": device_watermarks(sites, devices_by_site, view_until),
-        "metadata": metadata(sites, devices_by_site, organisation_status),
+        "membership": membership(sites),
+        "device_watermarks": device_watermarks(devices_by_site, view_until),
+        "metadata": metadata(sites, organisation_enabled),
         "stable_machine": stable_machine,
         "stable_site_runtime": runtimes,
         "provisional_events": provisional,
-        "pending_events": pending,
         "current_machine": current_machine,
         "current_site_runtime": current_runtimes,
     }
 
 
 def compute(sites, devices_by_site, horizons, old_state, old_ts, events, classification,
-            snapshot_now=None, organisation_status=None):
+            snapshot_now=None, organisation_enabled=None):
     latest = engine.parse_ts(old_ts) if snapshot_now is None else snapshot_now
     stable = organisation_horizons(horizons, latest)
     if classification in ("TIME_ONLY", "METADATA_ONLY"):
@@ -187,10 +179,9 @@ def compute(sites, devices_by_site, horizons, old_state, old_ts, events, classif
         current_runtimes = copy.deepcopy(old_state["current_site_runtime"])
         advance(current, current_runtimes, latest, include_target_expiry=True)
         state = build_state(engine.parse_ts(old_state["stable_until"]), sites, devices_by_site,
-                            horizons, stable_machine, runtimes,
+                            stable_machine, runtimes,
                             old_state["provisional_events"], latest,
-                            current, current_runtimes, old_state["pending_events"],
-                            organisation_status)
+                            current, current_runtimes, organisation_enabled)
         return latest, derive_payload(current, sites, state), state
     if classification == "REBUILD":
         start = min(engine.parse_ts(site["created_at"]) for site in sites)
@@ -201,7 +192,7 @@ def compute(sites, devices_by_site, horizons, old_state, old_ts, events, classif
         old_stable = engine.parse_ts(old_state["stable_until"])
         stable_machine = copy.deepcopy(old_state["stable_machine"])
         runtimes = copy.deepcopy(old_state["stable_site_runtime"])
-        combined = old_state["provisional_events"] + old_state["pending_events"] + events
+        combined = old_state["provisional_events"] + events
         start = old_stable
     merged = {}
     source_devices = {int(value["id"]): value for values in devices_by_site.values()
@@ -209,11 +200,9 @@ def compute(sites, devices_by_site, horizons, old_state, old_ts, events, classif
     for event in combined:
         instant = engine.parse_ts(event["timestamp"])
         device = source_devices.get(int(event["device_id"]))
-        if device is None or not start <= instant < engine.device_horizon(device):
+        if device is None or not start <= instant < engine.device_horizon(device, latest):
             continue
-        previous = merged.setdefault(engine.event_identity(event), event)
-        if previous != event:
-            raise ValueError("Conflicting organisation event identity")
+        merged.setdefault(engine.event_identity(event), event)
     ordered = sorted(merged.values(), key=engine.event_order)
     for event in ordered:
         if engine.parse_ts(event["timestamp"]) < stable:
@@ -221,9 +210,8 @@ def compute(sites, devices_by_site, horizons, old_state, old_ts, events, classif
     # Stable interval is half-open; retain exact-boundary expiries for provisional events.
     advance(stable_machine, runtimes, stable, include_target_expiry=False)
     provisional = [event for event in ordered if stable <= engine.parse_ts(event["timestamp"]) < latest]
-    pending = [event for event in ordered if engine.parse_ts(event["timestamp"]) >= latest]
     current, current_runtimes = current_from(stable_machine, runtimes, provisional, latest)
-    state = build_state(stable, sites, devices_by_site, horizons, stable_machine, runtimes,
-                        provisional, latest, current, current_runtimes, pending,
-                        organisation_status)
+    state = build_state(stable, sites, devices_by_site, stable_machine, runtimes,
+                        provisional, latest, current, current_runtimes,
+                        organisation_enabled)
     return latest, derive_payload(current, sites, state), state
