@@ -44,35 +44,17 @@ def _org_classification(context, horizons, snapshot_now):
         context["sites"], context["organisation"]["enabled"]
     )
     metadata_only = current_metadata != state["metadata"]
-    old_site_enabled = state["metadata"].get("site_enabled", {})
-    new_site_enabled = current_metadata["site_enabled"]
-    retired = any(old_site_enabled.get(key) and not value
-                  for key, value in new_site_enabled.items())
-    activated = any(not old_site_enabled.get(key) and value
-                    for key, value in new_site_enabled.items())
     for key, value in current_devices.items():
         old = state["device_watermarks"][key]
         if any(old.get(field) != value.get(field) for field in ("site_id", "created_at")):
             return "REBUILD", state
-        retired = retired or old.get("enabled") and not value.get("enabled")
-        activated = activated or not old.get("enabled") and value.get("enabled")
         if site_engine.parse_ts(value["consumed_until"]) < site_engine.parse_ts(old["consumed_until"]):
             return "REBUILD", state
-    if activated:
-        if any(not state["device_watermarks"][key].get("enabled")
-               and value.get("enabled")
-               and site_engine.parse_ts(state["device_watermarks"][key]["consumed_until"])
-                   < site_engine.parse_ts(state["stable_until"])
-               for key, value in current_devices.items()):
-            return "REBUILD", state
-        stable_candidate = organisation.organisation_horizons(horizons, snapshot_now)
-        if stable_candidate < site_engine.parse_ts(state["stable_until"]):
-            return "REBUILD", state
-        return "SOURCE_ACTIVATION", state
+    stable_candidate = organisation.organisation_horizons(horizons, snapshot_now)
+    if stable_candidate < site_engine.parse_ts(state["stable_until"]):
+        return "REBUILD", state
     source_changed = any(state["device_watermarks"][key].get("consumed_until") != value.get("consumed_until")
                          for key, value in current_devices.items())
-    if retired:
-        return "SOURCE_RETIREMENT", state
     if source_changed:
         prior_stable = site_engine.parse_ts(state["stable_until"])
         if any(site_engine.parse_ts(state["device_watermarks"][key]["consumed_until"]) < prior_stable
@@ -81,7 +63,6 @@ def _org_classification(context, horizons, snapshot_now):
                for key, value in current_devices.items()):
             return "REBUILD", state
         return "INCREMENTAL", state
-    stable_candidate = organisation.organisation_horizons(horizons, snapshot_now)
     if stable_candidate > site_engine.parse_ts(state["stable_until"]):
         return "PROMOTE_ONLY", state
     if current_devices != state["device_watermarks"] or metadata_only:
@@ -98,7 +79,7 @@ def _ranges(context, classifications, previous, org_classification, snapshot_now
         classification = classifications[site_id]
         if org_classification == "REBUILD" or classification == "REBUILD":
             start = site_engine.parse_ts(site["created_at"])
-        elif classification in ("INCREMENTAL", "SOURCE_RETIREMENT", "SOURCE_ACTIVATION"):
+        elif classification == "INCREMENTAL":
             start = None  # resolved per device from its previously consumed horizon
         else:
             continue
@@ -110,10 +91,6 @@ def _ranges(context, classifications, previous, org_classification, snapshot_now
                     site_engine.parse_ts(old["consumed_until"]),
                     site_engine.parse_ts(device["created_at"]),
                 )
-                active = site["enabled"] and device["enabled"]
-                terminal_delta = not active and device_start < end
-                if not active and not terminal_delta:
-                    continue
             else:
                 device_start = max(start, site_engine.parse_ts(device["created_at"]))
             if device_start < end:
@@ -191,3 +168,4 @@ def Snapshot(organisation_id):
                         raise RuntimeError(f"Snapshot update repeatedly conflicted for organisation_id={organisation_id}") from None
     finally:
         connector.close()
+
