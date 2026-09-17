@@ -303,7 +303,7 @@ def derive_payload(machine, site, devices, state):
     year = _rollup(machine["year"], [sum(row[i] for row in machine["year"]["age_counts_by_month"]) for i in range(6)], [sum(row[i] for row in machine["year"]["sex_counts_by_month"]) for i in range(2)])
     all_time = _rollup(machine["all_time"], machine["all_time"]["age_counts"], machine["all_time"]["sex_counts"])
     occupancy = _occupancy(q)
-    dwell = [0 if count == 0 else _round_half_up(total, count)
+    dwell = [0 if count == 0 else _round_half_up(total, count * 60)
              for total, count in zip(q["dwell_sum_seconds"], q["dwell_count"])]
     capacity = []
     maximum = int(site["max_capacity"])

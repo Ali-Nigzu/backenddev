@@ -291,15 +291,28 @@ class SnapshotRepairTests(unittest.TestCase):
         self.assertEqual(2, site_engine._round_half_up(4, 2))
         self.assertEqual(2, site_engine._round_half_up(3, 2))
 
-    def test_19_dwell_is_integer_seconds(self):
+    def test_19_dwell_is_integer_minutes(self):
         site = make_site()
         machine = site_engine.new_machine(instant(10), site)
-        machine["q15"]["dwell_sum_seconds"][95] = 5
-        machine["q15"]["dwell_count"][95] = 2
+        cases = {
+            90: (1629, 1, 27),
+            91: (1649, 1, 27),
+            92: (1650, 1, 28),
+            93: (3300, 2, 28),
+            # 148 / 5 = 29.6 seconds: direct minute rounding is zero. Rounding
+            # seconds first would produce 30 seconds and incorrectly emit one.
+            94: (148, 5, 0),
+        }
+        for index, (total, count, _) in cases.items():
+            machine["q15"]["dwell_sum_seconds"][index] = total
+            machine["q15"]["dwell_count"][index] = count
         payload = site_engine.derive_payload(
             machine, site, [make_device()],
             {"device_watermarks": {"3": {"name": "Device 3"}}})
-        self.assertEqual(3, payload["dwell_time_96"][95])
+        self.assertEqual(96, len(payload["dwell_time_96"]))
+        self.assertEqual(0, payload["dwell_time_96"][95])
+        for index, (_, _, expected) in cases.items():
+            self.assertEqual(expected, payload["dwell_time_96"][index])
         self.assertTrue(all(type(value) is int for value in payload["dwell_time_96"]))
 
     def test_20_capacity_is_integer_pair_from_precise_state(self):
@@ -342,6 +355,7 @@ class SnapshotRepairTests(unittest.TestCase):
         events = [make_event("in", at=stamp(12)),
                   make_event("out", at=stamp(12, 5), event_type=0)]
         _, payload, _ = compute_site(site, [make_device(enabled=False)], events)
+        self.assertEqual([5], [value for value in payload["dwell_time_96"] if value])
         assert_integer_payload(self, payload)
 
     def test_26_organisation_payload_contains_no_float(self):
@@ -350,6 +364,7 @@ class SnapshotRepairTests(unittest.TestCase):
                   make_event("out", at=stamp(12, 5), event_type=0)]
         _, payload, _ = compute_organisation(
             [site], {2: [make_device(enabled=False)]}, events, enabled=False)
+        self.assertEqual([5], [value for value in payload["dwell_time_96"] if value])
         assert_integer_payload(self, payload)
 
     def test_27_repeated_incremental_calculation_does_not_double_count(self):
