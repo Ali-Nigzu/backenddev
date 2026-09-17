@@ -249,11 +249,31 @@ def apply_event(machine, event, site):
 
 def _pct(values):
     total = sum(values)
-    return [0.0 if total == 0 else value * 100 / total for value in values]
+    if total == 0:
+        return _zeros(len(values))
+    allocated = []
+    remainders = []
+    for index, value in enumerate(values):
+        whole, remainder = divmod(value * 100, total)
+        allocated.append(whole)
+        remainders.append((remainder, index))
+    for _, index in sorted(remainders, key=lambda item: (-item[0], item[1]))[
+            :100 - sum(allocated)]:
+        allocated[index] += 1
+    return allocated
+
+
+def _round_half_up(numerator, denominator):
+    if denominator <= 0:
+        raise ValueError("rounding denominator must be positive")
+    return (2 * numerator + denominator) // (2 * denominator)
 
 
 def _occupancy(block):
-    return [[0.0 if seconds == 0 else area / seconds, minimum, maximum] for area, seconds, minimum, maximum in zip(block["occupancy_area_person_seconds"], block["occupancy_seconds"], block["occupancy_min_positive"], block["occupancy_max"])]
+    return [[0 if seconds == 0 else _round_half_up(area, seconds), minimum, maximum]
+            for area, seconds, minimum, maximum in zip(
+                block["occupancy_area_person_seconds"], block["occupancy_seconds"],
+                block["occupancy_min_positive"], block["occupancy_max"])]
 
 
 def _rollup(block, age, sex):
@@ -269,8 +289,7 @@ def derive_payload(machine, site, devices, state):
     axes = [{"device_id": device_id, "name": current_ids[device_id]} for device_id in sorted(current_ids)]
     traffic = []
     for values in q["traffic_counts"]:
-        total = sum(values.values())
-        traffic.append([0.0 if total == 0 else values.get(str(axis["device_id"]), 0) * 100 / total for axis in axes])
+        traffic.append(_pct([values.get(str(axis["device_id"]), 0) for axis in axes]))
     peak = q["rolling_peak_occupancy"]
     today = _rollup(machine["today"], machine["today"]["age_counts"], machine["today"]["sex_counts"])
     cursor = _dt(machine["cursor_ts"])
@@ -283,8 +302,18 @@ def derive_payload(machine, site, devices, state):
     quarter = _rollup(machine["quarter"], [sum(row[i] for row in machine["quarter"]["age_counts_by_week"]) for i in range(6)], [sum(row[i] for row in machine["quarter"]["sex_counts_by_week"]) for i in range(2)])
     year = _rollup(machine["year"], [sum(row[i] for row in machine["year"]["age_counts_by_month"]) for i in range(6)], [sum(row[i] for row in machine["year"]["sex_counts_by_month"]) for i in range(2)])
     all_time = _rollup(machine["all_time"], machine["all_time"]["age_counts"], machine["all_time"]["sex_counts"])
-    averages = [0.0 if seconds == 0 else area / seconds for area, seconds in zip(q["occupancy_area_person_seconds"], q["occupancy_seconds"])]
-    return {"entrances_96": q["entrances"], "occupancy_96": averages, "exits_96": q["exits"], "footfall_96": [a + b for a, b in zip(q["entrances"], q["exits"])], "dwell_time_96": [0.0 if count == 0 else total / count for total, count in zip(q["dwell_sum_seconds"], q["dwell_count"])], "traffic_devices": axes, "traffic_split_96": traffic, "capacity": [[average * 100 / site["max_capacity"], hard * 100 / site["max_capacity"]] for average, hard in zip(averages, peak)], "today": today, "yesterday": yesterday, "week": week, "month": month, "quarter": quarter, "year": year, "all_time": all_time}
+    occupancy = _occupancy(q)
+    dwell = [0 if count == 0 else _round_half_up(total, count)
+             for total, count in zip(q["dwell_sum_seconds"], q["dwell_count"])]
+    capacity = []
+    maximum = int(site["max_capacity"])
+    for area, seconds, hard in zip(q["occupancy_area_person_seconds"],
+                                   q["occupancy_seconds"], peak):
+        average_pct = 0 if seconds == 0 else _round_half_up(
+            area * 100, seconds * maximum)
+        peak_pct = _round_half_up(hard * 100, maximum)
+        capacity.append([average_pct, peak_pct])
+    return {"entrances_96": q["entrances"], "occupancy_96": occupancy, "exits_96": q["exits"], "footfall_96": [a + b for a, b in zip(q["entrances"], q["exits"])], "dwell_time_96": dwell, "traffic_devices": axes, "traffic_split_96": traffic, "capacity": capacity, "today": today, "yesterday": yesterday, "week": week, "month": month, "quarter": quarter, "year": year, "all_time": all_time}
 
 
 # Public names for the I/O and organisation layers.
@@ -299,11 +328,9 @@ def device_horizon(device, snapshot_now=None):
 
 
 def site_horizons(site, devices, snapshot_now=None):
-    enabled = [device for device in devices
-               if site["enabled"] and device["enabled"]]
-    if not enabled:
+    if not devices:
         return None
-    values = [device_horizon(device, snapshot_now) for device in enabled]
+    values = [device_horizon(device, snapshot_now) for device in devices]
     return max(values), min(values)
 
 
@@ -352,42 +379,29 @@ def classify_site(site, devices, snapshot, snapshot_now=None):
     if set(old) != set(current):
         return "REBUILD", previous
     metadata_only = previous["site_metadata"] != current_metadata
-    retired = previous["site_metadata"].get("enabled") and not site["enabled"]
-    activated = not previous["site_metadata"].get("enabled") and site["enabled"]
     for key, value in current.items():
         before = old[key]
         if before.get("created_at") != value.get("created_at"):
             return "REBUILD", previous
-        retired = retired or before.get("enabled") and not value.get("enabled")
-        activated = activated or not before.get("enabled") and value.get("enabled")
         if _dt(value["consumed_until"]) < _dt(before["consumed_until"]):
             return "REBUILD", previous
         if before.get("name") != value.get("name"):
             metadata_only = True
-    if activated:
-        if any(not old[key].get("enabled") and value.get("enabled")
-               and _dt(old[key]["consumed_until"]) < _dt(previous["stable_until"])
-               for key, value in current.items()):
-            return "REBUILD", previous
-        active = site_horizons(site, devices, snapshot_now)
-        if active is not None and active[1] < _dt(previous["stable_until"]):
-            return "REBUILD", previous
-        return "SOURCE_ACTIVATION", previous
+    horizons = site_horizons(site, devices, snapshot_now)
+    stable_candidate = snapshot_now if horizons is None else horizons[1]
+    if stable_candidate < _dt(previous["stable_until"]):
+        return "REBUILD", previous
     source_changed = any(old[key].get("consumed_until") != value.get("consumed_until")
                          for key, value in current.items())
-    if retired:
-        return "SOURCE_RETIREMENT", previous
     if source_changed:
         prior_stable = _dt(previous["stable_until"])
         if any(_dt(old[key]["consumed_until"]) < prior_stable
                and _dt(value["consumed_until"]) > _dt(old[key]["consumed_until"])
                for key, value in current.items()):
-            # Retirement can make a checkpoint advance beyond a job that was already
-            # in flight. Truth arriving behind that checkpoint requires reconstruction.
+            # A legacy enabled-derived checkpoint may be ahead of a device's source
+            # position. Reconstruct before consuming newly analysed data behind it.
             return "REBUILD", previous
         return "INCREMENTAL", previous
-    horizons = site_horizons(site, devices, snapshot_now)
-    stable_candidate = snapshot_now if horizons is None else horizons[1]
     if stable_candidate > _dt(previous["stable_until"]):
         return "PROMOTE_ONLY", previous
     if current != old or metadata_only:
@@ -435,3 +449,4 @@ def compute_site(site, devices, snapshot, classification, previous, supplied_eve
     state = _build_state(boundary, devices, site, stable_machine, provisional,
                          snapshot_now, current)
     return snapshot_now, derive_payload(current, site, devices, state), state
+
